@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#05060c" />
+    <title>Asteroids → Elite</title>
+  </head>
+  <body>
+    <div id="hud" class="hud">
+      <div class="hud__score" data-hud="score">000000</div>
+      <div class="hud__powerup hud__powerup--inactive" data-hud="powerup">
+        <span class="hud__powerup-label" data-hud="powerupLabel">LASER</span>
+        <div class="hud__powerup-bar">
+          <div class="hud__powerup-bar-fill" data-hud="powerupBar" style="--powerup-progress: 0%"></div>
+        </div>
+        <span class="hud__powerup-timer" data-hud="powerupTimer">15.0s</span>
+      </div>
+      <div class="hud__lives" data-hud="lives">LIVES: 3</div>
+    </div>
+    <div id="overlay">
+      <div class="hud-message" data-hud="message">PRESS ANY KEY TO START</div>
+    </div>
+    <div id="debug-hud" class="debug-hud" data-debug-hud-root>
+      <div class="debug-hud__section">Debug</div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">FPS</span>
+        <span class="debug-hud__value" data-debug="fps">--</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">State</span>
+        <span class="debug-hud__value" data-debug="state">--</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Score</span>
+        <span class="debug-hud__value" data-debug="score">0</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Lives</span>
+        <span class="debug-hud__value" data-debug="lives">3</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Asteroids</span>
+        <span class="debug-hud__value" data-debug="asteroids">0</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Live chunks</span>
+        <span class="debug-hud__value" data-debug="liveChunks">0</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Verts</span>
+        <span class="debug-hud__value" data-debug="sceneVerts">0</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Tris</span>
+        <span class="debug-hud__value" data-debug="sceneTris">0</span>
+      </div>
+      <div class="debug-hud__divider"></div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Cam X</span>
+        <span class="debug-hud__value" data-debug="camX">0.00</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Cam Y</span>
+        <span class="debug-hud__value" data-debug="camY">0.00</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Cam Z</span>
+        <span class="debug-hud__value" data-debug="camZ">0.00</span>
+      </div>
+      <div class="debug-hud__divider"></div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Ship X</span>
+        <span class="debug-hud__value" data-debug="shipX">0.00</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Ship Y</span>
+        <span class="debug-hud__value" data-debug="shipY">0.00</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Ship Z</span>
+        <span class="debug-hud__value" data-debug="shipZ">0.00</span>
+      </div>
+      <div class="debug-hud__divider"></div>
+      <button class="debug-hud__toggle" id="debug-toggle-uv" type="button" data-debug="uvToggle">UV GRID: OFF</button>
+      <button class="debug-hud__toggle" id="debug-toggle-uv-viewer" type="button" data-debug="uvViewerToggle">UV UNWRAP: OFF</button>
+      <button class="debug-hud__toggle" id="debug-toggle-edit" type="button" data-debug="editToggle">EDIT OBJECT</button>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

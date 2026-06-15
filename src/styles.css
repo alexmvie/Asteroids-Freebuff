@@ -1,0 +1,1450 @@
+/* ============================================================================
+   Design tokens
+   ----------------------------------------------------------------------------
+   Single source of truth for all visual values. Every rule below uses
+   `var(--token)` — there are no hardcoded color/spacing/typography values in
+   the rest of the file. Add new tokens here when a new visual concept is
+   introduced; never inline a value.
+   ----------------------------------------------------------------------------
+   Naming convention:
+     --color-*         colors (bg, fg, accent, state)
+     --space-*         spacing scale (1=4px, 2=8px, 3=12px, 4=16px, 5=24px)
+     --font-*          typography (family, size, weight, letter-spacing)
+     --radius-*        border-radius
+     --border-*        border width / style
+     --shadow-*        box-shadow
+     --transition-*    animation duration + easing
+     --z-*             z-index (named by role, not by number)
+     --layout-*        fixed layout dimensions (header heights, panel sizes)
+   ----------------------------------------------------------------------------
+   All BEM class names: .block, .block__element, .block--modifier,
+   .block__element--modifier.
+   ============================================================================ */
+
+:root {
+  /* ---- Colors: background --------------------------------------------- */
+  --color-bg:                   #05060c;
+  --color-bg-elevated:          #0a0a14;
+  --color-bg-elevated-2:        #1a1a2e;
+  --color-bg-elevated-3:        #232336;
+  --color-bg-panel:             rgba(8, 12, 22, 0.92);
+  --color-bg-panel-fade:        rgba(8, 12, 22, 0.7);
+  --color-bg-debug:             rgba(8, 12, 22, 0.72);
+  --color-bg-tint-primary-faint: rgba(72, 219, 251, 0.08);
+  --color-bg-tint-primary-soft:  rgba(72, 219, 251, 0.10);
+  --color-bg-tint-primary-base:  rgba(72, 219, 251, 0.22);
+  --color-bg-tint-primary-bold:  rgba(72, 219, 251, 0.55);
+  --color-bg-tint-primary-bright:rgba(72, 219, 251, 0.65);
+  --color-bg-tint-danger:        rgba(255, 85, 102, 0.25);
+
+  /* ---- Colors: foreground --------------------------------------------- */
+  --color-fg:                   #e6edf6;
+  --color-fg-dim:                #97a3c4;
+  --color-fg-on-primary:         #05060c;
+
+  /* ---- Colors: accent (cyan, the game's primary) ---------------------- */
+  --color-primary:              #48dbfb;
+  --color-primary-soft:         rgba(72, 219, 251, 0.20);
+  --color-primary-base:         rgba(72, 219, 251, 0.30);
+  --color-primary-bold:         rgba(72, 219, 251, 0.50);
+  --color-primary-bright:       rgba(72, 219, 251, 0.85);
+  --color-primary-glow:         rgba(72, 219, 251, 0.6);
+  --color-primary-glow-soft:    rgba(72, 219, 251, 0.4);
+
+  /* ---- Colors: state (danger / warn) ---------------------------------- */
+  --color-danger:               #ff5566;
+  --color-danger-glow:          rgba(255, 85, 102, 0.6);
+  --color-danger-soft:          rgba(255, 85, 102, 0.65);
+  --color-warn:                 #ff8844;
+
+  /* ---- Spacing scale -------------------------------------------------- */
+  --space-quarter:              1px;
+  --space-half:                 2px;
+  --space-three-quarters:       3px;
+  --space-1:                    4px;
+  --space-2:                    8px;
+  --space-3:                    12px;
+  --space-4:                    16px;
+  --space-5:                    24px;
+
+  /* ---- Typography ----------------------------------------------------- */
+  --font-family:                'Courier New', 'Consolas', monospace;
+  --font-size-xs:               9px;
+  --font-size-sm:               10px;
+  --font-size-md:               11px;
+  --font-size-lg:               18px;
+  --font-size-xl:               32px;
+  --font-weight-normal:         400;
+  --font-weight-bold:           700;
+  --letter-spacing-tight:       0.04em;
+  --letter-spacing-base:        0.06em;
+  --letter-spacing-wide:        0.08em;
+  --letter-spacing-wider:       0.12em;
+  --letter-spacing-widest:      0.15em;
+
+  /* ---- Borders -------------------------------------------------------- */
+  --radius-sm:                  2px;
+  --radius-md:                  3px;
+  --radius-lg:                  4px;
+  --border-width:               1px;
+
+  /* ---- Shadows -------------------------------------------------------- */
+  --shadow-panel:               0 8px 24px rgba(0, 0, 0, 0.5);
+
+  /* ---- Motion (animation offsets) ------------------------------------- */
+  --motion-translate-vertical:  -6px;
+
+  /* ---- Transitions ---------------------------------------------------- */
+  --transition-fast:            0.10s ease;
+  --transition-base:            0.12s ease;
+  --transition-slow:            0.15s ease;
+
+  /* ---- Z-indexes (named by role) -------------------------------------- */
+  --z-canvas:                   1;
+  --z-hud:                      10;
+  --z-overlay:                  11;
+  --z-debug:                    12;
+  --z-uv-viewer:                13;
+  --z-edit-screen:              20;
+
+  /* ---- Layout --------------------------------------------------------- */
+  --debug-hud-min-width:        180px;
+  --uv-viewer-width:            520px;
+  --uv-viewer-height:           460px;
+  --edit-screen-header-height:  44px;
+  --edit-screen-footer-height:  52px;
+  --edit-screen-sidebar-width:  44%;
+  --edit-screen-sidebar-min-width: 360px;
+  --edit-screen-info-height:    40%;
+  --edit-screen-info-min-height: 200px;
+  --edit-screen-3d-hint-max-width: 320px;
+  --grip-size:                  16px;
+
+  /* ---- Typography: line heights -------------------------------------- */
+  --line-height-base:           1.5;
+  --line-height-tight:          1.4;
+  --line-height-icon:           1;
+}
+
+/* ============================================================================
+   Reset / canvas
+   ============================================================================ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-family);
+  overflow: hidden;
+  user-select: none;
+}
+
+canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+/* ============================================================================
+   Block: hud  (top bar: score, lives)
+   ============================================================================ */
+
+.hud {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  justify-content: space-between;
+  pointer-events: none;
+  z-index: var(--z-hud);
+}
+
+.hud__score,
+.hud__lives {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  color: var(--color-primary);
+  text-shadow: 0 0 var(--space-2) var(--color-primary-glow-soft);
+}
+
+/* ============================================================================
+   Block: hud__powerup  (centered status panel between score and lives)
+   ----------------------------------------------------------------------------
+   Shows the active power-up's label + draining bar + seconds remaining.
+   Hidden by default (`.hud__powerup--inactive`); the render loop removes
+   the class when a power-up is active. The bar fill is driven by the
+   `--powerup-progress` CSS custom property (set by src/ui/hud.js on every
+   frame). When the bar drops below 20% the `--low` modifier adds a subtle
+   pulse to warn the player.
+   ============================================================================ */
+
+.hud__powerup {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  opacity: 1;
+  transition: opacity var(--transition-base);
+  min-width: 0;
+}
+
+.hud__powerup--inactive {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hud__powerup-label {
+  color: #4dabf7; /* sky blue (matches the laser beam) */
+  font-weight: var(--font-weight-bold);
+  font-size: var(--font-size-md);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  text-shadow: 0 0 var(--space-2) rgba(77, 171, 247, 0.55);
+  white-space: nowrap;
+}
+
+.hud__powerup-bar {
+  flex: 1;
+  max-width: 220px;
+  height: var(--space-3);
+  background: var(--color-bg-elevated-2);
+  border: var(--border-width) solid rgba(77, 171, 247, 0.45);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  position: relative;
+}
+
+.hud__powerup-bar-fill {
+  width: var(--powerup-progress, 0%);
+  height: 100%;
+  background: linear-gradient(90deg, #48dbfb, #4dabf7);
+  box-shadow: 0 0 var(--space-2) rgba(77, 171, 247, 0.7);
+  transition: width 0.1s linear;
+}
+
+.hud__powerup--low .hud__powerup-bar-fill {
+  animation: hud-powerup-low-pulse 0.6s ease-in-out infinite alternate;
+}
+
+@keyframes hud-powerup-low-pulse {
+  from { opacity: 0.6; }
+  to   { opacity: 1; }
+}
+
+.hud__powerup--low .hud__powerup-label,
+.hud__powerup--low .hud__powerup-timer {
+  color: var(--color-warn);
+  text-shadow: 0 0 var(--space-2) rgba(255, 136, 68, 0.55);
+}
+
+.hud__powerup-timer {
+  color: var(--color-fg);
+  font-weight: var(--font-weight-bold);
+  font-size: var(--font-size-md);
+  font-variant-numeric: tabular-nums;
+  min-width: 48px;
+  text-align: right;
+  letter-spacing: var(--letter-spacing-base);
+}
+
+/* ============================================================================
+   Block: hud-message  (centered overlay: start / game over)
+   ============================================================================ */
+
+.hud-message {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: var(--z-overlay);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-widest);
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--color-primary);
+  text-shadow: 0 0 var(--space-3) var(--color-primary-glow);
+}
+
+.hud-message--demo {
+  /* Position the start prompt at the bottom of the screen (the
+     GAME_OVER message, which shares the .hud-message base, stays
+     centered via the unmodified base rule). The 500ms on/off flash
+     is driven by JS in src/ui/hud.js (recursive setTimeout, cleanly
+     destructible on state change or dispose). The class is also a
+     visual marker (cyan glow) — see the base rule above. */
+  align-items: flex-end;
+  padding-bottom: var(--space-5);
+}
+
+/* Toggled by the JS flash loop in src/ui/hud.js. When the message
+   is in the "off" half of the blink cycle, this class is added;
+   otherwise it's removed. */
+.hud-message--flash-off {
+  opacity: 0;
+}
+
+.hud-message--gameover {
+  color: var(--color-danger);
+  text-shadow: 0 0 var(--space-3) var(--color-danger-glow);
+}
+
+.hud-message--hidden {
+  display: none;
+}
+
+/* ============================================================================
+   Block: debug-hud  (bottom-left diagnostic panel)
+   ============================================================================ */
+
+.debug-hud {
+  position: fixed;
+  bottom: var(--space-3);
+  left: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-lg);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-base);
+  letter-spacing: var(--letter-spacing-tight);
+  color: var(--color-fg-dim);
+  pointer-events: none;
+  z-index: var(--z-debug);
+  min-width: var(--debug-hud-min-width);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.debug-hud__section {
+  color: var(--color-primary);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-bold);
+  font-size: var(--font-size-sm);
+  letter-spacing: var(--letter-spacing-wide);
+  margin-bottom: var(--space-half);
+}
+
+.debug-hud__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.debug-hud__label {
+  color: var(--color-primary);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-bold);
+}
+
+.debug-hud__value {
+  color: var(--color-fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.debug-hud__divider {
+  height: var(--border-width);
+  margin: var(--space-1) 0;
+  background: var(--color-primary-soft);
+}
+
+.debug-hud__warn {
+  color: var(--color-warn);
+}
+
+/* ============================================================================
+   Block: debug-hud__toggle  (clickable buttons inside the otherwise-readonly
+   debug overlay. `pointer-events: auto` overrides the container's
+   `pointer-events: none` so the overlay doesn't block canvas clicks.)
+   ============================================================================ */
+
+.debug-hud__toggle {
+  pointer-events: auto;
+  display: block;
+  width: 100%;
+  margin-top: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-bg-tint-primary-soft);
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-md);
+  color: var(--color-fg);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base);
+}
+
+.debug-hud__toggle:hover {
+  background: var(--color-bg-tint-primary-base);
+  border-color: var(--color-primary-bright);
+}
+
+.debug-hud__toggle:active {
+  transform: translateY(1px);
+}
+
+.debug-hud__toggle--on {
+  background: var(--color-bg-tint-primary-bold);
+  border-color: var(--color-primary);
+  color: var(--color-fg-on-primary);
+}
+
+.debug-hud__toggle--on:hover {
+  background: var(--color-bg-tint-primary-bright);
+}
+
+/* ============================================================================
+   Block: uv-viewer  (floating 3ds-Max-style UV editor)
+   ----------------------------------------------------------------------------
+   The panel is `position: fixed` by default (floating). When mounted under a
+   non-body parent (e.g. inside .edit-screen__uv), it falls back to
+   `position: static` so it fills the host container.
+   ============================================================================ */
+
+.uv-viewer {
+  position: fixed;
+  top: var(--space-3);
+  right: var(--space-3);
+  width: var(--uv-viewer-width);
+  height: var(--uv-viewer-height);
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-panel);
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-lg);
+  font-family: var(--font-family);
+  color: var(--color-fg);
+  z-index: var(--z-uv-viewer);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(var(--motion-translate-vertical));
+  transition:
+    opacity var(--transition-slow),
+    transform var(--transition-slow);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  box-shadow: var(--shadow-panel);
+}
+
+.uv-viewer--visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* When mounted inside a host (e.g. the edit screen's UV slot), fill the
+   parent instead of floating. The toggle class is added by the viewer
+   when it detects a non-body parent. */
+.uv-viewer--embedded {
+  position: static;
+  top: auto;
+  right: auto;
+  width: 100%;
+  height: 100%;
+  opacity: 1;
+  transform: none;
+  box-shadow: none;
+  border: none;
+  background: var(--color-bg-elevated);
+}
+
+.uv-viewer__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--border-width) solid var(--color-primary-soft);
+  background: var(--color-bg-tint-primary-faint);
+  font-size: var(--font-size-md);
+  letter-spacing: var(--letter-spacing-base);
+  cursor: move;
+  user-select: none;
+}
+
+.uv-viewer__title {
+  color: var(--color-primary);
+  font-weight: var(--font-weight-bold);
+  text-transform: uppercase;
+}
+
+.uv-viewer__name {
+  flex: 1;
+  color: var(--color-fg);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.uv-viewer__close {
+  background: transparent;
+  border: var(--border-width) solid var(--color-primary-base);
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-icon);
+  width: var(--space-5);
+  height: var(--space-5);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background var(--transition-base),
+    color var(--transition-base);
+}
+
+.uv-viewer__close:hover {
+  background: var(--color-bg-tint-danger);
+  border-color: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+
+.uv-viewer__canvas {
+  display: block;
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  background: var(--color-bg-elevated);
+  cursor: grab;
+  touch-action: none;
+}
+
+.uv-viewer__canvas:active {
+  cursor: grabbing;
+}
+
+.uv-viewer__tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-top: var(--border-width) solid var(--color-primary-soft);
+  background: var(--color-bg-panel-fade);
+  font-size: var(--font-size-sm);
+}
+
+.uv-viewer__tool {
+  background: var(--color-bg-tint-primary-faint);
+  border: var(--border-width) solid var(--color-primary-soft);
+  color: var(--color-fg-dim);
+  font-family: inherit;
+  /* Bigger than the old 9px default — toolbar buttons are
+     touch-friendly and easy to aim at, addressing the
+     user's "the UI is too small" complaint. */
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-base);
+  text-transform: uppercase;
+  padding: var(--space-2) var(--space-3);
+  min-height: 32px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.uv-viewer__tool:hover {
+  background: var(--color-bg-tint-primary-base);
+  color: var(--color-fg);
+  border-color: var(--color-primary-bold);
+}
+
+.uv-viewer__tool:active {
+  transform: translateY(var(--space-quarter));
+}
+
+.uv-viewer__tool--active {
+  background: var(--color-bg-tint-primary-bold);
+  border-color: var(--color-primary-bright);
+  color: var(--color-fg-on-primary);
+}
+
+.uv-viewer__tool--active:hover {
+  background: var(--color-bg-tint-primary-bright);
+}
+
+/* Primary action button — the Smart Unwrap "one click" CTA.
+   Stands out from the other tools with a cyan glow so the
+   user notices it. */
+.uv-viewer__tool--primary {
+  background: var(--color-bg-tint-primary-bold);
+  border-color: var(--color-primary-bright);
+  color: var(--color-fg-on-primary);
+  text-shadow: 0 0 var(--space-1) var(--color-primary-glow-soft);
+}
+.uv-viewer__tool--primary:hover {
+  background: var(--color-bg-tint-primary-bright);
+  box-shadow: 0 0 var(--space-2) var(--color-primary-glow-soft);
+}
+
+/* START UNWRAP — the dominant action. Spans the full width
+   of the tools bar so the user can't miss it. Bigger font,
+   bigger padding, glowing border. The cyan glow pulse on
+   hover calls attention to it without being noisy. */
+.uv-viewer__tool--start-unwrap {
+  flex: 1 1 100%;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  padding: var(--space-3) var(--space-4);
+  min-height: 48px;
+  background: var(--color-bg-tint-primary-bright);
+  border: 2px solid var(--color-primary);
+  color: var(--color-fg-on-primary);
+  text-shadow: 0 0 var(--space-2) var(--color-primary-glow);
+  box-shadow: 0 0 var(--space-3) var(--color-primary-glow-soft);
+  margin-bottom: var(--space-1);
+}
+.uv-viewer__tool--start-unwrap:hover {
+  background: var(--color-primary);
+  color: var(--color-fg-on-primary);
+  box-shadow: 0 0 var(--space-4) var(--color-primary-glow);
+  transform: translateY(-1px);
+}
+.uv-viewer__tool--start-unwrap:active {
+  transform: translateY(0);
+}
+
+/* '...' advanced-toggle button — visually subtle so the
+   essential row stays clean, but highlighted when the
+   advanced section is open. */
+.uv-viewer__tool--more {
+  font-size: var(--font-size-lg);
+  padding: var(--space-1) var(--space-3);
+  min-width: 40px;
+  letter-spacing: 0;
+}
+.uv-viewer__tool--more--active {
+  background: var(--color-bg-tint-primary-bold);
+  border-color: var(--color-primary-bright);
+  color: var(--color-fg-on-primary);
+}
+
+/* START UNWRAP param panel — sits directly under the big
+   START UNWRAP button, full width. Compact 1-row layout
+   (4 small fields: AUTO toggle, THRESH, MARGIN, BUDGET).
+   The user explicitly asked for these to be visible
+   "beside" the button (actually below, since the button
+   is full-width) so they can tune them before pressing
+   the button. Each control has its own tooltip
+   (driven by the `title` attribute in the HTML). */
+.uv-viewer__start-params {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-2) var(--space-2);
+  background: var(--color-bg-tint-primary-faint);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-1);
+  font-size: var(--font-size-sm);
+}
+.uv-viewer__start-param {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-fg-dim);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-base);
+  font-size: var(--font-size-sm);
+  cursor: help;
+  white-space: nowrap;
+}
+.uv-viewer__start-param > span:first-child {
+  color: var(--color-primary);
+  min-width: 50px;
+}
+.uv-viewer__start-param__unit {
+  color: var(--color-fg-dim);
+  font-weight: var(--font-weight-normal);
+  font-size: var(--font-size-sm);
+  margin-left: 2px;
+}
+.uv-viewer__start-param input[type="checkbox"] {
+  width: var(--space-3);
+  height: var(--space-3);
+  margin: 0;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+.uv-viewer__start-param input[type="number"] {
+  width: 48px;
+  padding: 2px var(--space-1);
+  background: var(--color-bg-elevated-2);
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-sm);
+  color: var(--color-fg);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  cursor: text;
+  -moz-appearance: textfield;
+}
+.uv-viewer__start-param input[type="number"]::-webkit-outer-spin-button,
+.uv-viewer__start-param input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.uv-viewer__start-param input[type="number"]:focus {
+  outline: var(--border-width) solid var(--color-primary);
+  outline-offset: 1px;
+  border-color: var(--color-primary);
+}
+.uv-viewer__start-param:has(input[type="checkbox"]:checked) {
+  color: var(--color-fg);
+}
+.uv-viewer__start-param:has(input[type="checkbox"]:checked) > span:first-child {
+  color: var(--color-fg-on-primary);
+  background: var(--color-bg-tint-primary-bold);
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-sm);
+  margin-left: -2px;
+}
+
+/* Advanced tools section — hidden by default. Shown when
+   the '...' button is toggled. Wraps to a new line when
+   the essential row is full. */
+.uv-viewer__tools__advanced {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  align-items: center;
+  flex: 1 1 100%;
+  padding-top: var(--space-1);
+  border-top: var(--border-width) dashed var(--color-primary-soft);
+  margin-top: var(--space-1);
+}
+.uv-viewer__tools__advanced--hidden {
+  display: none;
+}
+
+/* Solver dropdown (Expert mode picker) — matches the
+   toolbar button height and color scheme. */
+.uv-viewer__select {
+  background: var(--color-bg-tint-primary-soft);
+  border: var(--border-width) solid var(--color-primary-base);
+  color: var(--color-fg);
+  font-family: inherit;
+  /* Match the bigger toolbar buttons. */
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-base);
+  text-transform: uppercase;
+  padding: var(--space-1) var(--space-2);
+  min-height: 32px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+.uv-viewer__select:hover {
+  background: var(--color-bg-tint-primary-base);
+  border-color: var(--color-primary-bright);
+}
+.uv-viewer__select:focus {
+  outline: var(--border-width) solid var(--color-primary);
+  outline-offset: 1px;
+}
+.uv-viewer__select:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  color: var(--color-fg-dim);
+}
+.uv-viewer__select option {
+  background: var(--color-bg-elevated);
+  color: var(--color-fg);
+}
+
+/* Auto / Expert mode toggle — two side-by-side buttons,
+   one highlighted as active. */
+.uv-viewer__mode-toggle {
+  display: inline-flex;
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.uv-viewer__mode-btn {
+  background: var(--color-bg-tint-primary-faint);
+  border: 0;
+  color: var(--color-fg-dim);
+  font-family: inherit;
+  /* Match the bigger toolbar buttons. */
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-base);
+  text-transform: uppercase;
+  padding: var(--space-1) var(--space-3);
+  min-height: 32px;
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast);
+}
+.uv-viewer__mode-btn:hover {
+  background: var(--color-bg-tint-primary-base);
+  color: var(--color-fg);
+}
+.uv-viewer__mode-btn--active {
+  background: var(--color-bg-tint-primary-bold);
+  color: var(--color-fg-on-primary);
+}
+.uv-viewer__mode-btn--active:hover {
+  background: var(--color-bg-tint-primary-bright);
+}
+
+.uv-viewer__tools__sep {
+  width: var(--border-width);
+  background: var(--color-primary-soft);
+  margin: var(--space-half) var(--space-1);
+  align-self: stretch;
+}
+
+.uv-viewer__footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-top: var(--border-width) solid var(--color-primary-soft);
+  background: var(--color-bg-tint-primary-faint);
+  font-size: var(--font-size-sm);
+  letter-spacing: var(--letter-spacing-tight);
+}
+
+.uv-viewer__stats {
+  flex: 1;
+  color: var(--color-fg-dim);
+  text-transform: uppercase;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.uv-viewer__btn {
+  background: var(--color-bg-tint-primary-soft);
+  border: var(--border-width) solid var(--color-primary-base);
+  color: var(--color-fg);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-base);
+  text-transform: uppercase;
+  padding: var(--space-three-quarters) var(--space-2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base);
+}
+
+.uv-viewer__btn:hover {
+  background: var(--color-bg-tint-primary-base);
+  border-color: var(--color-primary-bright);
+}
+
+.uv-viewer__btn:active {
+  transform: translateY(var(--space-quarter));
+}
+
+.uv-viewer__resize-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: var(--grip-size);
+  height: var(--grip-size);
+  cursor: nwse-resize;
+  background:
+    linear-gradient(
+      135deg,
+      transparent 50%,
+      var(--color-primary-glow) 50%,
+      var(--color-primary-glow) 60%,
+      transparent 60%,
+      transparent 70%,
+      var(--color-primary-glow) 70%,
+      var(--color-primary-glow) 80%,
+      transparent 80%
+    );
+}
+
+.uv-viewer__resize-grip:hover {
+  background:
+    linear-gradient(
+      135deg,
+      transparent 50%,
+      var(--color-primary) 50%,
+      var(--color-primary) 60%,
+      transparent 60%,
+      transparent 70%,
+      var(--color-primary) 70%,
+      var(--color-primary) 80%,
+      transparent 80%
+    );
+}
+
+/* ============================================================================
+   Block: uv-viewer__keys  (keyboard-shortcut legend modal)
+   ----------------------------------------------------------------------------
+   Toggled by the '?' button in the footer (and the global `?` hotkey).
+   Lives inside the .uv-viewer panel as a centered overlay. The backdrop
+   is a transparent div that catches click-to-dismiss; the panel is the
+   actual content card. `hidden` is the standard HTML attribute used to
+   show/hide (driven by toggleKeyboardLegend in the orchestrator).
+   ============================================================================ */
+
+.uv-viewer__keys {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--z-overlay);
+  border-radius: inherit;
+}
+
+.uv-viewer__keys[hidden] {
+  display: none;
+}
+
+.uv-viewer__keys__backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--color-bg-panel);
+  opacity: 0.85;
+  border-radius: inherit;
+  cursor: pointer;
+}
+
+.uv-viewer__keys__panel {
+  position: relative;
+  width: calc(100% - var(--space-5));
+  max-height: calc(100% - var(--space-5));
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-elevated);
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+  font-size: var(--font-size-md);
+  letter-spacing: var(--letter-spacing-tight);
+}
+
+.uv-viewer__keys__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--border-width) solid var(--color-primary-soft);
+  background: var(--color-bg-tint-primary-faint);
+}
+
+.uv-viewer__keys__title {
+  color: var(--color-primary);
+  font-weight: var(--font-weight-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-wider);
+  font-size: var(--font-size-md);
+}
+
+.uv-viewer__keys__close {
+  background: transparent;
+  border: var(--border-width) solid var(--color-primary-base);
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-icon);
+  width: var(--space-5);
+  height: var(--space-5);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background var(--transition-base),
+    color var(--transition-base),
+    border-color var(--transition-base);
+}
+
+.uv-viewer__keys__close:hover {
+  background: var(--color-bg-tint-danger);
+  border-color: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+
+.uv-viewer__keys__body {
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+  max-height: 100%;
+}
+
+.uv-viewer__keys__table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--color-fg);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-base);
+}
+
+.uv-viewer__keys__table thead th {
+  text-align: left;
+  color: var(--color-primary);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wide);
+  font-size: var(--font-size-sm);
+  padding: var(--space-1) var(--space-2);
+  border-bottom: var(--border-width) solid var(--color-primary-soft);
+  background: var(--color-bg-tint-primary-faint);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.uv-viewer__keys__table tbody td {
+  padding: var(--space-1) var(--space-2);
+  border-bottom: var(--border-width) solid var(--color-primary-soft);
+  vertical-align: top;
+}
+
+.uv-viewer__keys__table tbody td:first-child {
+  white-space: nowrap;
+  width: 1%;
+  color: var(--color-primary);
+}
+
+.uv-viewer__keys__table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.uv-viewer__keys__table kbd {
+  display: inline-block;
+  padding: 1px var(--space-1);
+  background: var(--color-bg-elevated-2);
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-primary);
+  letter-spacing: 0;
+  margin: 0 1px;
+}
+
+/* Active state for the '?' button when the legend is open
+   (matches the visual treatment of the other "active" tool
+   buttons). The orchestrator's toggleKeyboardLegend
+   toggles the class. */
+.uv-viewer__btn--active {
+  background: var(--color-bg-tint-primary-bold);
+  border-color: var(--color-primary-bright);
+  color: var(--color-fg-on-primary);
+}
+
+.uv-viewer__btn--active:hover {
+  background: var(--color-bg-tint-primary-bright);
+}
+
+/* ============================================================================
+   Block: edit-screen  (full-screen modal: 3D + UV editor + info box)
+   ----------------------------------------------------------------------------
+   Pauses the game on open. The 3D scene is the existing canvas (behind the
+   modal); the UV editor lives in the right sidebar; the info box shows the
+   selected object's stats. Close with the X or Esc.
+   ============================================================================ */
+
+.edit-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg);
+  pointer-events: none;
+  opacity: 0;
+  z-index: var(--z-edit-screen);
+  transition: opacity var(--transition-slow);
+  /* Opaque — the GPU does NOT render the main scene behind
+     this modal. The 3D area inside the modal has its own
+     dedicated, lightweight renderer. */
+}
+
+.edit-screen--visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.edit-screen__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--edit-screen-header-height);
+  padding: 0 var(--space-4);
+  background: var(--color-bg-panel);
+  border-bottom: var(--border-width) solid var(--color-primary-base);
+  font-size: var(--font-size-md);
+  letter-spacing: var(--letter-spacing-base);
+  flex-shrink: 0;
+}
+
+.edit-screen__title {
+  color: var(--color-primary);
+  font-weight: var(--font-weight-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-wider);
+}
+
+.edit-screen__name {
+  flex: 1;
+  color: var(--color-fg);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.edit-screen__close {
+  background: transparent;
+  border: var(--border-width) solid var(--color-primary-base);
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--font-size-xl);
+  line-height: var(--line-height-icon);
+  width: var(--space-5);
+  height: var(--space-5);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background var(--transition-base),
+    color var(--transition-base),
+    border-color var(--transition-base);
+}
+
+.edit-screen__close:hover {
+  background: var(--color-bg-tint-danger);
+  border-color: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+
+.edit-screen__body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.edit-screen__3d {
+  flex: 1;
+  position: relative;
+  background: var(--color-bg-elevated);
+  /* pointer-events: auto (default) — the mini canvas needs to
+     receive pointer events for orbit controls. The 3D area
+     is part of the modal which is itself interactive when
+     the modal is visible. */
+  overflow: hidden;
+}
+
+.edit-screen__mini-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+
+.edit-screen__mini-canvas:active {
+  cursor: grabbing;
+}
+
+.edit-screen__3d-hint {
+  position: absolute;
+  top: var(--space-3);
+  left: var(--space-3);
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-bg-panel);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-md);
+  color: var(--color-fg-dim);
+  font-size: var(--font-size-sm);
+  letter-spacing: var(--letter-spacing-tight);
+  pointer-events: none;
+  max-width: var(--edit-screen-3d-hint-max-width);
+}
+
+.edit-screen__side {
+  width: var(--edit-screen-sidebar-width);
+  min-width: var(--edit-screen-sidebar-min-width);
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-panel);
+  border-left: var(--border-width) solid var(--color-primary-base);
+}
+
+.edit-screen__uv {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  border-bottom: var(--border-width) solid var(--color-primary-soft);
+}
+
+.edit-screen__info {
+  height: var(--edit-screen-info-height);
+  min-height: var(--edit-screen-info-min-height);
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-3);
+  overflow: auto;
+  background: var(--color-bg-elevated);
+}
+
+.edit-screen__info-title {
+  color: var(--color-primary);
+  font-weight: var(--font-weight-bold);
+  text-transform: uppercase;
+  font-size: var(--font-size-sm);
+  letter-spacing: var(--letter-spacing-wide);
+  margin-bottom: var(--space-2);
+  padding-bottom: var(--space-1);
+  border-bottom: var(--border-width) solid var(--color-primary-soft);
+}
+
+.edit-screen__info-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-half);
+}
+
+.edit-screen__info-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-tight);
+}
+
+.edit-screen__info-key {
+  color: var(--color-primary);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-bold);
+}
+
+.edit-screen__info-val {
+  color: var(--color-fg);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edit-screen__info-empty {
+  color: var(--color-fg-dim);
+  font-style: italic;
+  font-size: var(--font-size-sm);
+  padding: var(--space-2) 0;
+}
+
+.edit-screen__footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--edit-screen-footer-height);
+  padding: 0 var(--space-4);
+  background: var(--color-bg-panel);
+  border-top: var(--border-width) solid var(--color-primary-base);
+  flex-shrink: 0;
+}
+
+.edit-screen__status {
+  flex: 1;
+  color: var(--color-fg-dim);
+  font-size: var(--font-size-sm);
+  letter-spacing: var(--letter-spacing-tight);
+  text-transform: uppercase;
+}
+
+.edit-screen__btn {
+  background: var(--color-bg-tint-primary-soft);
+  border: var(--border-width) solid var(--color-primary-base);
+  color: var(--color-fg);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base);
+}
+
+.edit-screen__btn:hover {
+  background: var(--color-bg-tint-primary-base);
+  border-color: var(--color-primary-bright);
+}
+
+.edit-screen__btn:active {
+  transform: translateY(var(--space-quarter));
+}
+
+.edit-screen__btn--primary {
+  background: var(--color-bg-tint-primary-bold);
+  border-color: var(--color-primary-bright);
+  color: var(--color-fg-on-primary);
+}
+
+.edit-screen__btn--primary:hover {
+  background: var(--color-bg-tint-primary-bright);
+}
+
+.edit-screen__btn--active {
+  background: var(--color-bg-tint-danger);
+  border-color: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+
+/* Toggle checkbox (e.g. ANIM) inside the edit screen footer. */
+.edit-screen__checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-half) var(--space-2);
+  background: var(--color-bg-tint-primary-soft);
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-md);
+  color: var(--color-fg-dim);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-base);
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background var(--transition-base),
+    color var(--transition-base),
+    border-color var(--transition-base);
+}
+
+.edit-screen__checkbox:hover {
+  background: var(--color-bg-tint-primary-base);
+  border-color: var(--color-primary-bright);
+  color: var(--color-fg);
+}
+
+.edit-screen__checkbox input[type="checkbox"] {
+  width: var(--space-3);
+  height: var(--space-3);
+  margin: 0;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+
+.edit-screen__checkbox:has(input:checked) {
+  background: var(--color-bg-tint-primary-bold);
+  border-color: var(--color-primary-bright);
+  color: var(--color-fg-on-primary);
+}
+
+.edit-screen__checkbox:has(input:checked):hover {
+  background: var(--color-bg-tint-primary-bright);
+}
+
+/* ============================================================================
+   Block: edit-screen__pick-hint
+   ----------------------------------------------------------------------------
+   A small banner at the top of the screen shown during pick mode (between
+   the user clicking EDIT OBJECT and the user clicking an asteroid). The
+   main 3D view is visible behind it; the user clicks an asteroid to
+   open the full editor screen.
+   ============================================================================ */
+
+.edit-screen__pick-hint {
+  position: fixed;
+  top: var(--space-4);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-bg-panel);
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-md);
+  color: var(--color-fg);
+  font-size: var(--font-size-md);
+  letter-spacing: var(--letter-spacing-base);
+  pointer-events: auto;
+  z-index: var(--z-edit-screen);
+  box-shadow: var(--shadow-panel);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-bold);
+}
+
+.edit-screen__pick-hint strong {
+  color: var(--color-primary);
+  letter-spacing: var(--letter-spacing-wider);
+}
+
+.edit-screen__pick-hint__sub {
+  color: var(--color-fg-dim);
+  font-weight: var(--font-weight-normal);
+  text-transform: none;
+  letter-spacing: var(--letter-spacing-tight);
+}
+
+.edit-screen__pick-hint__sub kbd {
+  display: inline-block;
+  padding: var(--space-quarter) var(--space-1);
+  background: var(--color-bg-elevated-2);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-primary);
+}
+
+.edit-screen__pick-hint--hidden {
+  display: none;
+}

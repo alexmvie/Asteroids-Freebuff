@@ -1,0 +1,21 @@
+{
+  "name": "asteroids-freebuff",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "3D Asteroids MVP that doubles as the jumping-off point for an Elite-style game. See SPEC.md.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test tests/",
+    "dump:field": "node scripts/dump-field.js",
+    "dump:field:svg": "node scripts/dump-field-svg.js"
+  },
+  "dependencies": {
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  }
+}
