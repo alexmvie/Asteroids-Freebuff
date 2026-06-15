@@ -32,11 +32,13 @@ const els = {
   paramElitism: document.getElementById('param-elitism'),
   paramEpisodes: document.getElementById('param-episodes'),
   paramDt: document.getElementById('param-dt'),
+  paramPreset: document.getElementById('param-preset'),
   hintMovementReward: document.getElementById('hint-movement-reward'),
   hintMutationRate: document.getElementById('hint-mutation-rate'),
   hintMutationStrength: document.getElementById('hint-mutation-strength'),
   hintElitism: document.getElementById('hint-elitism'),
   hintArchHidden: document.getElementById('hint-arch-hidden'),
+  hintPreset: document.getElementById('hint-preset'),
   logEntries: document.getElementById('log-entries'),
   uploadArea: document.getElementById('upload-area'),
   uploadInput: document.getElementById('upload-input'),
@@ -298,6 +300,122 @@ function updateElitismHint() {
 function updateArchHiddenHint() {
   const h = parseInt(els.paramHidden.value, 10) || 12;
   if (els.hintArchHidden) els.hintArchHidden.textContent = h;
+}
+
+// -----------------------------------------------------------------------
+// Training presets — one-click configurations that override every slider
+// below. The single source of truth is PRESETS (each preset is a flat
+// object matching the form input ids).
+// -----------------------------------------------------------------------
+
+const PRESETS = Object.freeze({
+  balanced: {
+    populationSize: 100,
+    hiddenSize: 12,
+    maxDurationS: 60,
+    movementReward: 0.5,
+    seedStrategy: 'vary',
+    mutationRate: 0.15,
+    mutationStrength: 0.3,
+    elitismFraction: 0.05,
+    episodesPerGenome: 1,
+    dt: 0.016666,
+    label: '⚖ Balanced — 100 pop, 12 hidden, 60s, 0.5 movement',
+  },
+  fast: {
+    populationSize: 50,
+    hiddenSize: 12,
+    maxDurationS: 30,
+    movementReward: 0,
+    seedStrategy: 'vary',
+    mutationRate: 0.15,
+    mutationStrength: 0.3,
+    elitismFraction: 0.05,
+    episodesPerGenome: 1,
+    dt: 0.016666,
+    label: '⚡ Fast — 50 pop, 12 hidden, 30s, no movement reward',
+  },
+  powerup: {
+    populationSize: 200,
+    hiddenSize: 24,
+    maxDurationS: 60,
+    movementReward: 1.0,
+    seedStrategy: 'vary',
+    mutationRate: 0.15,
+    mutationStrength: 0.3,
+    elitismFraction: 0.05,
+    episodesPerGenome: 1,
+    dt: 0.016666,
+    label: '🎯 Power-up hunter — 200 pop, 24 hidden, 60s, 1.0 movement, vary seeds',
+  },
+  plateau: {
+    populationSize: 100,
+    hiddenSize: 12,
+    maxDurationS: 60,
+    movementReward: 0.5,
+    seedStrategy: 'vary',
+    mutationRate: 0.25,
+    mutationStrength: 0.5,
+    elitismFraction: 0.05,
+    episodesPerGenome: 1,
+    dt: 0.016666,
+    label: '💥 Plateau buster — 100 pop, 12 hidden, 60s, 0.25 mutation, 0.5 strength',
+  },
+});
+
+// Map form input ids → els refs (cached once for speed)
+const PRESET_INPUT_MAP = {
+  populationSize: 'paramPop',
+  hiddenSize: 'paramHidden',
+  maxDurationS: 'paramDuration',
+  movementReward: 'paramMovementReward',
+  seedStrategy: 'paramSeedStrategy',
+  mutationRate: 'paramMutationRate',
+  mutationStrength: 'paramMutationStrength',
+  elitismFraction: 'paramElitism',
+  episodesPerGenome: 'paramEpisodes',
+  dt: 'paramDt',
+};
+
+/**
+ * Apply a preset by name (or the string 'custom' to leave values alone).
+ * Sets every relevant input's value, then re-paints all hints.
+ */
+function applyPreset(name) {
+  if (name === 'custom') {
+    els.hintPreset.textContent = "You're on custom — tweak the sliders below";
+    return;
+  }
+  const preset = PRESETS[name];
+  if (!preset) return;
+  for (const [key, inputId] of Object.entries(PRESET_INPUT_MAP)) {
+    const el = els[inputId];
+    if (el && preset[key] != null) {
+      el.value = String(preset[key]);
+    }
+  }
+  // Re-paint every hint so the labels reflect the new values
+  updateMovementRewardHint();
+  updateMutationRateHint();
+  updateMutationStrengthHint();
+  updateElitismHint();
+  updateArchHiddenHint();
+  els.hintPreset.textContent = `Preset applied: ${preset.label}`;
+}
+
+els.paramPreset.addEventListener('change', (e) => applyPreset(e.target.value));
+
+// If the user manually changes any slider after selecting a preset,
+// flip the preset dropdown back to 'custom' so the label doesn't lie.
+function markCustom() {
+  if (els.paramPreset.value !== 'custom') {
+    els.paramPreset.value = 'custom';
+    els.hintPreset.textContent = "Switched to custom — tweak the sliders below";
+  }
+}
+for (const inputId of Object.values(PRESET_INPUT_MAP)) {
+  els[inputId].addEventListener('input', markCustom);
+  els[inputId].addEventListener('change', markCustom);
 }
 
 els.paramMovementReward.addEventListener('input', updateMovementRewardHint);

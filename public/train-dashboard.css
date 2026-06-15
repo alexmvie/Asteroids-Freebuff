@@ -531,6 +531,27 @@ code {
   border-bottom: 1px solid var(--border);
 }
 
+/* Preset row — visual emphasis so it reads as the "starting point" */
+
+.preset-group {
+  background: linear-gradient(180deg, rgba(72, 219, 251, 0.05) 0%, transparent 100%);
+  border: 1px solid rgba(72, 219, 251, 0.15);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+}
+
+.preset-select {
+  font-weight: 600;
+  color: var(--accent-cyan);
+}
+
+.preset-select option {
+  background: var(--bg-panel);
+  color: var(--text);
+  font-weight: 400;
+}
+
 /* Range sliders — dark theme */
 
 .range-slider {

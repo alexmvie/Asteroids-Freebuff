@@ -187,6 +187,23 @@
         <div class="panel controls-panel">
           <h2 class="panel-title">Controls</h2>
 
+          <div class="control-group preset-group">
+            <label for="param-preset">
+              Training Preset
+              <span class="help-icon" title="One-click configurations for common training goals. Selecting a preset overrides all sliders below — change any slider afterwards to fine-tune.">?</span>
+            </label>
+            <select id="param-preset" class="select-input preset-select">
+              <option value="balanced" selected>⚖ Balanced — current defaults (100 pop, 12 hidden, 60s, 0.5 movement)</option>
+              <option value="fast">⚡ Fast — 50 pop, 12 hidden, 30s, no movement reward</option>
+              <option value="powerup">🎯 Power-up hunter — 200 pop, 24 hidden, 60s, 1.0 movement, vary seeds</option>
+              <option value="plateau">💥 Plateau buster — 100 pop, 12 hidden, 60s, 0.25 mutation, 0.5 strength</option>
+              <option value="custom">↺ Custom (you control everything)</option>
+            </select>
+            <span class="control-hint" id="hint-preset">Preset applied: ⚖ Balanced — current defaults</span>
+          </div>
+
+          <div class="subsection-title">Core</div>
+
           <div class="control-group">
             <label for="param-pop">
               Population Size
