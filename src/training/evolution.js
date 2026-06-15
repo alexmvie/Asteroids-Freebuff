@@ -166,9 +166,33 @@ export function createEvolution(opts) {
     return next;
   }
 
+  /**
+   * Return the effective GA config (the actual values in use after
+   * the user's `gaOptions` overrides are merged with the defaults).
+   * Exposed so the trainer's `getConfig()` can surface the live GA
+   * settings to the dashboard without duplicating the defaults.
+   * @returns {{
+   *   mutationRate: number,
+   *   mutationStrength: number,
+   *   elitismCount: number,
+   *   crossoverRate: number,
+   *   tournamentSize: number,
+   * }}
+   */
+  function getConfig() {
+    return {
+      mutationRate,
+      mutationStrength,
+      elitismCount: effectiveElitismCount,
+      crossoverRate,
+      tournamentSize,
+    };
+  }
+
   return {
     createInitialPopulation,
     nextGeneration,
     createRandomGenome,
+    getConfig,
   };
 }

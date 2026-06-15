@@ -82,7 +82,7 @@ export function evaluateGenome({ network, env, options }) {
 
     while (!done && steps < maxSteps) {
       const state = env.getState();
-      const outputs = network.forward ? network.forward(state) : network(state);
+      const outputs = network.forward(state);
       const yaw = discretizeYaw(outputs[0]);
       const thrust = outputs[1] > 0;
       const fire = outputs[2] > 0;

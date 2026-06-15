@@ -305,31 +305,37 @@ export function createTrainer(opts = {}) {
   }
 
   /**
-   * The current effective config. Returned as a flat object so the
+   * The current effective config. Returned as a nested object so the
    * dashboard can render it as "Live Config" chips. Includes both
    * the user-supplied overrides AND the resolved GA options so
    * the user can see every parameter that's actually in use.
+   *
+   * GA values are read from the actual evolution instance (not
+   * hardcoded) so the dashboard can never show stale defaults if
+   * `evolution.js` DEFAULTS ever change.
+   *
+   * Architecture params (inputSize, hiddenSize, outputSize) are
+   * nested under `architecture` so they render as a logical group
+   * in the Live Config grid (the dashboard's `flattenConfig` turns
+   * them into `architecture.inputSize`, `architecture.hiddenSize`,
+   * `architecture.outputSize` chips).
    * @returns {object}
    */
   function getConfig() {
     return {
       populationSize,
-      inputSize,
-      hiddenSize,
-      outputSize,
+      architecture: {
+        inputSize,
+        hiddenSize,
+        outputSize,
+      },
       maxDurationS,
       dt,
       episodesPerGenome,
       seedStrategy,
       movementReward,
       workerCount: pool ? pool.workerCount : 0,
-      ga: {
-        mutationRate: gaOptions.mutationRate ?? 0.15,
-        mutationStrength: gaOptions.mutationStrength ?? 0.3,
-        elitismCount: gaOptions.elitismCount ?? 5,
-        crossoverRate: gaOptions.crossoverRate ?? 0.7,
-        tournamentSize: gaOptions.tournamentSize ?? 3,
-      },
+      ga: evolution.getConfig(),
     };
   }
 

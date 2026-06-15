@@ -1051,15 +1051,15 @@ window.addEventListener('resize', () => {
 
 const CONFIG_HINTS = {
   populationSize: 'Brains per generation',
-  hiddenSize: 'Brain thinking layer size',
+  'architecture.inputSize': 'Brain inputs (velocity vx/vz + 11 others)',
+  'architecture.hiddenSize': 'Brain thinking layer size',
+  'architecture.outputSize': 'Brain outputs (yaw, thrust, fire)',
   maxDurationS: 'Seconds per brain per episode',
   episodesPerGenome: 'Episodes averaged per brain (reduces noise)',
   dt: 'Brain step interval (s) \u2014 lower = more reactive',
   seedStrategy: 'Field layout: vary (generalize) or fixed (reproducible)',
   movementReward: 'Fitness bonus per unit traveled (discourages spin-in-place)',
   workerCount: 'CPU cores used for parallel evaluation (0 = single-threaded)',
-  inputSize: 'Brain inputs (velocity vx/vz + 11 others)',
-  outputSize: 'Brain outputs (yaw, thrust, fire)',
   'ga.mutationRate': 'Chance each weight mutates per child',
   'ga.mutationStrength': 'Magnitude of each mutation',
   'ga.elitismCount': 'Top brains copied verbatim (no breeding)',

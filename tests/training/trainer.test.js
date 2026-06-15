@@ -139,13 +139,17 @@ test('getConfig returns the effective config including GA options', () => {
   });
   const cfg = trainer.getConfig();
   assert.equal(cfg.populationSize, 20);
-  assert.equal(cfg.hiddenSize, 8);
-  assert.equal(cfg.inputSize, DEFAULTS.inputSize);
-  assert.equal(cfg.outputSize, DEFAULTS.outputSize);
+  // Architecture params are now nested under `architecture`
+  assert.deepEqual(cfg.architecture, {
+    inputSize: DEFAULTS.inputSize,
+    hiddenSize: 8,
+    outputSize: DEFAULTS.outputSize,
+  });
   assert.equal(cfg.maxDurationS, 15);
   assert.equal(cfg.movementReward, 0.7);
   assert.equal(cfg.seedStrategy, 'fixed');
   assert.equal(cfg.workerCount, 0); // not enabled
+  // GA config is read from the actual evolution instance (not hardcoded)
   assert.equal(cfg.ga.mutationRate, 0.2);
   assert.equal(cfg.ga.mutationStrength, 0.4);
   assert.equal(cfg.ga.elitismCount, 3);
@@ -154,15 +158,34 @@ test('getConfig returns the effective config including GA options', () => {
   trainer.close();
 });
 
-test('getConfig fills in GA defaults when not supplied', () => {
+test('getConfig fills in GA defaults when not supplied (from evolution DEFAULTS)', () => {
   const trainer = createTrainer({ populationSize: 5, hiddenSize: 4 });
   const cfg = trainer.getConfig();
-  // The defaults below match the evolution.js DEFAULTS
+  // These match `evolution.js` DEFAULTS exactly (read from the
+  // actual evolution instance, not hardcoded in getConfig).
   assert.equal(cfg.ga.mutationRate, 0.15);
   assert.equal(cfg.ga.mutationStrength, 0.3);
   assert.equal(cfg.ga.elitismCount, 5);
   assert.equal(cfg.ga.crossoverRate, 0.7);
   assert.equal(cfg.ga.tournamentSize, 3);
+  trainer.close();
+});
+
+test('getConfig.architecture groups input/hidden/output for the dashboard', () => {
+  const trainer = createTrainer({
+    populationSize: 4,
+    inputSize: 13,
+    hiddenSize: 16,
+    outputSize: 3,
+  });
+  const cfg = trainer.getConfig();
+  // The architecture sub-object is the source of truth for the
+  // network shape — the dashboard's flattenConfig turns it into
+  // three chips: architecture.inputSize, architecture.hiddenSize,
+  // architecture.outputSize.
+  assert.equal(cfg.architecture.inputSize, 13);
+  assert.equal(cfg.architecture.hiddenSize, 16);
+  assert.equal(cfg.architecture.outputSize, 3);
   trainer.close();
 });
 
