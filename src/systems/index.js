@@ -46,5 +46,8 @@ export { createUvUnwrapViewer } from './uv-unwrap-viewer.js';
 // UV debug overlay (mini-3D viewport helper).
 export { createAsteroidUvDebugOverlay } from './asteroid-uv-debug-overlay.js';
 
+// Asteroid field (streaming + entity lifecycle).
+export { createAsteroidField } from './asteroid-field.js';
+
 // Edit-object screen (UV editor fullscreen overlay).
 export { createEditObjectScreen } from './edit-object-screen.js';

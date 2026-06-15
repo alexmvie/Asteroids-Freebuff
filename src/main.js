@@ -2,7 +2,7 @@ import { Clock } from 'three';
 import './styles.css';
 import { createScene } from './scene.js';
 import { createShip, loadShipModel } from './entities/ship.js';
-import { createAsteroidFromSpec, CAPSULE_UV_PLANE } from './entities/asteroid.js';
+import { CAPSULE_UV_PLANE, createAsteroidFromSpec } from './entities/asteroid.js';
 import { createBulletPool } from './entities/bullet.js';
 import { createLaser } from './entities/laser.js';
 import {
@@ -10,11 +10,7 @@ import {
   chunkHasNebula,
   INITIAL_SYSTEM_SEED,
   NEBULA_MAX_OPACITY,
-  createWorld,
   worldToChunk,
-  chunkKey,
-  updateStreamingBubble,
-  evictStaleChunks,
   getActiveChunks,
 } from './world/index.js';
 import { createInputSystem } from './systems/input.js';
@@ -28,6 +24,7 @@ import { createStateMachine, State } from './systems/state.js';
 import { createHud } from './ui/hud.js';
 import { createDebugHud } from './ui/debug-hud.js';
 import { createDemoAi } from './entities/ai.js';
+import { createAsteroidField } from './systems/asteroid-field.js';
 import { createAsteroidUvDebugOverlay } from './systems/asteroid-uv-debug-overlay.js';
 import { createUvUnwrapViewer } from './systems/uv-unwrap-viewer.js';
 import { createEditObjectScreen } from './systems/edit-object-screen.js';
@@ -130,7 +127,7 @@ if (typeof window !== 'undefined') {
 const uvUnwrapViewer = createUvUnwrapViewer({
   canvas: renderer.domElement,
   camera,
-  getAsteroids: () => demoAsteroids,
+  getAsteroids: () => field.getEntities(),
 });
 
 if (typeof window !== 'undefined') {
@@ -241,7 +238,7 @@ const editScreen = createEditObjectScreen({
   renderer,
   camera,
   scene,
-  getAsteroids: () => demoAsteroids,
+  getAsteroids: () => field.getEntities(),
   onPause: (paused) => {
     gameHalted = !!paused;
     // Resuming the game clears the FOCUS hold so the chase
@@ -327,100 +324,12 @@ const aiBullets = createBulletPool({ scene, capacity: 16 });
 const laser = createLaser({ scene });
 
 // ---- Asteroid field (streaming) ----------------------------------------
-// The world layer (src/world/world.js) owns the chunk streaming
-// decision. Per frame, the render loop calls updateStreamingBubble()
-// and we act on its delta: spawn meshes for new chunks, despawn
-// meshes for evicted chunks. `entityByChunkKey` maps a chunk key
-// ("cx,cz") to the array of entities it owns, so eviction is
-// O(asteroids-in-chunk) — we never scan the full demoAsteroids
-// array to find which asteroids belong to an evicted chunk.
-//
-// `streamTimeS` is the per-frame `nowS` passed to the streaming
-// layer. We accumulate from `dt` so the soft-cache TTL (defined in
-// src/world/chunk-constants.js) counts wall-clock seconds, not
-// frame counts. The first frame starts at t=0; the bubble fills on
-// tick 1.
-const world = createWorld({ systemSeed: INITIAL_SYSTEM_SEED });
-const demoAsteroids = [];
-const entityByChunkKey = new Map();
-let streamTimeS = 0;
-
-/**
- * Spawn meshes for every asteroid spec in `chunks` and register
- * them under the chunk's Map key. Idempotent: if the chunk's key
- * is already in `entityByChunkKey` (e.g. a reactivation that
- * somehow double-fired), the new spawn is skipped.
- *
- * @param {Array<object>} chunks
- */
-function spawnChunkEntities(chunks) {
-  for (const chunk of chunks) {
-    const key = chunkKey(chunk.id.cx, chunk.id.cz);
-    if (entityByChunkKey.has(key)) continue;
-    const entities = [];
-    for (const spec of chunk.asteroids) {
-      const entity = createAsteroidFromSpec({ spec, scene, uvDebugOverlay: asteroidUvDebug });
-      demoAsteroids.push(entity);
-      entities.push(entity);
-    }
-    entityByChunkKey.set(key, entities);
-  }
-}
-
-/**
- * Despawn the meshes for every asteroid in `chunks` and unregister
- * the chunks from `entityByChunkKey`. Uses reverse-order splice
- * (the same pattern as `processCollisions`) so removing items
- * from the middle of `demoAsteroids` doesn't shift the indices
- * of the remaining removals.
- *
- * @param {Array<object>} chunks
- */
-function despawnChunkEntities(chunks) {
-  for (const chunk of chunks) {
-    const key = chunkKey(chunk.id.cx, chunk.id.cz);
-    const entities = entityByChunkKey.get(key);
-    if (!entities) continue;
-    // Find the indices in demoAsteroids, then splice in reverse
-    // so each removal doesn't invalidate the subsequent indices.
-    const indices = [];
-    for (const entity of entities) {
-      const idx = demoAsteroids.indexOf(entity);
-      if (idx >= 0) indices.push(idx);
-    }
-    indices.sort((a, b) => b - a);
-    for (const idx of indices) {
-      demoAsteroids[idx].dispose();
-      demoAsteroids.splice(idx, 1);
-    }
-    entityByChunkKey.delete(key);
-  }
-}
-
-/**
- * Wipe the entire world and all entities. Called by
- * `resetRunState` (on game restart) and once at boot (to clear
- * any pre-streaming state if the function is reused). The next
- * frame's `updateStreamingBubble` re-populates from scratch
- * because `world.active` and `world.recentlyGone` are both empty.
- */
-function clearAllAsteroids() {
-  for (const entities of entityByChunkKey.values()) {
-    for (const entity of entities) {
-      entity.dispose();
-    }
-  }
-  demoAsteroids.length = 0;
-  entityByChunkKey.clear();
-  world.active.clear();
-  world.recentlyGone.clear();
-  // Full reset (not a pause): the ship respawned at origin and the
-  // recently-evicted cache is gone, so the TTL clock should start
-  // at zero. If we preserved `streamTimeS`, an evicted chunk from
-  // the next bubble exit would have an `evictedAt` way in the past
-  // and drop on the very next frame.
-  streamTimeS = 0;
-}
+// Extracted to src/systems/asteroid-field.js. Public API:
+//   field.update(shipPos, dt, camera)   — streaming + per-asteroid LOD
+//   field.clearAll()                     — wipe on game restart
+//   field.getEntities()                  — read-only entity array
+//   field.getWorld()                     — world object (for powerupSystem)
+const field = createAsteroidField({ scene, uvDebugOverlay: asteroidUvDebug });
 
 // ---- Demo AI -----------------------------------------------------------
 // NPC ship that hunts the nearest asteroid and shoots at it when the
@@ -444,7 +353,7 @@ const aiWeapon = {
     return aiBullets.fire({ origin, direction });
   },
 };
-const demoAi = createDemoAi({ scene, asteroids: demoAsteroids, weapon: aiWeapon });
+const demoAi = createDemoAi({ scene, asteroids: field.getEntities(), weapon: aiWeapon });
 // Same GLB swap for the AI demo ship, so the player and the NPC match.
 loadShipModel(demoAi.getShip(), '/models/skyfighter.glb', { modelRotationY: -Math.PI / 2 }).then((result) => {
   if (result.success && typeof console !== 'undefined') {
@@ -465,7 +374,7 @@ const powerupSystem = createPowerUpSystem({
   scene,
   bus,
   ship,
-  world,
+  world: field.getWorld(),
   options: {
     getGameState: () => stateMachine.getState(),
     // In DEMO, the AI ship collects the power-up. In PLAYING / GAME_OVER,
@@ -529,7 +438,7 @@ function resetRunState() {
   ship.reset({ x: 0, y: 0, z: 0 });
   // Wipe the world + entities. The next render-loop tick will
   // re-populate the bubble around the ship's reset position.
-  clearAllAsteroids();
+  field.clearAll();
   // Wipe the power-up state. The next PLAYING tick will spawn
   // a fresh power-up.
   powerupSystem.clearAll();
@@ -556,7 +465,7 @@ const playerWeapon = {
 // ---- Input --------------------------------------------------------------
 const input = createInputSystem({
   ship,
-  onFire: () => playerWeapon.fire({ asteroids: demoAsteroids }),
+  onFire: () => playerWeapon.fire({ asteroids: field.getEntities() }),
   onStart: () => {
     // any-key: DEMO → PLAYING (start) or GAME_OVER → PLAYING (restart).
     // The state machine enforces which transitions are legal.
@@ -589,18 +498,21 @@ function processCollisions() {
   const state = stateMachine.getState();
   if (state === State.GAME_OVER) return;
 
+  // Cache the entity array reference — used many times below.
+  const asteroids = field.getEntities();
+
   // ---- Bullet ↔ asteroid (state-scoped to the correct pool) ----------
   // DEMO:   only the AI shoots (its bullets go to aiBullets).
   // PLAYING: only the player shoots (their bullets go to playerBullets).
   // Each pool is independent — no cooldown sharing, no score bleed.
   const activePool = state === State.DEMO ? aiBullets : playerBullets;
-  const bulletHits = findBulletHits({ asteroids: demoAsteroids, bullets: activePool });
+  const bulletHits = findBulletHits({ asteroids, bullets: activePool });
   const asteroidsToRemove = new Set();
   for (const hit of bulletHits) {
     activePool.despawn(hit.bulletIndex);
     if (asteroidsToRemove.has(hit.asteroidIndex)) continue;
     asteroidsToRemove.add(hit.asteroidIndex);
-    score += scoreForSize(demoAsteroids[hit.asteroidIndex].spec.size);
+    score += scoreForSize(asteroids[hit.asteroidIndex].spec.size);
   }
 
   // ---- Laser ↔ asteroid (piercing hits, run in DEMO + PLAYING) -------
@@ -610,7 +522,7 @@ function processCollisions() {
   // the next frame's `laser.update()` re-evaluates the beam.
   if (laser.isFiring()) {
     for (const asteroid of laser.getPendingHits()) {
-      const idx = demoAsteroids.indexOf(asteroid);
+      const idx = asteroids.indexOf(asteroid);
       if (idx < 0) {
         // Stale entity (already removed by a bullet, or evicted
         // with its chunk). Drop it from the pending set.
@@ -634,13 +546,13 @@ function processCollisions() {
   // Apply removals + spawn children, reverse order to preserve indices.
   const indices = [...asteroidsToRemove].sort((a, b) => b - a);
   for (const idx of indices) {
-    const a = demoAsteroids[idx];
+    const a = asteroids[idx];
     const destroyedPos = a.getPosition();
     const childSpecs = a.split();
     a.dispose();
-    demoAsteroids.splice(idx, 1);
+    asteroids.splice(idx, 1);
     for (const spec of childSpecs) {
-      demoAsteroids.push(createAsteroidFromSpec({ spec, scene, uvDebugOverlay: asteroidUvDebug }));
+      asteroids.push(createAsteroidFromSpec({ spec, scene, uvDebugOverlay: asteroidUvDebug }));
     }
     // ---- Power-up drop on asteroid kill -----------------------
     // Roll the per-kill chance (POWERUP_DROP_CHANCE, near the
@@ -662,11 +574,11 @@ function processCollisions() {
   // this on PLAYING because the state transition to GAME_OVER only
   // makes sense when the player is the one being hit.
   if (state !== State.PLAYING) return;
-  const shipHitIdx = findShipHit({ ship, asteroids: demoAsteroids });
+  const shipHitIdx = findShipHit({ ship, asteroids });
   if (shipHitIdx >= 0) {
-    const a = demoAsteroids[shipHitIdx];
+    const a = asteroids[shipHitIdx];
     a.dispose();
-    demoAsteroids.splice(shipHitIdx, 1);
+    asteroids.splice(shipHitIdx, 1);
     lives -= 1;
     bus.emit('lives:changed', { lives });
     if (lives <= 0) {
@@ -840,7 +752,7 @@ function tick(dt) {
     !laser.isFiring() &&
     !laser.isOnCooldown()
   ) {
-    playerWeapon.fire({ asteroids: demoAsteroids });
+    playerWeapon.fire({ asteroids: field.getEntities() });
   }
 
   // ---- Laser update (follows the active firer, accumulates hits) ----
@@ -853,30 +765,10 @@ function tick(dt) {
   // This way the beam visually emanates from the AI's bow when the
   // AI has the laser, and from the player's bow otherwise.
   const laserFirer = powerupSystem.getActiveCollector() || ship;
-  laser.update(dt, laserFirer, demoAsteroids);
+  laser.update(dt, laserFirer, field.getEntities());
 
-  // ---- Asteroid streaming --------------------------------------------
-  // The world layer (src/world/world.js) decides which chunks
-  // should be live this frame. We act on its delta: spawn meshes
-  // for newly-active chunks, despawn meshes for chunks that left
-  // the bubble. The streaming runs in EVERY state (DEMO, PLAYING,
-  // GAME_OVER) because the player sees the asteroid field in all
-  // three states — only the collision layer is gated by state.
-  //
-  // `streamTimeS` is the wall-clock accumulator passed to
-  // `updateStreamingBubble` as `nowS` and to `evictStaleChunks`
-  // for the soft-cache TTL. It advances in lockstep with `dt`
-  // inside the gameplay block — paused frames (gameHalted
-  // early-return above) do NOT advance it, so the TTL measures
-  // "seconds of gameplay" rather than wall-clock time.
-  streamTimeS += dt;
-  const streamDelta = updateStreamingBubble(world, ship.position, streamTimeS);
-  spawnChunkEntities(streamDelta.added);
-  spawnChunkEntities(streamDelta.reactivated);
-  despawnChunkEntities(streamDelta.evicted);
-  evictStaleChunks(world, streamTimeS);
-
-  for (const a of demoAsteroids) a.update(dt, camera);
+  // ---- Asteroid streaming (delegated to the field module) ----------
+  field.update(ship.position, dt, camera);
   // AI only runs in DEMO (attract screen). Paused in PLAYING and
   // GAME_OVER so it doesn't waste CPU/GPU on invisible ship physics
   // and bullets nobody checks. With separate pools (Phase 1), the AI
@@ -891,7 +783,7 @@ function tick(dt) {
   // lifetime, and the respawn timer. Picks up automatically when
   // the ship overlaps the pending power-up. See
   // src/systems/powerup-system.js.
-  powerupSystem.update(dt, demoAsteroids);
+  powerupSystem.update(dt, field.getEntities());
 
   processCollisions();
   updateCamera(dt);
@@ -946,14 +838,14 @@ function tick(dt) {
     state: stateMachine.getState(),
     score,
     lives,
-    asteroidCount: demoAsteroids.length,
+    asteroidCount: field.getEntities().length,
     // `getActiveChunks` is the public read-helper for the streaming
     // layer's live-chunk count. We use its length (rather than
     // `world.active.size`) so the public API surface is exercised
     // on every frame — same numeric result, and the public function
     // gets validated. At ~49 chunks the array allocation is <0.01ms
     // and the result is short-lived.
-    liveChunks: getActiveChunks(world).length,
+    liveChunks: getActiveChunks(field.getWorld()).length,
     sceneVerts: sceneGeom.vertices,
     sceneTris: sceneGeom.triangles,
     camera: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
