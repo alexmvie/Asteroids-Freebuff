@@ -8,6 +8,6 @@
 export { createNetwork, forward, genomeFromNetwork, networkFromGenome, serializeGenome, deserializeGenome } from './network.js';
 export { createEvolution } from './evolution.js';
 export { createTrainingEnvironment } from './environment.js';
-export { createTrainer } from './trainer.js';
+export { createTrainer, runRecordEpisode } from './trainer.js';
 export { saveGenome, loadGenome, savePopulation, loadPopulation, trainingDataPath } from './persistence.js';
 export { createTrainedAiBrain } from './ai-brain.js';

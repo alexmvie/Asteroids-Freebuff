@@ -26,6 +26,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   createTrainer,
+  runRecordEpisode,
   saveGenome,
   loadGenome,
   trainingDataPath,
@@ -93,7 +94,17 @@ async function runTrainingLoop(params) {
   broadcast({ type: 'started' });
 
   while (!shouldStop) {
+    // Yield to the event loop so the HTTP server stays responsive
+    // while the CPU-intensive neuroevolution generation runs.
+    await new Promise((resolve) => setImmediate(resolve));
+
     const result = trainer.runGeneration();
+
+    // Keep trainingState.bestGenome in sync (onProgress doesn't carry the genome,
+    // so the playback endpoint would 404 without this).
+    if (result.bestGenome) {
+      trainingState.bestGenome = result.bestGenome;
+    }
 
     // Save best genome to training-data/ whenever it improves
     if (result.bestGenome && result.bestFitness >= trainingState.bestEverFitness) {
@@ -217,6 +228,130 @@ function handleDeploy(req, res) {
   res.end(JSON.stringify({ deployed: true, path: '/trained-genome.json' }));
 }
 
+// Playback: record one episode with the current best genome and return the
+// frames as JSON. Default 20s cap keeps payload under ~250KB. The browser
+// viewer decodes and animates the frames.
+const PLAYBACK_DEFAULT_MAX_S = 20;
+const PLAYBACK_HARD_MAX_S = 60;
+
+// Genome layout: 11 inputs × H hidden + H + H × 3 outputs + 3 = 14H + 3.
+// We can recover H from the genome length when the caller doesn't tell us.
+const NETWORK_INPUT_SIZE = 11;
+const NETWORK_OUTPUT_SIZE = 3;
+
+/**
+ * @param {number} genomeLength
+ * @returns {number|null} hidden size, or null if the length is malformed
+ */
+function inferHiddenSize(genomeLength) {
+  const numerator = genomeLength - NETWORK_OUTPUT_SIZE;
+  if (numerator <= 0) return null;
+  if (numerator % (NETWORK_INPUT_SIZE + 1 + NETWORK_OUTPUT_SIZE) !== 0) return null;
+  return numerator / (NETWORK_INPUT_SIZE + 1 + NETWORK_OUTPUT_SIZE);
+}
+
+let recordingInProgress = false;
+
+async function handlePlayback(req, res) {
+  if (recordingInProgress) {
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Another recording is already in progress' }));
+    return;
+  }
+  if (!trainingState.bestGenome) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'No genome available — start training first' }));
+    return;
+  }
+
+  // Parse options from query string (GET) and/or body (POST). Query wins if
+  // both are present so the REST-style GET stays predictable.
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  const queryOpts = {
+    maxDurationS: url.searchParams.get('maxDurationS') != null
+      ? Number(url.searchParams.get('maxDurationS'))
+      : undefined,
+    episodeSeed: url.searchParams.get('episodeSeed') != null
+      ? Number(url.searchParams.get('episodeSeed'))
+      : undefined,
+  };
+  let bodyOpts = {};
+  if (req.method === 'POST') {
+    const body = await readBody(req);
+    if (body && body !== '{}') {
+      try {
+        bodyOpts = JSON.parse(body);
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+        return;
+      }
+    }
+  }
+  const opts = { ...bodyOpts, ...queryOpts };
+
+  const maxS = Math.min(
+    Math.max(Number(opts.maxDurationS) || PLAYBACK_DEFAULT_MAX_S, 1),
+    PLAYBACK_HARD_MAX_S,
+  );
+  const episodeSeed = Number.isFinite(opts.episodeSeed) ? opts.episodeSeed : undefined;
+
+  // Infer hidden size from the genome — the genome doesn't carry its own
+  // architecture, so we have to reverse-engineer it.
+  const hiddenSize = inferHiddenSize(trainingState.bestGenome.length);
+  if (hiddenSize == null) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: `Genome length ${trainingState.bestGenome.length} doesn't match a known architecture (11×H + H + H×3 + 3 = 14H + 3)`,
+    }));
+    return;
+  }
+
+  recordingInProgress = true;
+  try {
+    // Yield once so the request handler returns promptly
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const result = runRecordEpisode({
+      genome: trainingState.bestGenome,
+      hiddenSize,
+      maxDurationS: maxS,
+      ...(episodeSeed != null ? { episodeSeed } : {}),
+    });
+
+    const payload = {
+      version: 1,
+      schema: {
+        // Document the frame layout for the browser viewer.
+        ship: 's = {x,z,vx,vz,yaw,roll}',
+        asteroids: 'a = [x,z,r,size]×N',
+        bullets: 'b = [x,z]×N',
+        powerup: 'p = {x,z} or null',
+        laser: 'L=active, F=firing this frame',
+        brain: 'y=yaw(-1|0|1), T=thrust, f=fire, m=mode(0..3)',
+        score: 'S',
+      },
+      generation: trainingState.generation,
+      fitness: trainingState.bestFitness,
+      ...result.recorder.toJSON(),
+      summary: {
+        score: result.score,
+        survivalTime: result.survivalTime,
+        powerupsCollected: result.powerupsCollected,
+        died: result.died,
+      },
+    };
+
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    });
+    res.end(JSON.stringify(payload));
+  } finally {
+    recordingInProgress = false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -268,6 +403,10 @@ const server = http.createServer((req, res) => {
       break;
     case '/deploy':
       if (req.method === 'POST') handleDeploy(req, res);
+      else { res.writeHead(405); res.end('Method not allowed'); }
+      break;
+    case '/playback':
+      if (req.method === 'GET' || req.method === 'POST') handlePlayback(req, res);
       else { res.writeHead(405); res.end('Method not allowed'); }
       break;
     default:

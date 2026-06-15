@@ -21,12 +21,33 @@ const els = {
   btnStop: document.getElementById('btn-stop'),
   btnDeploy: document.getElementById('btn-deploy'),
   btnDownload: document.getElementById('btn-download'),
+  btnPlayback: document.getElementById('btn-playback'),
   paramPop: document.getElementById('param-pop'),
   paramHidden: document.getElementById('param-hidden'),
   paramDuration: document.getElementById('param-duration'),
   logEntries: document.getElementById('log-entries'),
   uploadArea: document.getElementById('upload-area'),
   uploadInput: document.getElementById('upload-input'),
+  statusPill: document.getElementById('status-pill'),
+  statusText: document.querySelector('#status-pill .status-text'),
+  // Playback modal
+  pbModal: document.getElementById('playback-modal'),
+  pbClose: document.getElementById('playback-close'),
+  pbStatus: document.getElementById('pb-status'),
+  pbFrameInfo: document.getElementById('pb-frame-info'),
+  pbScore: document.getElementById('pb-score'),
+  pbDied: document.getElementById('pb-died'),
+  pbCanvas: document.getElementById('playback-canvas'),
+  pbHudTime: document.getElementById('hud-time'),
+  pbHudMode: document.getElementById('hud-mode'),
+  pbHudAction: document.getElementById('hud-action'),
+  pbHudSpeed: document.getElementById('hud-speed'),
+  pbRestart: document.getElementById('pb-restart'),
+  pbStepBack: document.getElementById('pb-step-back'),
+  pbPlay: document.getElementById('pb-play'),
+  pbStepForward: document.getElementById('pb-step-forward'),
+  pbSpeedSelect: document.getElementById('pb-speed-select'),
+  pbFollowShip: document.getElementById('pb-follow-ship'),
 };
 
 // ---------------------------------------------------------------------------
@@ -170,12 +191,14 @@ function connectSSE() {
       log(`Gen ${data.generation}: best=${data.bestFitness.toFixed(1)} avg=${data.avgFitness.toFixed(1)}`, 'info');
     } else if (data.type === 'started') {
       isRunning = true;
+      setStatus('running');
       updateButtons();
-      log('Training started', 'success');
+      log('Training started — watch the Generation count climb', 'success');
     } else if (data.type === 'stopped') {
       isRunning = false;
+      setStatus('idle');
       updateButtons();
-      log('Training stopped', 'info');
+      log('Training stopped. Best brain preserved — click Deploy to use it in the game.', 'info');
     }
   });
 
@@ -209,11 +232,23 @@ function pushChartData(gen, best, avg) {
   drawChart();
 }
 
+const STATUS_LABELS = {
+  running: 'Running',
+  idle: 'Idle',
+  error: 'Server offline',
+};
+
+function setStatus(state) {
+  els.statusPill.dataset.state = state;
+  els.statusText.textContent = STATUS_LABELS[state] || state;
+}
+
 function updateButtons() {
   els.btnStart.disabled = isRunning;
   els.btnStop.disabled = !isRunning;
   els.btnDeploy.disabled = !chartData.best.length;
   els.btnDownload.disabled = !chartData.best.length;
+  updatePlaybackButton();
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +301,12 @@ els.btnDeploy.addEventListener('click', async () => {
     log('Failed to deploy: ' + err.message, 'error');
   }
 });
+
+function updatePlaybackButton() {
+  if (els.btnPlayback) {
+    els.btnPlayback.disabled = !chartData.best.length;
+  }
+}
 
 els.btnDownload.addEventListener('click', async () => {
   try {
@@ -343,6 +384,425 @@ async function handleUpload(file) {
 }
 
 // ---------------------------------------------------------------------------
+// Champion Playback (2D viewer)
+// ---------------------------------------------------------------------------
+
+const MODE_NAMES = ['wander', 'dodge', 'target', 'hunt'];
+
+/**
+ * Resize the playback canvas to its CSS size × devicePixelRatio, then
+ * schedule a redraw so the current frame repaints crisply.
+ */
+function resizePlaybackCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = els.pbCanvas.getBoundingClientRect();
+  els.pbCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
+  els.pbCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
+  requestPlaybackFrame();
+}
+
+const playback = {
+  frames: [],      // decoded frames from /playback
+  decoded: null,   // { ship, asteroids, bullets, powerup, laser, brain, score, time }
+  time: 0,         // current playback time (seconds)
+  playing: false,
+  speed: 1,
+  followShip: true,
+  lastTickMs: 0,
+  rafId: 0,
+  camera: { x: 0, z: 0 },
+  worldScale: 1,   // pixels per world unit, computed per frame
+};
+
+/**
+ * Decode a recorded frame into plain JS objects the renderer can consume.
+ * @param {object} f — server frame {t, s, a, b, p, L, F, y, T, f, m, S}
+ */
+function decodeFrame(f) {
+  // Asteroids: packed [x,z,r,size]×N
+  const asteroids = [];
+  for (let i = 0; i < f.a.length; i += 4) {
+    asteroids.push({
+      x: f.a[i],
+      z: f.a[i + 1],
+      r: f.a[i + 2],
+      size: f.a[i + 3],
+    });
+  }
+  // Bullets: packed [x,z]×N
+  const bullets = [];
+  for (let i = 0; i < f.b.length; i += 2) {
+    bullets.push({ x: f.b[i], z: f.b[i + 1] });
+  }
+  return {
+    time: f.t,
+    ship: { x: f.s.x, z: f.s.z, vx: f.s.vx, vz: f.s.vz, yaw: f.s.yaw, roll: f.s.roll },
+    asteroids,
+    bullets,
+    powerup: f.p ? { x: f.p.x, z: f.p.z } : null,
+    laserActive: f.L === 1,
+    laserFiring: f.F === 1,
+    brain: { yaw: f.y, thrust: f.T === 1, fire: f.f === 1, mode: MODE_NAMES[f.m] || 'wander' },
+    score: f.S,
+  };
+}
+
+/**
+ * Linearly interpolate two decoded frames.
+ * @param {object} a
+ * @param {object} b
+ * @param {number} t — 0..1
+ */
+function lerpFrame(a, b, t) {
+  if (t <= 0) return a;
+  if (t >= 1) return b;
+  return {
+    time: a.time + (b.time - a.time) * t,
+    ship: {
+      x: a.ship.x + (b.ship.x - a.ship.x) * t,
+      z: a.ship.z + (b.ship.z - a.ship.z) * t,
+      vx: a.ship.vx + (b.ship.vx - a.ship.vx) * t,
+      vz: a.ship.vz + (b.ship.vz - a.ship.vz) * t,
+      yaw: a.ship.yaw + (b.ship.yaw - a.ship.yaw) * t,
+      roll: a.ship.roll + (b.ship.roll - a.ship.roll) * t,
+    },
+    asteroids: b.asteroids,   // discrete — use the later frame's
+    bullets: b.bullets,
+    powerup: b.powerup,
+    laserActive: t < 0.5 ? a.laserActive : b.laserActive,
+    laserFiring: t < 0.5 ? a.laserFiring : b.laserFiring,
+    brain: t < 0.5 ? a.brain : b.brain,
+    score: t < 0.5 ? a.score : b.score,
+  };
+}
+
+/**
+ * Find the two frames that bracket the given time and return the lerped frame.
+ */
+function sampleAt(time) {
+  const f = playback.frames;
+  if (f.length === 0) return null;
+  if (f.length === 1 || time <= f[0].time) return f[0];
+  if (time >= f[f.length - 1].time) return f[f.length - 1];
+  for (let i = 0; i < f.length - 1; i++) {
+    if (time >= f[i].time && time < f[i + 1].time) {
+      const span = f[i + 1].time - f[i].time;
+      const t = span > 0 ? (time - f[i].time) / span : 0;
+      return lerpFrame(f[i], f[i + 1], t);
+    }
+  }
+  return f[f.length - 1];
+}
+
+/**
+ * Render the current playback frame to the canvas.
+ */
+function renderPlayback() {
+  const ctx = els.pbCanvas.getContext('2d');
+  const W = els.pbCanvas.width;
+  const H = els.pbCanvas.height;
+  const dpr = window.devicePixelRatio || 1;
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  // Background (starfield-style gradient)
+  const bgGrad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H));
+  bgGrad.addColorStop(0, '#0a1224');
+  bgGrad.addColorStop(1, '#050810');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  if (!playback.decoded) return;
+  const frame = playback.decoded;
+
+  // Camera: follow the ship, or world origin
+  const camX = playback.followShip ? frame.ship.x : 0;
+  const camZ = playback.followShip ? frame.ship.z : 0;
+
+  // World scale: fit ~200 world units across the canvas (with dpr)
+  const worldUnitsAcross = 200;
+  playback.worldScale = (W / worldUnitsAcross);
+  const cx = W / 2;
+  const cy = H / 2;
+  const s = playback.worldScale;
+  const tx = (wx) => cx + (wx - camX) * s;
+  const ty = (wz) => cy + (wz - camZ) * s;
+
+  // Origin crosshair (faint) so the world coords are anchored even when off-ship
+  ctx.strokeStyle = 'rgba(75, 85, 99, 0.4)';
+  ctx.lineWidth = 1 * dpr;
+  ctx.beginPath();
+  ctx.moveTo(tx(0), 0);
+  ctx.lineTo(tx(0), H);
+  ctx.moveTo(0, ty(0));
+  ctx.lineTo(W, ty(0));
+  ctx.stroke();
+
+  // Asteroids
+  for (const a of frame.asteroids) {
+    const r = Math.max(2, a.r * s);
+    let fill = '#6b7280';
+    if (a.size === 0) fill = '#4b5563';
+    else if (a.size === 2) fill = '#9ca3af';
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.arc(tx(a.x), ty(a.z), r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.lineWidth = 1 * dpr;
+    ctx.stroke();
+  }
+
+  // Powerup
+  if (frame.powerup) {
+    const p = frame.powerup;
+    const r = 6 * dpr;
+    // Pulsing ring
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 200);
+    ctx.strokeStyle = `rgba(16, 185, 129, ${0.4 + pulse * 0.5})`;
+    ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    ctx.arc(tx(p.x), ty(p.z), r + 3 + pulse * 4, 0, Math.PI * 2);
+    ctx.stroke();
+    // Filled center
+    ctx.fillStyle = '#10b981';
+    ctx.beginPath();
+    ctx.arc(tx(p.x), ty(p.z), r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Laser
+  if (frame.laserFiring) {
+    const yaw = frame.ship.yaw;
+    const dx = -Math.sin(yaw);
+    const dz = -Math.cos(yaw);
+    ctx.strokeStyle = '#facc15';
+    ctx.lineWidth = 3 * dpr;
+    ctx.shadowColor = '#facc15';
+    ctx.shadowBlur = 8 * dpr;
+    ctx.beginPath();
+    ctx.moveTo(tx(frame.ship.x), ty(frame.ship.z));
+    ctx.lineTo(tx(frame.ship.x + dx * 200), ty(frame.ship.z + dz * 200));
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  // Bullets
+  for (const b of frame.bullets) {
+    ctx.fillStyle = '#fef3c7';
+    ctx.beginPath();
+    ctx.arc(tx(b.x), ty(b.z), 2 * dpr, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Ship (cyan triangle pointing along yaw)
+  const sx = tx(frame.ship.x);
+  const sy = ty(frame.ship.z);
+  const yaw = frame.ship.yaw;
+  // Forward direction in canvas space: -sin(yaw) is world-X, -cos(yaw) is world-Z
+  const fx = -Math.sin(yaw);
+  const fz = -Math.cos(yaw);
+  const fwdX = fx * s;
+  const fwdY = fz * s;
+  // Side vector (perpendicular, for wing tips)
+  const sideX = -fz * s * 0.6;
+  const sideY = fx * s * 0.6;
+  // Engine glow size scales with thrust + speed
+  const speed = Math.hypot(frame.ship.vx, frame.ship.vz);
+  const thrustGlow = frame.brain.thrust ? Math.min(1, speed / 100) : 0;
+
+  // Engine glow
+  if (thrustGlow > 0) {
+    ctx.fillStyle = `rgba(72, 219, 251, ${0.3 + thrustGlow * 0.5})`;
+    ctx.beginPath();
+    ctx.arc(sx - fwdX * 0.5, sy - fwdY * 0.5, 8 * dpr * (0.4 + thrustGlow * 0.6), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Ship body (triangle)
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(Math.atan2(fwdY, fwdX));
+  ctx.fillStyle = '#48dbfb';
+  ctx.strokeStyle = '#7ae5ff';
+  ctx.lineWidth = 1.5 * dpr;
+  ctx.beginPath();
+  ctx.moveTo(12 * dpr, 0);          // nose
+  ctx.lineTo(-8 * dpr, 7 * dpr);    // right wing
+  ctx.lineTo(-5 * dpr, 0);          // tail indent
+  ctx.lineTo(-8 * dpr, -7 * dpr);   // left wing
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+
+  // HUD update
+  els.pbHudTime.textContent = `${frame.time.toFixed(2)}s`;
+  els.pbHudMode.textContent = frame.brain.mode;
+  els.pbHudMode.className = `mode-badge ${frame.brain.mode}`;
+  const actionStr =
+    (frame.brain.yaw === 1 ? '↻' : frame.brain.yaw === -1 ? '↺' : '↑') +
+    (frame.brain.thrust ? ' ⬆' : '') +
+    (frame.brain.fire ? ' 🔥' : '');
+  els.pbHudAction.textContent = actionStr || '—';
+  els.pbHudSpeed.textContent = `${speed.toFixed(0)} u/s`;
+}
+
+/**
+ * Main playback loop driven by requestAnimationFrame.
+ */
+function playbackTick() {
+  if (playback.frames.length === 0) return;
+  const now = performance.now();
+  const dt = playback.lastTickMs ? (now - playback.lastTickMs) / 1000 : 0;
+  playback.lastTickMs = now;
+
+  if (playback.playing) {
+    playback.time += dt * playback.speed;
+    const last = playback.frames[playback.frames.length - 1];
+    if (playback.time >= last.time) {
+      playback.time = last.time;
+      playback.playing = false;
+      els.pbPlay.textContent = '▶ Play';
+    }
+  }
+
+  playback.decoded = sampleAt(playback.time);
+  renderPlayback();
+
+  if (playback.playing) {
+    playback.rafId = requestAnimationFrame(playbackTick);
+  }
+}
+
+function requestPlaybackFrame() {
+  if (!playback.rafId) {
+    playback.lastTickMs = 0;
+    playback.rafId = requestAnimationFrame(() => {
+      playback.rafId = 0;
+      playbackTick();
+    });
+  }
+}
+
+function openPlaybackModal() {
+  els.pbModal.hidden = false;
+  resizePlaybackCanvas();
+}
+
+function closePlaybackModal() {
+  els.pbModal.hidden = true;
+  playback.playing = false;
+  els.pbPlay.textContent = '▶ Play';
+  if (playback.rafId) {
+    cancelAnimationFrame(playback.rafId);
+    playback.rafId = 0;
+  }
+}
+
+async function loadAndPlay() {
+  closePlaybackModal();
+  openPlaybackModal();
+  els.pbStatus.textContent = 'Recording best genome…';
+  els.pbFrameInfo.textContent = '—';
+  els.pbScore.textContent = '—';
+  els.pbDied.textContent = '—';
+  els.pbCanvas.getContext('2d').clearRect(0, 0, els.pbCanvas.width, els.pbCanvas.height);
+
+  try {
+    const res = await fetch(`${API_BASE}/playback`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      els.pbStatus.textContent = `Error: ${err.error || res.statusText}`;
+      return;
+    }
+    const data = await res.json();
+    // Decode frames once
+    playback.frames = data.frames.map(decodeFrame);
+    playback.time = 0;
+    playback.playing = true;
+    els.pbPlay.textContent = '⏸ Pause';
+
+    els.pbStatus.textContent = 'Playing';
+    els.pbFrameInfo.textContent = `${data.frameCount} @ ${data.durationS.toFixed(1)}s`;
+    els.pbScore.textContent = data.summary?.score ?? '—';
+    els.pbDied.textContent = data.summary?.died ? 'yes' : 'no';
+
+    resizePlaybackCanvas();
+    playbackTick();
+    log(`Playback loaded: ${data.frameCount} frames (${data.durationS.toFixed(1)}s)`, 'success');
+  } catch (err) {
+    els.pbStatus.textContent = `Error: ${err.message}`;
+    log('Playback failed: ' + err.message, 'error');
+  }
+}
+
+// Playback controls
+els.btnPlayback.addEventListener('click', loadAndPlay);
+els.pbClose.addEventListener('click', closePlaybackModal);
+els.pbModal.addEventListener('click', (e) => {
+  if (e.target === els.pbModal) closePlaybackModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (els.pbModal.hidden) return;
+  if (e.key === 'Escape') closePlaybackModal();
+  else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+});
+
+els.pbPlay.addEventListener('click', togglePlay);
+
+function togglePlay() {
+  if (playback.frames.length === 0) return;
+  playback.playing = !playback.playing;
+  els.pbPlay.textContent = playback.playing ? '⏸ Pause' : '▶ Play';
+  if (playback.playing) {
+    // If at end, restart
+    const last = playback.frames[playback.frames.length - 1];
+    if (playback.time >= last.time) playback.time = 0;
+    requestPlaybackFrame();
+  }
+}
+
+els.pbRestart.addEventListener('click', () => {
+  playback.time = 0;
+  playback.decoded = sampleAt(0);
+  renderPlayback();
+});
+
+els.pbStepBack.addEventListener('click', () => {
+  playback.playing = false;
+  els.pbPlay.textContent = '▶ Play';
+  // Step back ~1 second
+  playback.time = Math.max(0, playback.time - 1.0);
+  playback.decoded = sampleAt(playback.time);
+  renderPlayback();
+});
+
+els.pbStepForward.addEventListener('click', () => {
+  playback.playing = false;
+  els.pbPlay.textContent = '▶ Play';
+  const last = playback.frames[playback.frames.length - 1];
+  if (!last) return;
+  playback.time = Math.min(last.time, playback.time + 1.0);
+  playback.decoded = sampleAt(playback.time);
+  renderPlayback();
+});
+
+els.pbSpeedSelect.addEventListener('change', (e) => {
+  playback.speed = parseFloat(e.target.value) || 1;
+});
+
+els.pbFollowShip.addEventListener('change', (e) => {
+  playback.followShip = e.target.checked;
+  renderPlayback();
+});
+
+window.addEventListener('resize', () => {
+  if (!els.pbModal.hidden) resizePlaybackCanvas();
+});
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
@@ -355,12 +815,18 @@ fetch(`${API_BASE}/status`)
     updateStats(data);
     if (data.running) {
       isRunning = true;
+      setStatus('running');
       updateButtons();
-      log('Training is already running');
+      log('Training is already running — connected mid-stream');
+    } else {
+      setStatus('idle');
     }
   })
   .catch(() => {
-    log('Server not reachable — is it running? (npm run train:server)', 'error');
+    setStatus('error');
+    log('Server not reachable. Start it with: npm run train:server', 'error');
   });
 
-log('Dashboard ready. Press Start to begin training.');
+// First-time-use guidance
+log('Welcome! Read the green "What is happening here?" panel above for a 30-second tour.');
+log('Click ▶ Start to begin training. The first generation takes ~10s, then they run every 5–10s.');

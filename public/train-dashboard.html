@@ -12,27 +12,81 @@
       <div class="brand">
         <span class="brand-icon">🧠</span>
         <h1>AI Training Dashboard</h1>
+        <span class="status-pill" id="status-pill" data-state="idle">
+          <span class="status-dot"></span>
+          <span class="status-text">Idle</span>
+        </span>
       </div>
-      <p class="subtitle">Neuroevolution for the demo AI ship controller</p>
+      <p class="subtitle">Watch the AI ship learn to fly, dodge, and shoot — one generation at a time</p>
     </header>
+
+    <!-- ===== BEGINNER EXPLAINER ===== -->
+    <details class="explainer" open>
+      <summary>
+        <span class="explainer-icon">💡</span>
+        <span>What is happening here? (click to collapse)</span>
+      </summary>
+      <div class="explainer-body">
+        <div class="explainer-grid">
+          <div class="explainer-card">
+            <h3>🧬 What's a "generation"?</h3>
+            <p>
+              The AI starts with a <b>population of 100 random "brains"</b> (small neural networks).
+              Each brain plays a 60-second game. The <b>worst 5 are discarded</b>, the <b>best 5 are kept</b>,
+              and the other <b>90 are bred</b> (mix two parents, add small random mutations) to form the
+              next generation. Repeat — the brains get smarter over time.
+            </p>
+          </div>
+          <div class="explainer-card">
+            <h3>🏆 What's "fitness"?</h3>
+            <p>
+              A score that rewards good play:
+            </p>
+            <ul>
+              <li><b>+20 / +50 / +100</b> for destroying large / medium / small asteroids</li>
+              <li><b>×10 per second</b> of survival time</li>
+              <li><b>+100</b> per power-up picked up</li>
+            </ul>
+            <p>Higher = smarter. The <b>Best</b> line is the top brain; the <b>Average</b> line is the whole population.</p>
+          </div>
+          <div class="explainer-card">
+            <h3>📈 How to read the chart</h3>
+            <p>
+              <span class="legend-dot best inline"></span> <b>Cyan = best brain</b> (champion of that generation).<br>
+              <span class="legend-dot avg inline"></span> <b>Blue = average brain</b> (whole population).<br>
+              Up-and-to-the-right = learning. Flat line = stuck. Big drop = bad mutations this round.
+            </p>
+          </div>
+          <div class="explainer-card">
+            <h3>🚀 How to use the trained brain</h3>
+            <p>
+              1. Wait for a good <b>Best Ever</b> score (or click <b>Stop</b> when you want to keep it).<br>
+              2. Click <b>Deploy to Game</b> — saves the best brain to <code>public/trained-genome.json</code>.<br>
+              3. Open <a href="http://localhost:5173" target="_blank">localhost:5173</a> — the game will auto-load the brain.
+            </p>
+          </div>
+        </div>
+      </div>
+    </details>
+    <!-- ===== END BEGINNER EXPLAINER ===== -->
 
     <main class="app-main">
       <!-- Stats cards -->
       <section class="stats-grid">
-        <div class="stat-card" data-stat="generation">
-          <div class="stat-label">Generation</div>
+        <div class="stat-card" data-stat="generation" title="How many rounds of evolution have completed. Goes up by 1 every 5–10 seconds while training.">
+          <div class="stat-label">Generation <span class="help-icon">?</span></div>
           <div class="stat-value">—</div>
         </div>
-        <div class="stat-card" data-stat="bestFitness">
-          <div class="stat-label">Best Fitness</div>
+        <div class="stat-card" data-stat="bestFitness" title="Score of the best brain in the most recent generation. Watch this climb.">
+          <div class="stat-label">Best Fitness <span class="help-icon">?</span></div>
           <div class="stat-value">—</div>
         </div>
-        <div class="stat-card" data-stat="avgFitness">
-          <div class="stat-label">Average Fitness</div>
+        <div class="stat-card" data-stat="avgFitness" title="Average score across all 100 brains in the most recent generation. Climbs slower than Best.">
+          <div class="stat-label">Average Fitness <span class="help-icon">?</span></div>
           <div class="stat-value">—</div>
         </div>
-        <div class="stat-card" data-stat="bestEver">
-          <div class="stat-label">Best Ever</div>
+        <div class="stat-card" data-stat="bestEver" title="Highest Best Fitness ever seen across all generations. Stays flat when a new best is found; resets on server restart.">
+          <div class="stat-label">Best Ever <span class="help-icon">?</span></div>
           <div class="stat-value">—</div>
         </div>
       </section>
@@ -43,8 +97,8 @@
           <h2 class="panel-title">Fitness History</h2>
           <canvas id="fitness-chart" width="800" height="320"></canvas>
           <div class="chart-legend">
-            <span class="legend-item best"><span class="legend-dot"></span> Best</span>
-            <span class="legend-item avg"><span class="legend-dot"></span> Average</span>
+            <span class="legend-item best"><span class="legend-dot"></span> Best brain (champion each gen)</span>
+            <span class="legend-item avg"><span class="legend-dot"></span> Average across the whole population</span>
           </div>
         </div>
 
@@ -52,28 +106,43 @@
           <h2 class="panel-title">Controls</h2>
 
           <div class="control-group">
-            <label>Population Size</label>
+            <label for="param-pop">
+              Population Size
+              <span class="help-icon" title="How many brains exist at once. More = smarter but slower per generation. Try 50 for quick tests, 200 for serious training.">?</span>
+            </label>
             <input type="number" id="param-pop" value="100" min="10" max="500">
+            <span class="control-hint">100 = 100 brains per generation</span>
           </div>
           <div class="control-group">
-            <label>Hidden Neurons</label>
+            <label for="param-hidden">
+              Hidden Neurons
+              <span class="help-icon" title="Size of the brain's 'thinking' layer. More neurons = more complex behavior but slower to train. 12 is a good default.">?</span>
+            </label>
             <input type="number" id="param-hidden" value="12" min="4" max="64">
+            <span class="control-hint">12 hidden neurons = small but capable brain</span>
           </div>
           <div class="control-group">
-            <label>Episode Duration (s)</label>
+            <label for="param-duration">
+              Episode Duration (s)
+              <span class="help-icon" title="How long each brain gets to play before being scored. 60s = enough time to find asteroids, longer = better but slower.">?</span>
+            </label>
             <input type="number" id="param-duration" value="60" min="10" max="300">
+            <span class="control-hint">60s per brain per generation</span>
           </div>
 
           <div class="button-row">
-            <button id="btn-start" class="btn btn-primary">▶ Start</button>
-            <button id="btn-stop" class="btn btn-danger" disabled>⏹ Stop</button>
+            <button id="btn-start" class="btn btn-primary" title="Begin training with the settings above.">▶ Start</button>
+            <button id="btn-stop" class="btn btn-danger" disabled title="Stop training. Keeps the current best brain so you can deploy it.">⏹ Stop</button>
           </div>
           <div class="button-row">
-            <button id="btn-deploy" class="btn btn-secondary" disabled>🚀 Deploy to Game</button>
-            <button id="btn-download" class="btn btn-secondary" disabled>⬇ Download</button>
+            <button id="btn-playback" class="btn btn-secondary" disabled title="Record one episode with the best brain and watch it fly in the 2D viewer.">🎬 Play Champion</button>
+            <button id="btn-deploy" class="btn btn-secondary" disabled title="Save the best brain to public/trained-genome.json so the game uses it.">🚀 Deploy to Game</button>
+          </div>
+          <div class="button-row">
+            <button id="btn-download" class="btn btn-secondary" disabled title="Download the best brain as a .json file you can share or save.">⬇ Download</button>
           </div>
 
-          <div class="upload-area" id="upload-area">
+          <div class="upload-area" id="upload-area" title="Drop a previously-downloaded genome JSON here to compare or continue from a checkpoint.">
             <p>Drop a genome JSON here, or click to upload</p>
             <input type="file" id="upload-input" accept=".json,application/json">
           </div>
@@ -82,7 +151,10 @@
 
       <!-- Log -->
       <section class="panel log-panel">
-        <h2 class="panel-title">Training Log</h2>
+        <h2 class="panel-title">
+          Training Log
+          <span class="panel-hint">Newest entries at the bottom</span>
+        </h2>
         <div class="log-entries" id="log-entries"></div>
       </section>
     </main>
@@ -93,6 +165,62 @@
         · Training server on <a href="http://localhost:5174" target="_blank">localhost:5174</a>
       </p>
     </footer>
+  </div>
+
+  <!-- ===== Champion Playback Modal ===== -->
+  <div class="modal-backdrop" id="playback-modal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2>🎬 Champion Playback</h2>
+        <button class="modal-close" id="playback-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="playback-stats" id="playback-stats">
+          <span><b>Status:</b> <span id="pb-status">Loading…</span></span>
+          <span><b>Frames:</b> <span id="pb-frame-info">—</span></span>
+          <span><b>Score:</b> <span id="pb-score">—</span></span>
+          <span><b>Died:</b> <span id="pb-died">—</span></span>
+        </div>
+        <div class="playback-canvas-wrap">
+          <canvas id="playback-canvas" width="800" height="600"></canvas>
+          <div class="playback-hud" id="playback-hud">
+            <div class="hud-row"><b>Time:</b> <span id="hud-time">0.00s</span></div>
+            <div class="hud-row"><b>Mode:</b> <span id="hud-mode" class="mode-badge">wander</span></div>
+            <div class="hud-row"><b>Action:</b> <span id="hud-action">—</span></div>
+            <div class="hud-row"><b>Speed:</b> <span id="hud-speed">0 u/s</span></div>
+          </div>
+        </div>
+        <div class="playback-controls">
+          <button id="pb-restart" class="pb-btn" title="Jump to the first frame">⏮ Restart</button>
+          <button id="pb-step-back" class="pb-btn" title="Step back one frame">◀ Step</button>
+          <button id="pb-play" class="pb-btn pb-btn-primary" title="Play / pause">▶ Play</button>
+          <button id="pb-step-forward" class="pb-btn" title="Step forward one frame">Step ▶</button>
+          <label class="pb-speed-label">
+            Speed:
+            <select id="pb-speed-select" title="Playback speed multiplier">
+              <option value="0.25">0.25×</option>
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+            </select>
+          </label>
+          <label class="pb-checkbox">
+            <input type="checkbox" id="pb-follow-ship" checked>
+            Follow ship
+          </label>
+        </div>
+        <div class="playback-legend">
+          <span><span class="legend-ship"></span> Ship</span>
+          <span><span class="legend-ast-large"></span> Large asteroid</span>
+          <span><span class="legend-ast-medium"></span> Medium</span>
+          <span><span class="legend-ast-small"></span> Small</span>
+          <span><span class="legend-bullet"></span> Bullet</span>
+          <span><span class="legend-powerup"></span> Power-up</span>
+          <span><span class="legend-laser"></span> Laser</span>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="train-dashboard.js"></script>

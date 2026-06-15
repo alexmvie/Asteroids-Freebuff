@@ -33,6 +33,7 @@ import { PLAY_PLANE_Y } from '../world/chunk-constants.js';
 import { generateChunk, hashChunk } from '../world/chunks.js';
 import { mulberry32 } from '../world/rng.js';
 import { spheresOverlap } from '../systems/collision.js';
+import { createEpisodeRecorder, makeFrame } from './recorder.js';
 
 // ---------------------------------------------------------------------------
 // Fixed training constants
@@ -138,6 +139,7 @@ function rayHitsBeam(asteroidPos, asteroidRadius, origin, dir, length) {
  *   dt?: number,
  *   fieldRadiusChunks?: number,
  *   systemSeed?: number,
+ *   recorder?: ReturnType<typeof createEpisodeRecorder> | null,
  * }} [opts]
  */
 export function createTrainingEnvironment(opts = {}) {
@@ -145,6 +147,7 @@ export function createTrainingEnvironment(opts = {}) {
   const dt = opts.dt ?? 1 / 60;
   const fieldRadiusChunks = opts.fieldRadiusChunks ?? TRAIN_FIELD_RADIUS_CHUNKS;
   const systemSeed = opts.systemSeed ?? TRAIN_SYSTEM_SEED;
+  const recorder = opts.recorder ?? null;
 
   // ---- Mutable state (reset every episode) --------------------------------
   let time = 0;
@@ -235,6 +238,8 @@ export function createTrainingEnvironment(opts = {}) {
     laserFiring = false;
     laserFireTimer = 0;
     respawnTimer = 0;
+
+    if (recorder) recorder.clear();
   }
 
   // -------------------------------------------------------------------------
@@ -246,6 +251,7 @@ export function createTrainingEnvironment(opts = {}) {
    *   yaw: number,   // -1, 0, or 1
    *   thrust: boolean,
    *   fire: boolean,
+   *   brainOut?: { yaw: -1|0|1, thrust: boolean, fire: boolean, mode?: string, nearestAsteroidDist?: number, powerupDist?: number | null } | null,
    * }} action
    * @returns {{ done: boolean, hit: boolean }}
    */
@@ -430,10 +436,61 @@ export function createTrainingEnvironment(opts = {}) {
 
     // 8. Check time limit
     if (survivalTime >= maxDurationS) {
+      if (recorder) {
+        recordFrame({ yaw: action.yaw, thrust: action.thrust, fire: action.fire, brainOut: action.brainOut });
+      }
       return { done: true, hit: false };
     }
 
+    // 9. Record frame (if recorder attached)
+    if (recorder) {
+      recordFrame({ yaw: action.yaw, thrust: action.thrust, fire: action.fire, brainOut: action.brainOut });
+    }
+
     return { done: false, hit: false };
+  }
+
+  function recordFrame({ yaw, thrust, fire, brainOut }) {
+    // The brain is the source of truth for its mode. If the caller didn't
+    // pass one, fall back to a simple heuristic so the recording is still
+    // useful in tests that don't go through the trainer.
+    let resolvedMode = brainOut?.mode;
+    if (resolvedMode == null) {
+      let nearestADist = Infinity;
+      for (const a of asteroids) {
+        const dx = a.position.x - ship.position.x;
+        const dz = a.position.z - ship.position.z;
+        const d = Math.hypot(dx, dz);
+        if (d < nearestADist) nearestADist = d;
+      }
+      const powerupDist = pendingPowerup
+        ? Math.hypot(
+            pendingPowerup.position.x - ship.position.x,
+            pendingPowerup.position.z - ship.position.z,
+          )
+        : null;
+      resolvedMode =
+        nearestADist < 14 ? 'dodge' :
+        nearestADist < 90 ? 'target' :
+        powerupDist != null && powerupDist < 200 ? 'hunt' :
+        'wander';
+    }
+
+    recorder.record(
+      makeFrame({
+        time: survivalTime,
+        shipPos: ship.position,
+        shipVel: ship.velocity,
+        shipRot: ship.rotation,
+        asteroids,
+        bullets,
+        powerup: pendingPowerup,
+        laserActive,
+        laserFiring,
+        brainOut: { yaw, thrust, fire, mode: resolvedMode },
+        score,
+      }),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -528,5 +585,17 @@ export function createTrainingEnvironment(opts = {}) {
     getAsteroidCount,
     getBulletCount,
     hasDied,
+    getAsteroids: () => asteroids.map((a) => ({
+      position: { x: a.position.x, y: a.position.y, z: a.position.z },
+      radius: a.radius,
+      size: a.size,
+    })),
+    getBullets: () => bullets.map((b) => ({
+      position: { x: b.position.x, y: b.position.y, z: b.position.z },
+      age: b.age,
+    })),
+    getPowerup: () => pendingPowerup
+      ? { position: { ...pendingPowerup.position }, age: pendingPowerup.age }
+      : null,
   };
 }
