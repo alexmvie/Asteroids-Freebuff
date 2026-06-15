@@ -311,8 +311,12 @@ loadShipModel(ship, '/models/skyfighter.glb', { modelRotationY: -Math.PI / 2 }).
   }
 });
 
-// ---- Bullet pool --------------------------------------------------------
-const bullets = createBulletPool({ scene, capacity: 64 });
+// ---- Bullet pools -------------------------------------------------------
+// Player and AI each get their own pool. No cooldown sharing, no score
+// bleed, no ghost bullets on state transitions. Capacity is tuned per role:
+// the player needs headroom for rapid fire; the AI fires at a lower rate.
+const playerBullets = createBulletPool({ scene, capacity: 64 });
+const aiBullets = createBulletPool({ scene, capacity: 16 });
 
 // ---- Laser weapon -------------------------------------------------------
 // The ship's "piercing beam" — fires a long sky-blue beam that cuts
@@ -423,27 +427,21 @@ function clearAllAsteroids() {
 // target is in front (a ~20° cone), in addition to the original
 // wander/dodge behaviors. Same ship look as the player, infinite
 // lives, never collides with the player. See src/entities/ai.js.
-// The `weapon` is a duck-typed wrapper that routes through the laser
-// (when active for the AI) or the bullet pool (otherwise). In DEMO
-// mode, the AI also collects power-ups via `getCollector`, so the
-// demo plays like a real game.
-// The wrapper is created here (not in ai.js) because the routing
-// decision depends on `powerupSystem` + `demoAi.getShip()` — neither
-// is in scope when the AI factory is invoked.
+// The AI fires into its OWN bullet pool (aiBullets) — no cooldown
+// contention with the player. The laser is still a singleton (one
+// beam mesh); when the AI collects it, the AI fires the laser
+// instead of bullets. Ownership is determined by comparing the
+// power-up's active collector against the AI ship.
 const aiWeapon = {
   fire({ origin, direction, asteroids }) {
     const aiShip = demoAi.getShip();
-    // Route to the laser when (a) the laser is active and (b) the
-    // AI is the one who collected it. The second check is what
-    // distinguishes "the AI has the laser" from "the player has
-    // the laser" when both are running in different states.
     if (
       powerupSystem.isLaserActive() &&
       powerupSystem.getActiveCollector() === aiShip
     ) {
       return laser.fire({ origin, direction, asteroids });
     }
-    return bullets.fire({ origin, direction });
+    return aiBullets.fire({ origin, direction });
   },
 };
 const demoAi = createDemoAi({ scene, asteroids: demoAsteroids, weapon: aiWeapon });
@@ -523,8 +521,9 @@ const powerupSystem = createPowerUpSystem({
 let score = 0;
 let lives = 3;
 function resetRunState() {
-  // Clear the bullet pool so no shots from the previous run linger.
-  bullets.forEachActive((b, i) => bullets.despawn(i));
+  // Clear both bullet pools so no shots from the previous run linger.
+  playerBullets.forEachActive((b, i) => playerBullets.despawn(i));
+  aiBullets.forEachActive((b, i) => aiBullets.despawn(i));
   score = 0;
   lives = 3;
   ship.reset({ x: 0, y: 0, z: 0 });
@@ -556,7 +555,7 @@ function fireFromShip() {
   if (powerupSystem.isLaserActive()) {
     laser.fire({ origin: ship.position, direction, asteroids: demoAsteroids });
   } else {
-    bullets.fire({ origin: ship.position, direction });
+    playerBullets.fire({ origin: ship.position, direction });
   }
 }
 
@@ -595,11 +594,15 @@ function processCollisions() {
   const state = stateMachine.getState();
   if (state === State.GAME_OVER) return;
 
-  // ---- Bullet ↔ asteroid (run in DEMO + PLAYING) ---------------------
-  const bulletHits = findBulletHits({ asteroids: demoAsteroids, bullets });
+  // ---- Bullet ↔ asteroid (state-scoped to the correct pool) ----------
+  // DEMO:   only the AI shoots (its bullets go to aiBullets).
+  // PLAYING: only the player shoots (their bullets go to playerBullets).
+  // Each pool is independent — no cooldown sharing, no score bleed.
+  const activePool = state === State.DEMO ? aiBullets : playerBullets;
+  const bulletHits = findBulletHits({ asteroids: demoAsteroids, bullets: activePool });
   const asteroidsToRemove = new Set();
   for (const hit of bulletHits) {
-    bullets.despawn(hit.bulletIndex);
+    activePool.despawn(hit.bulletIndex);
     if (asteroidsToRemove.has(hit.asteroidIndex)) continue;
     asteroidsToRemove.add(hit.asteroidIndex);
     score += scoreForSize(demoAsteroids[hit.asteroidIndex].spec.size);
@@ -716,18 +719,13 @@ function setCameraForState(state) {
 stateMachine.subscribe(({ to }) => setCameraForState(to));
 setCameraForState(stateMachine.getState());
 
-// ---- Clear bullet pool on DEMO → PLAYING transition -----------------
-// When the user starts a game from the attract screen, wipe any
-// bullets the AI fired during the demo. Without this, old AI bullets
-// linger in the shared pool and look like "bullets coming back from
-// behind" when the camera snaps to the player's viewpoint.
-//
-// Also reset score + lives — the AI's demo score should not bleed
-// into the player's game (the demo is a self-contained attract loop,
-// not the start of a run).
+// ---- Reset score + lives on DEMO → PLAYING transition ----------------
+// The AI's demo bullets go to aiBullets (not shared), so there's no
+// pool to clear. But the demo score (accumulated from AI kills in the
+// attract screen) still lives in the `score` variable, so we reset it
+// here for a clean start.
 stateMachine.subscribe(({ from, to }) => {
   if (from === State.DEMO && to === State.PLAYING) {
-    bullets.forEachActive((b, i) => bullets.despawn(i));
     score = 0;
     lives = 3;
     bus.emit('score:changed', { score });
@@ -825,7 +823,8 @@ function tick(dt) {
   }
   input.update();
   ship.update(dt);
-  bullets.update(dt);
+  playerBullets.update(dt);
+  aiBullets.update(dt);
 
   // ---- Held-fire for the laser (rapid-fire while Space is held) ----
   // The input system fires `onFire` on the rising edge of Space
@@ -883,9 +882,11 @@ function tick(dt) {
   evictStaleChunks(world, streamTimeS);
 
   for (const a of demoAsteroids) a.update(dt, camera);
-  // AI only runs in DEMO (attract screen). In PLAYING and
-  // GAME_OVER the AI is paused — invisible, no movement, no
-  // shooting — so the player has the bullet pool to themselves.
+  // AI only runs in DEMO (attract screen). Paused in PLAYING and
+  // GAME_OVER so it doesn't waste CPU/GPU on invisible ship physics
+  // and bullets nobody checks. With separate pools (Phase 1), the AI
+  // could technically run in any state without correctness issues —
+  // this gate is a pure performance optimization.
   if (stateMachine.getState() === State.DEMO) {
     demoAi.update(dt);
   }
