@@ -656,6 +656,12 @@ const playback = {
   rafId: 0,
   camera: { x: 0, z: 0 },
   worldScale: 1,   // pixels per world unit, computed per frame
+  // Ship trail — ring buffer of recent ship positions, drawn as a
+  // fading line behind the ship so the brain's movement is visible
+  // even with follow-camera (where the ship icon stays at the center
+  // of the canvas and the user might otherwise think it's not moving).
+  trail: [],
+  trailMax: 60,    // ~1 second of frames at 60fps playback
 };
 
 /**
@@ -832,6 +838,22 @@ function renderPlayback() {
     ctx.shadowBlur = 0;
   }
 
+  // Ship trail (drawn before the ship so the ship sits on top).
+  // Each trail point is a small fading circle. With follow-camera the
+  // ship icon stays at the canvas center, so the trail is the only
+  // visual cue that the brain is actually moving.
+  if (playback.trail.length > 1) {
+    for (let i = 0; i < playback.trail.length; i++) {
+      const t = playback.trail[i];
+      // Fade: oldest point is dim, newest is bright
+      const alpha = 0.15 + 0.55 * (i / playback.trail.length);
+      ctx.fillStyle = `rgba(72, 219, 251, ${alpha.toFixed(2)})`;
+      ctx.beginPath();
+      ctx.arc(tx(t.x), ty(t.z), 3 * dpr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   // Bullets
   for (const b of frame.bullets) {
     ctx.fillStyle = '#fef3c7';
@@ -913,6 +935,19 @@ function playbackTick() {
   }
 
   playback.decoded = sampleAt(playback.time);
+  // Record ship position in the trail ring buffer. Only push when
+  // the ship has actually moved a meaningful distance to avoid
+  // flooding the buffer with duplicate points when the ship is idle.
+  if (playback.decoded) {
+    const last = playback.trail[playback.trail.length - 1];
+    const ship = playback.decoded.ship;
+    if (!last || Math.hypot(ship.x - last.x, ship.z - last.z) > 1) {
+      playback.trail.push({ x: ship.x, z: ship.z });
+      if (playback.trail.length > playback.trailMax) {
+        playback.trail.shift();
+      }
+    }
+  }
   renderPlayback();
 
   if (playback.playing) {
@@ -965,6 +1000,7 @@ async function loadAndPlay() {
     // Decode frames once
     playback.frames = data.frames.map(decodeFrame);
     playback.time = 0;
+    playback.trail.length = 0;
     playback.playing = true;
     els.pbPlay.textContent = '⏸ Pause';
 
@@ -1003,13 +1039,17 @@ function togglePlay() {
   if (playback.playing) {
     // If at end, restart
     const last = playback.frames[playback.frames.length - 1];
-    if (playback.time >= last.time) playback.time = 0;
+    if (playback.time >= last.time) {
+      playback.time = 0;
+      playback.trail.length = 0;
+    }
     requestPlaybackFrame();
   }
 }
 
 els.pbRestart.addEventListener('click', () => {
   playback.time = 0;
+  playback.trail.length = 0;
   playback.decoded = sampleAt(0);
   renderPlayback();
 });
