@@ -207,20 +207,21 @@ export function aiBrainTick({
     if (pdist < powerupHuntDist) {
       const targetAngle = Math.atan2(pdz, pdx);
       const diff = wrapAngle(targetAngle - facingAngle(aiYaw));
-      // Proportional approach: coast when close to avoid the
-      // "circular orbit" problem. At high speed + tight dead zone
-      // the ship overshoots, has to turn, overshoots again, etc.
-      //   - Far  (> 40): full thrust, tight steering (0.1 rad)
-      //   - Mid  (15–40): full thrust, wider dead zone (0.3 rad)
-      //   - Close (< 15): coast (no thrust), very wide dead zone
-      //     (0.8 rad) — drag decelerates the ship so it glides in
-      //     for a clean pickup.
-      const close = pdist < 15;
-      const medium = !close && pdist < 40;
-      const deadZone = close ? 0.8 : medium ? 0.3 : 0.1;
+      // Angle-based thrust: only accelerate when pointing at the
+      // target. When the target is off-axis (> 0.4 rad ≈ 23°),
+      // coast and turn. This is the key to avoiding circular
+      // orbits — the ship decelerates via drag while turning,
+      // then re-accelerates once aligned. Each cycle is slower
+      // and tighter, spiraling in toward the pickup.
+      const absDiff = Math.abs(diff);
+      const facing = absDiff < 0.4;
+
+      // Distance-based steering dead zone: wider when close to
+      // prevent oversteering and overshoot at the final approach.
+      const deadZone = pdist < 15 ? 0.8 : pdist < 40 ? 0.3 : 0.1;
       return {
         yaw: diff > deadZone ? -1 : diff < -deadZone ? 1 : 0,
-        thrust: !close,
+        thrust: facing,
         mode: 'hunt',
         fire: false, // don't fire at the power-up (it's a pickup, not an enemy)
       };
