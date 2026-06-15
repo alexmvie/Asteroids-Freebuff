@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import { NoisyIcosphere } from '../geometry/noisy-icosphere.js';
 import { Capsule } from '../geometry/capsule.js';
 import { mulberry32 } from '../world/rng.js';
-import { solveWith } from '../geometry/uv-solvers.js';
 
 /**
  * Returns the body type for an asteroid spec: 'icosphere' (seed
@@ -97,92 +96,6 @@ function createAsteroidMaterial() {
     roughnessMap: getAsteroidRoughness(),
     bumpMap: getAsteroidBump(),
   });
-}
-
-/**
- * Apply the best UV unwrap to a body geometry at construction
- * time. Runs the ABF++ solver (the same workflow the user
- * performs by hand in the editor: select "ABF++" in the
- * solver dropdown, then click the SMART button) and writes
- * the result into the geometry's `uv` attribute. Falls back
- * to a planar unwrap (`computePlanarUVs`) if the solver fails
- * or produces bad UVs. Skips non-indexed geometry (the
- * icosphere, which is non-indexed by construction — its
- * built-in spherical UVs from `IcosahedronGeometry` are kept).
- *
- * **Why ABF++ specifically (and not the auto cascade):** the
- * manual workflow that produces a clean texture mapping in
- * the editor is to set the solver to "ABF++" and click SMART.
- * ABF++ initializes from LSCM internally, so it gets both
- * the conformal starting point AND the angle-preservation
- * refinement. The auto cascade prefers the cheaper square-Tutte
- * solver, which has a fundamental ~28–460× stretch limit on
- * the capsule (area compression + corner-pinch, see
- * SPEC.md §12). The user prefers the higher-quality ABF++
- * result, so we use it unconditionally on creation.
- *
- * Cheap for the asteroid sizes we use: the capsule has ~74
- * vertices, well under 1ms per asteroid. With ~80 asteroids
- * streaming in, the per-frame cost is amortized across frames.
- *
- * **Critical:** this function WRITES the solver's `u`/`v`
- * arrays into `geom.attributes.uv`. A previous version called
- * the solver and discarded the result, leaving the capsule
- * with no UVs at all (Capsule's constructor doesn't set any)
- * and rendering every asteroid flat-colored (no texture). The
- * regression was caught by the visual smoke test: all
- * asteroids appeared black because the material's `map` was
- * silently disabled by the missing UV attribute.
- *
- * If a per-type UV template is saved (via the UV editor's
- * SAVE TEMPLATE button, see `applyUvTemplate` below), the
- * template is applied AFTER this solver run and overrides it.
- *
- * @param {THREE.BufferGeometry} geom
- */
-export function applySmartUv(geom) {
-  if (!geom) return;
-  // Non-indexed geometry (the icosphere, built on
-  // IcosahedronGeometry which is non-indexed): keep the
-  // default spherical UVs. The solver uses `geometry.index` to
-  // walk faces, so it would throw on a non-indexed mesh.
-  if (!geom.index) return;
-  // Some indexed geometries (the capsule) have no `uv`
-  // attribute at all. Create an empty one so the solver has
-  // somewhere to write its result.
-  if (!geom.attributes.uv) {
-    const count = geom.attributes.position.count;
-    geom.setAttribute('uv', new THREE.BufferAttribute(
-      new Float32Array(count * 2), 2,
-    ));
-  }
-  try {
-    // ABF++ matches the editor's "select ABF++ → click SMART"
-    // workflow. It auto-detects seams by dihedral angle and
-    // minimizes angle distortion via gradient descent from an
-    // LSCM starting point. For the capsule (theta boundary),
-    // it produces a clean, mostly-equiareal unwrap — no
-    // corner-pinch, no area compression.
-    const result = solveWith(geom, 'abf++', { thresholdDeg: 30 });
-    if (result && result.u && result.v && result.u.length === geom.attributes.uv.array.length / 2) {
-      const uvAttr = geom.attributes.uv;
-      for (let i = 0; i < result.u.length; i++) {
-        uvAttr.setXY(i, result.u[i], result.v[i]);
-      }
-      uvAttr.needsUpdate = true;
-      return;
-    }
-  } catch (_) {
-    // Solver failed (degenerate input, closed mesh without
-    // seams, etc.). Fall through to the planar fallback.
-  }
-  // Planar fallback — `computePlanarUVs` is defined on the
-  // Capsule geometry (it projects onto the xy/xz/yz plane).
-  // For the capsule, this gives a clean side-view unwrap that
-  // displays the texture without the solver's cost.
-  if (typeof geom.computePlanarUVs === 'function') {
-    geom.computePlanarUVs('xy');
-  }
 }
 
 // Module-scoped scratch — safe in single-threaded JS.
@@ -401,12 +314,8 @@ function buildNoisyIcosphereBody(group, spec, rng, uvDebugOverlay) {
   const geomHigh = new NoisyIcosphere(
     radius, 2, noiseAmount, noiseScale, ox, oy, oz,
   );
-  // Apply the best UV unwrap to the highest-detail level. The
-  // solver cascade handles closed meshes via the geodesic-diameter
-  // heuristic. The lower LOD levels (different vertex counts) keep
-  // their default UVs; the high-detail level is what the player
-  // sees up close.
-  applySmartUv(geomHigh);
+  // Icosphere has default spherical UVs from IcosahedronGeometry —
+  // no per-vertex UV unwrapping needed.
   const meshHigh = new THREE.Mesh(geomHigh, material);
   lod.addLevel(meshHigh, LOD_CLOSE_DIST);
 
@@ -518,14 +427,11 @@ function buildCapsuleBody(group, spec, rng, uvDebugOverlay) {
   // "potato" surface without creating holes or twisted faces.
   // Regression-tested in tests/capsule.test.js.
   geom.jitter(capsuleRadius * 0.15, rng);
-  // Apply the best UV unwrap (smart cascade — square-Tutte is
-  // a near-perfect fit for the capsule's theta boundary: 2
-  // boundary loops + 1 shared edge, mapped cleanly to a unit
-  // square). Called AFTER jitter so the UVs align with the
-  // displaced surface. Replaces the previous `computePlanarUVs`
-  // call, which only handled one plane of the 3D shape and
-  // wasted texture space on the unstretched faces.
-  applySmartUv(geom);
+  // Simple planar UV projection after jitter so the texture aligns
+  // with the displaced surface. `computePlanarUVs` projects onto the
+  // xy plane (side view), giving a clean texture mapping for the
+  // vertical capsule shape.
+  geom.computePlanarUVs(CAPSULE_UV_PLANE);
 
   // Same material as the icosphere body — shared PBR maps, same
   // metalness/roughness. The visual difference between the two
