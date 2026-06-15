@@ -115,6 +115,19 @@ export function genomeFromNetwork(network) {
  * @param {number} outputSize
  * @returns {Network}
  */
+/**
+ * Compute the expected genome length for a network with the given architecture.
+ * Single source of truth — used by trainer.js, main.js (input-size guard),
+ * and networkFromGenome (length check).
+ * @param {number} inputSize
+ * @param {number} hiddenSize
+ * @param {number} outputSize
+ * @returns {number} total weights + biases
+ */
+export function genomeSize(inputSize, hiddenSize, outputSize) {
+  return inputSize * hiddenSize + hiddenSize + hiddenSize * outputSize + outputSize;
+}
+
 export function networkFromGenome(genome, inputSize, hiddenSize, outputSize) {
   const w1Count = inputSize * hiddenSize;
   const b1Count = hiddenSize;

@@ -9,7 +9,7 @@ test('createTrainedAiBrain throws without genome', () => {
 });
 
 test('tick returns yaw, thrust, mode, fire', () => {
-  const net = createNetwork(11, 12, 3);
+  const net = createNetwork(13, 12, 3);
   const genome = genomeFromNetwork(net);
   const brain = createTrainedAiBrain({ genome });
   const result = brain.tick({
@@ -25,7 +25,7 @@ test('tick returns yaw, thrust, mode, fire', () => {
 });
 
 test('tick with empty asteroids defaults to wander mode', () => {
-  const net = createNetwork(11, 12, 3);
+  const net = createNetwork(13, 12, 3);
   const genome = genomeFromNetwork(net);
   const brain = createTrainedAiBrain({ genome });
   const result = brain.tick({
@@ -38,7 +38,7 @@ test('tick with empty asteroids defaults to wander mode', () => {
 });
 
 test('tick with nearby asteroid may change mode', () => {
-  const net = createNetwork(11, 12, 3);
+  const net = createNetwork(13, 12, 3);
   const genome = genomeFromNetwork(net);
   const brain = createTrainedAiBrain({ genome });
   const result = brain.tick({
@@ -55,7 +55,7 @@ test('tick with nearby asteroid may change mode', () => {
 });
 
 test('tick with powerup may trigger hunt mode', () => {
-  const net = createNetwork(11, 12, 3);
+  const net = createNetwork(13, 12, 3);
   const genome = genomeFromNetwork(net);
   const brain = createTrainedAiBrain({ genome });
   const result = brain.tick({
@@ -69,7 +69,7 @@ test('tick with powerup may trigger hunt mode', () => {
 });
 
 test('yaw is discretized to -1, 0, or 1', () => {
-  const net = createNetwork(11, 12, 3);
+  const net = createNetwork(13, 12, 3);
   const genome = genomeFromNetwork(net);
   const brain = createTrainedAiBrain({ genome });
   // Run many ticks with different inputs to exercise output thresholds
@@ -90,7 +90,7 @@ test('yaw is discretized to -1, 0, or 1', () => {
 });
 
 test('laser active flag is read from input', () => {
-  const net = createNetwork(11, 12, 3);
+  const net = createNetwork(13, 12, 3);
   const genome = genomeFromNetwork(net);
   const brain = createTrainedAiBrain({ genome });
   const result = brain.tick({
@@ -106,8 +106,8 @@ test('laser active flag is read from input', () => {
 });
 
 test('brain produces valid decisions from different genomes', () => {
-  const net1 = createNetwork(11, 12, 3);
-  const net2 = createNetwork(11, 12, 3);
+  const net1 = createNetwork(13, 12, 3);
+  const net2 = createNetwork(13, 12, 3);
   const g1 = genomeFromNetwork(net1);
   const g2 = genomeFromNetwork(net2);
   const brain1 = createTrainedAiBrain({ genome: g1 });

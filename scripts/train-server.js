@@ -234,10 +234,15 @@ function handleDeploy(req, res) {
 const PLAYBACK_DEFAULT_MAX_S = 20;
 const PLAYBACK_HARD_MAX_S = 60;
 
-// Genome layout: 11 inputs × H hidden + H + H × 3 outputs + 3 = 14H + 3.
-// We can recover H from the genome length when the caller doesn't tell us.
-const NETWORK_INPUT_SIZE = 11;
+// Genome layout: I inputs × H hidden + H + H × O outputs + O
+// = H × (I + O + 1) + O. We can recover H from the genome length
+// when the caller doesn't tell us.
+//   I=13, O=3  (v0.7.0; was I=11 before velocity inputs were added)
+//   H × 17 + 3
+//   Hidden sizes known to be valid: 4, 8, 12, 16, 24, 32, 48
+const NETWORK_INPUT_SIZE = 13;
 const NETWORK_OUTPUT_SIZE = 3;
+const VALID_HIDDEN_SIZES = Object.freeze(new Set([4, 8, 12, 16, 24, 32, 48]));
 
 /**
  * @param {number} genomeLength
@@ -246,8 +251,13 @@ const NETWORK_OUTPUT_SIZE = 3;
 function inferHiddenSize(genomeLength) {
   const numerator = genomeLength - NETWORK_OUTPUT_SIZE;
   if (numerator <= 0) return null;
-  if (numerator % (NETWORK_INPUT_SIZE + 1 + NETWORK_OUTPUT_SIZE) !== 0) return null;
-  return numerator / (NETWORK_INPUT_SIZE + 1 + NETWORK_OUTPUT_SIZE);
+  const denom = NETWORK_INPUT_SIZE + 1 + NETWORK_OUTPUT_SIZE;
+  if (numerator % denom !== 0) return null;
+  const h = numerator / denom;
+  // Sanity-check against known hidden sizes so a future architecture
+  // change can't silently produce a wrong-but-plausible number.
+  if (!VALID_HIDDEN_SIZES.has(h)) return null;
+  return h;
 }
 
 let recordingInProgress = false;
@@ -297,15 +307,14 @@ async function handlePlayback(req, res) {
   const episodeSeed = Number.isFinite(opts.episodeSeed) ? opts.episodeSeed : undefined;
 
   // Infer hidden size from the genome — the genome doesn't carry its own
-  // architecture, so we have to reverse-engineer it.
-  const hiddenSize = inferHiddenSize(trainingState.bestGenome.length);
-  if (hiddenSize == null) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      error: `Genome length ${trainingState.bestGenome.length} doesn't match a known architecture (11×H + H + H×3 + 3 = 14H + 3)`,
-    }));
-    return;
-  }
+  // architecture, so we have to reverse-engineer it.    const hiddenSize = inferHiddenSize(trainingState.bestGenome.length);
+    if (hiddenSize == null) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: `Genome length ${trainingState.bestGenome.length} doesn't match a known architecture (13×H + H + H×3 + 3 = 17H + 3, valid H: ${[...VALID_HIDDEN_SIZES].join(', ')})`,
+      }));
+      return;
+    }
 
   recordingInProgress = true;
   try {

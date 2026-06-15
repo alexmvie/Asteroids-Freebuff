@@ -70,6 +70,88 @@
     </details>
     <!-- ===== END BEGINNER EXPLAINER ===== -->
 
+    <!-- ===== TRAINING INSIGHTS (learn more) ===== -->
+    <details class="explainer">
+      <summary>
+        <span class="explainer-icon">📚</span>
+        <span>Training insights — what's actually happening under the hood</span>
+      </summary>
+      <div class="explainer-body">
+        <div class="insights-grid">
+          <div class="insights-card">
+            <h3>👁️ The 13 brain inputs (what the AI "sees")</h3>
+            <p>Each frame, the env builds a 13-number feature vector and feeds it to the neural net:</p>
+            <ol>
+              <li><b>Speed</b> — how fast it's moving (0 = stopped, 1 = max).</li>
+              <li><b>Yaw sin, cos</b> — which way it's facing (a 2D unit vector, so yaw wraps cleanly).</li>
+              <li><b>Nearest asteroid dx, dz, dist, radius</b> — where the closest threat is and how big.</li>
+              <li><b>Nearest power-up dx, dz, dist</b> — where the pickup is (or "very far" if none).</li>
+              <li><b>Laser active</b> — 0 or 1, whether the piercing beam is charged.</li>
+              <li><b>Velocity vx, vz</b> — which direction it's <i>flying</i>. <b>This is the key new input</b> (v0.7.0): without it, the brain can't tell "flying right" from "spinning right" — and ends up choosing "spin and shoot" as a local minimum.</li>
+            </ol>
+            <p class="insight-hint">All distances are normalized by <code>NORM_DIST = 500</code> world units. Speeds by <code>MAX_SPEED = 200</code>. This keeps the inputs in a roughly [-1, +1] range so the network doesn't have to learn per-input scaling.</p>
+          </div>
+          <div class="insights-card">
+            <h3>🎯 The 3 brain outputs (what the AI "decides")</h3>
+            <p>The net returns 3 tanh-bounded numbers in [-1, +1]. The trainer discretizes them:</p>
+            <ul>
+              <li><b>Yaw</b>: &gt; 0.33 → turn right, &lt; -0.33 → turn left, else → straight. (The thresholds match the hand-coded AI.)</li>
+              <li><b>Thrust</b>: &gt; 0 → accelerate, else → coast.</li>
+              <li><b>Fire</b>: &gt; 0 → pull the trigger (bullet or laser, whichever is active).</li>
+            </ul>
+            <p class="insight-hint">This is a very small action space — much smaller than a real human pilot's. A bigger action space (continuous yaw rate, brake, afterburner) would let the brain learn smoother maneuvers, but the trade-off is that bigger actions need more brains + more generations to explore.</p>
+          </div>
+          <div class="insights-card">
+            <h3>🏆 The fitness formula (what the AI is "graded on")</h3>
+            <p>After each episode:</p>
+            <pre class="fitness-formula">fitness = score + survival × 10 + powerups × 100 + distance × 0.5</pre>
+            <p>The four terms, ranked by typical magnitude:</p>
+            <ul>
+              <li><b>Score</b> — +20 (large) / +50 (medium) / +100 (small) per asteroid destroyed.</li>
+              <li><b>Survival</b> — +10 per second alive. 60 s episode → +600 if it survives the full time.</li>
+              <li><b>Power-ups</b> — +100 per pickup. Rare but high-value.</li>
+              <li><b>Distance</b> (v0.7.0) — +0.5 per world unit traveled. This is the new term: it punishes "just spin in place" and rewards "actually go places." A brain that flies 200 u/s for 30 s nets +3000 from movement alone.</li>
+            </ul>
+            <p class="insight-hint"><b>Why the brain was just spinning and shooting:</b> the old formula had no distance term, so the brain had no reason to leave its "spin + fire" local minimum. The new distance term makes that strategy score worse than "fly somewhere." You should see power-up collection emerge within ~30 generations of retraining.</p>
+          </div>
+          <div class="insights-card">
+            <h3>🧬 The evolution loop (how the brain gets smarter)</h3>
+            <p>Every generation, the trainer:</p>
+            <ol>
+              <li>Evaluates every genome by running one (or more) episodes.</li>
+              <li>Sorts by fitness. Keeps the top <b>5 (elitism)</b>.</li>
+              <li>Tournament-selects two parents per child, blends their weights 50/50, mutates each weight by a small Gaussian.</li>
+              <li>Forms the next population of 100, repeats.</li>
+            </ol>
+            <p><b>Per-episode seed (v0.7.0):</b> the field layout now varies per episode (was fixed). This forces the brain to learn general behavior — without it, the brain can memorize "go to position X" instead of learning "fly toward the nearest asteroid."</p>
+            <p class="insight-hint">Mutation rate is 0.1 (per weight, per child). If you're stuck at a fitness plateau, the mutation rate is the first knob to try: bump it to 0.2 for more exploration, drop to 0.05 for fine-tuning once you're near the goal.</p>
+          </div>
+          <div class="insights-card">
+            <h3>⚙️ Hyperparameter cheat sheet (the dashboard knobs)</h3>
+            <table class="knobs-table">
+              <thead><tr><th>Knob</th><th>Default</th><th>Range</th><th>Effect</th></tr></thead>
+              <tbody>
+                <tr><td>Population Size</td><td>100</td><td>10–500</td><td>More brains = better exploration, slower per generation.</td></tr>
+                <tr><td>Hidden Neurons</td><td>12</td><td>4–64</td><td>Brain capacity. 12 is good for asteroids; 24+ for trickier tasks.</td></tr>
+                <tr><td>Episode Duration</td><td>60 s</td><td>10–300 s</td><td>How long each brain gets to play. Longer = more learning time per brain.</td></tr>
+              </tbody>
+            </table>
+            <p class="insight-hint">For power-up collection to emerge reliably, the <b>recommended settings</b> are: Population = 200, Hidden = 24, Duration = 60 s. Train for 100+ generations.</p>
+          </div>
+          <div class="insights-card">
+            <h3>📖 Want to learn more?</h3>
+            <ul>
+              <li><a href="https://web.stanford.edu/class/psych209/Readings/SuttonBartoIPRLBook2ndEd.pdf" target="_blank" rel="noopener">Sutton &amp; Barto, "Reinforcement Learning: An Introduction"</a> — the canonical free textbook. <b>Chapter 4 (Reward Functions)</b> is the most directly relevant to why the brain behaves the way it does.</li>
+              <li><a href="http://www.cs.ucf.edu/~kstanley/neat.html" target="_blank" rel="noopener">Kenneth Stanley's NEAT</a> — the original neuroevolution algorithm (we use a simpler GA, not NEAT, but the principles are the same).</li>
+              <li><a href="https://openai.com/research/evolution-strategies" target="_blank" rel="noopener">OpenAI's "Evolution Strategies as a Scalable Alternative to Reinforcement Learning"</a> — shows why ES scales better than RL for some problems.</li>
+              <li>The actual code: <code>src/training/environment.js</code> (the 13 inputs), <code>src/training/trainer.js</code> (fitness + GA), <code>src/training/ai-brain.js</code> (the trained brain's perception loop).</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </details>
+    <!-- ===== END TRAINING INSIGHTS ===== -->
+
     <main class="app-main">
       <!-- Stats cards -->
       <section class="stats-grid">

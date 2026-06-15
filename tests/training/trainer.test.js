@@ -88,7 +88,8 @@ test('onProgress callback is called', () => {
 test('genome size matches input+hidden+output', () => {
   const trainer = createTrainer({ populationSize: 3, hiddenSize: 6, outputSize: 3, maxDurationS: 1 });
   const pop = trainer.getPopulation();
-  const expectedSize = 11 * 6 + 6 + 6 * 3 + 3; // 11 inputs, 6 hidden, 3 outputs
+  // 13 inputs (was 11; velocity vx/vz added), 6 hidden, 3 outputs
+  const expectedSize = 13 * 6 + 6 + 6 * 3 + 3;
   for (const g of pop) {
     assert.equal(g.length, expectedSize);
   }

@@ -155,6 +155,13 @@ export function createTrainingEnvironment(opts = {}) {
   let survivalTime = 0;
   let powerupsCollected = 0;
   let died = false;
+  // Per-episode seed. The factory's `systemSeed` is the default; the
+  // trainer can override per-episode via reset({ systemSeed }) so the
+  // brain can't memorize one fixed field layout.
+  let activeSeed = systemSeed;
+  // Per-episode movement accumulator (sum of speed * dt) — read by
+  // the trainer's fitness function to reward "actually going places."
+  let distanceTraveled = 0;
 
   /** @type {Array<{position:{x,y,z}, velocity:{x,y,z}, radius:number, size:number, id:string}>} */
   let asteroids = [];
@@ -188,7 +195,7 @@ export function createTrainingEnvironment(opts = {}) {
     const list = [];
     for (let cx = -fieldRadiusChunks; cx <= fieldRadiusChunks; cx++) {
       for (let cz = -fieldRadiusChunks; cz <= fieldRadiusChunks; cz++) {
-        const chunk = generateChunk({ cx, cz, systemSeed });
+        const chunk = generateChunk({ cx, cz, systemSeed: activeSeed });
         for (const a of chunk.asteroids) {
           list.push({
             id: a.id,
@@ -216,17 +223,39 @@ export function createTrainingEnvironment(opts = {}) {
     };
   }
 
-  function reset() {
+  /**
+   * Reset for a new episode. Accepts an optional `systemSeed` override
+   * — when the caller passes one, the next generateField() uses the
+   * new seed (so power-up spawns and asteroid positions vary). When
+   * omitted, the seed from the factory closure is used (back-compat).
+   *
+   * Added in v0.7.0 so the trainer can vary the field per episode and
+   * the brain can no longer memorize a single fixed layout.
+   *
+   * @param {{ systemSeed?: number }} [opts]
+   */
+  function reset(opts = {}) {
     time = 0;
     score = 0;
     survivalTime = 0;
     powerupsCollected = 0;
     died = false;
+    // Per-episode distance accumulator — used by the trainer's
+    // movement reward. Reset every episode.
+    distanceTraveled = 0;
 
     ship.position = { x: 0, y: 0, z: 0 };
     ship.velocity = { x: 0, y: 0, z: 0 };
     ship.rotation = { yaw: 0, pitch: 0, roll: 0 };
 
+    // Per-episode seed override. The field generator is captured in
+    // the closure with `systemSeed`, so we re-bind the closure
+    // variable here.
+    if (opts.systemSeed != null) {
+      activeSeed = opts.systemSeed;
+    } else {
+      activeSeed = systemSeed;
+    }
     asteroids = generateField();
     bullets = [];
     bulletCooldown = 0;
@@ -263,6 +292,12 @@ export function createTrainingEnvironment(opts = {}) {
 
     // 1. Ship physics
     updateShipPhysics(ship, dt, action.yaw, action.thrust);
+
+    // Accumulate per-episode distance (sum of speed * dt). Cheap
+    // (one hypot + add per frame), used by the trainer's movement
+    // reward to break the "spin in place" local minimum.
+    const stepSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
+    distanceTraveled += stepSpeed * dt;
 
     // 2. Update bullets
     if (bulletCooldown > 0) bulletCooldown = Math.max(0, bulletCooldown - dt);
@@ -499,10 +534,27 @@ export function createTrainingEnvironment(opts = {}) {
 
   /**
    * Extract features and return a normalized Float32Array.
+   *
+   * Feature layout (13 inputs, must match `ai-brain.js`):
+   *   0  speed / MAX_SPEED
+   *   1  sin(yaw),  2  cos(yaw)         — facing direction
+   *   3  nearest asteroid dx / NORM_DIST
+   *   4  nearest asteroid dz / NORM_DIST
+   *   5  nearest asteroid dist / NORM_DIST
+   *   6  nearest asteroid radius / NORM_RADIUS
+   *   7  power-up dx / NORM_DIST
+   *   8  power-up dz / NORM_DIST
+   *   9  power-up dist / NORM_DIST  (1.0 if no power-up)
+   *  10  laser active (0/1)
+   *  11  velocity vx / MAX_SPEED       — added in v0.7.0 so the brain
+   *  12  velocity vz / MAX_SPEED         can tell "flying right" from
+   *                                      "spinning right" (otherwise it
+   *                                      defaults to the "spin and shoot"
+   *                                      local minimum).
    * @returns {Float32Array}
    */
   function getState() {
-    const features = new Float32Array(11);
+    const features = new Float32Array(13);
 
     // 0: speed / MAX_SPEED
     const speed = Math.hypot(ship.velocity.x, ship.velocity.z);
@@ -553,6 +605,13 @@ export function createTrainingEnvironment(opts = {}) {
     // 10: laser active
     features[10] = laserActive ? 1 : 0;
 
+    // 11-12: velocity direction (signed). Without these the brain
+    // can't distinguish "flying right" from "spinning right" — a
+    // critical gap that allowed the "spin in place and shoot" local
+    // minimum. Added in v0.7.0.
+    features[11] = ship.velocity.x / NORM_VEL;
+    features[12] = ship.velocity.z / NORM_VEL;
+
     return features;
   }
 
@@ -563,6 +622,17 @@ export function createTrainingEnvironment(opts = {}) {
   function getScore() { return score; }
   function getSurvivalTime() { return survivalTime; }
   function getPowerupsCollected() { return powerupsCollected; }
+  /**
+   * Total world-units traveled this episode (sum of `speed * dt`).
+   * Used by the trainer's movement reward — brains that just spin in
+   * place have low distance traveled, brains that chase power-ups
+   * and asteroids have high distance traveled.
+   * @returns {number}
+   */
+  function getDistanceTraveled() { return distanceTraveled; }
+  /** Current systemSeed (set by reset, varies per episode when the
+   * trainer overrides). */
+  function getActiveSeed() { return activeSeed; }
   function isLaserActive() { return laserActive; }
   function getShipPosition() { return { x: ship.position.x, y: ship.position.y, z: ship.position.z }; }
   function getShipVelocity() { return { x: ship.velocity.x, y: ship.velocity.y, z: ship.velocity.z }; }
@@ -578,6 +648,8 @@ export function createTrainingEnvironment(opts = {}) {
     getScore,
     getSurvivalTime,
     getPowerupsCollected,
+    getDistanceTraveled,
+    getActiveSeed,
     isLaserActive,
     getShipPosition,
     getShipVelocity,

@@ -18,7 +18,11 @@ import { createNetwork, forward, networkFromGenome } from './network.js';
 // Defaults
 // ---------------------------------------------------------------------------
 
-const DEFAULT_INPUT = 11;
+// Input size is fixed at 13 (was 11; added velocity vx/vz so the
+// brain can distinguish "flying right" from "spinning right"). Any
+// trained genome from before this change is incompatible — its
+// length won't match the new architecture.
+const DEFAULT_INPUT = 13;
 const DEFAULT_HIDDEN = 12;
 const DEFAULT_OUTPUT = 3;
 
@@ -129,6 +133,14 @@ export function createTrainedAiBrain(opts) {
 
     // 10: laser active
     features[10] = isLaserActive ? 1 : 0;
+
+    // 11-12: velocity direction. Lets the brain distinguish "flying
+    // right" from "spinning right" — without this the brain defaults
+    // to the "spin in place and shoot" local minimum. The input
+    // architecture is now fixed at 13; any brain created with a
+    // smaller inputSize is a stale (pre-velocity) genome.
+    features[11] = aiVel.x / NORM_VEL;
+    features[12] = aiVel.z / NORM_VEL;
 
     const outputs = forward(network, features);
 

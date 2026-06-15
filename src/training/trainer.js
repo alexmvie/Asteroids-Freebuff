@@ -18,22 +18,34 @@
 
 import { createEvolution } from './evolution.js';
 import { createTrainingEnvironment } from './environment.js';
-import { createNetwork, forward, networkFromGenome } from './network.js';
+import { createNetwork, forward, genomeSize, networkFromGenome } from './network.js';
 import { createEpisodeRecorder } from './recorder.js';
 
 // ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
 
-const DEFAULTS = Object.freeze({
+export const DEFAULTS = Object.freeze({
   populationSize: 100,
-  inputSize: 11,
+  // inputSize: 13 (was 11; added velocity vx/vz so the
+  // brain can distinguish "flying right" from "spinning right").
+  inputSize: 13,
   hiddenSize: 12,
   outputSize: 3,
   maxDurationS: 60,
   dt: 1 / 60,
   episodesPerGenome: 1,
   onProgress: null, // ({ generation, bestFitness, avgFitness }) => void
+  // Per-episode seed strategy. `'vary'` picks a fresh random seed
+  // for every episode so the brain can't memorize one field layout;
+  // `'fixed'` uses the factory's `systemSeed` for every episode (the
+  // old default, useful for reproducibility).
+  seedStrategy: 'vary',
+  // Movement reward coefficient. Added to the fitness for every unit
+  // of distance traveled (sum of `speed * dt`). Small values (0.1–0.5)
+  // discourage the "spin in place" local minimum without dominating
+  // the score/survival/powerups rewards. Set to 0 to disable.
+  movementReward: 0.5,
 });
 
 // ---------------------------------------------------------------------------
@@ -84,6 +96,8 @@ function discretizeYaw(raw) {
  *   onProgress?: (stats: object) => void,
  *   gaOptions?: object,
  *   envOptions?: object,
+ *   seedStrategy?: 'vary' | 'fixed',
+ *   movementReward?: number,
  * }} opts
  */
 export function createTrainer(opts = {}) {
@@ -98,18 +112,16 @@ export function createTrainer(opts = {}) {
     onProgress = DEFAULTS.onProgress,
     gaOptions = {},
     envOptions = {},
+    seedStrategy = DEFAULTS.seedStrategy,
+    movementReward = DEFAULTS.movementReward,
   } = opts;
 
-  // Genome = flat weight array
-  const genomeSize =
-    inputSize * hiddenSize +
-    hiddenSize +
-    hiddenSize * outputSize +
-    outputSize;
+  // Genome = flat weight array (single source of truth: network.genomeSize)
+  const totalGenomeSize = genomeSize(inputSize, hiddenSize, outputSize);
 
   const evolution = createEvolution({
     populationSize,
-    genomeSize,
+    genomeSize: totalGenomeSize,
     ...gaOptions,
   });
 
@@ -139,7 +151,15 @@ export function createTrainer(opts = {}) {
     let totalFitness = 0;
 
     for (let ep = 0; ep < episodesPerGenome; ep++) {
-      env.reset();
+      // Vary the seed per episode so the brain generalizes. The
+      // previous behavior (fixed seed) is preserved when
+      // `seedStrategy === 'fixed'`. Math.random() is acceptable
+      // here because training is non-deterministic by nature
+      // (population init, GA selection, etc. all use Math.random).
+      const resetOpts = seedStrategy === 'vary'
+        ? { systemSeed: Math.floor(Math.random() * 1e9) }
+        : {};
+      env.reset(resetOpts);
       let done = false;
       let steps = 0;
       const maxSteps = Math.ceil(maxDurationS / dt);
@@ -157,11 +177,18 @@ export function createTrainer(opts = {}) {
         steps++;
       }
 
-      // Fitness: balanced (score + survival + power-ups)
+      // Fitness: balanced (score + survival + power-ups + movement).
+      // The movement reward (`+ distance * movementReward`) is the
+      // key fix for the "spin in place and shoot" local minimum: a
+      // brain that just spins has low distance traveled; a brain
+      // that chases asteroids and power-ups has high distance. Small
+      // coefficient (default 0.5) keeps movement from dominating
+      // the score/survival/powerups rewards.
       const score = env.getScore();
       const survival = env.getSurvivalTime();
       const powerups = env.getPowerupsCollected();
-      const fitness = score + survival * 10 + powerups * 100;
+      const distance = env.getDistanceTraveled();
+      const fitness = score + survival * 10 + powerups * 100 + distance * movementReward;
       totalFitness += fitness;
     }
 

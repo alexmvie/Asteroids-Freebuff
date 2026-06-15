@@ -27,12 +27,12 @@ test('reset clears score and survival time', () => {
   assert.equal(env.hasDied(), false);
 });
 
-test('getState returns a Float32Array of length 11', () => {
+test('getState returns a Float32Array of length 13', () => {
   const env = createTrainingEnvironment();
   env.reset();
   const state = env.getState();
   assert.ok(state instanceof Float32Array);
-  assert.equal(state.length, 11);
+  assert.equal(state.length, 13);
 });
 
 test('step advances time and returns done/hit', () => {
