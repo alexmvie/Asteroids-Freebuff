@@ -2,24 +2,30 @@
  * Training loop — orchestrates neuroevolution episodes.
  *
  * For each generation:
- *   1. Every genome runs one (or more) training episodes.
+ *   1. Every genome runs one (or more) training episodes (in parallel
+ *      across `workerCount` worker threads when available).
  *   2. Fitness is computed from the episode outcome.
  *   3. The next generation is bred via the genetic algorithm.
  *
  * Public API:
  *   - `createTrainer(options)` → trainer
- *   - `trainer.runGeneration()` → { bestFitness, avgFitness, bestGenome }
+ *   - `trainer.runGeneration()` → Promise<{...}> (async — uses worker pool)
+ *   - `trainer.runGenerations(count)` → Promise<{...}> (async)
  *   - `trainer.getGeneration()` → number
  *   - `trainer.getPopulation()` → Float32Array[]
  *   - `trainer.setPopulation(pop)` → resume from saved pop
  *   - `trainer.getBestGenome()` → { genome, fitness }
- *   - `trainer.recordEpisode(genome, opts)` → recorded episode for playback
+ *   - `trainer.recordEpisode(genome, opts)` → recorded episode for playback (sync)
+ *   - `trainer.close()` → terminate the worker pool (async)
+ *   - `trainer.getConfig()` → the current effective config (for the dashboard's Live Config)
  */
 
 import { createEvolution } from './evolution.js';
 import { createTrainingEnvironment } from './environment.js';
 import { createNetwork, forward, genomeSize, networkFromGenome } from './network.js';
 import { createEpisodeRecorder } from './recorder.js';
+import { createWorkerPool } from './worker-pool.js';
+import { evaluateGenome, discretizeYaw, deriveMode } from './evaluate-genome.js';
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -46,39 +52,17 @@ export const DEFAULTS = Object.freeze({
   // discourage the "spin in place" local minimum without dominating
   // the score/survival/powerups rewards. Set to 0 to disable.
   movementReward: 0.5,
+  // Parallelism. 0 = single-threaded (no worker pool, useful for
+  // tests + debugging), 1+ = number of worker threads. The server
+  // defaults to `os.cpus().length - 1` (computed inside the pool).
+  workerCount: 0,
 });
 
 // ---------------------------------------------------------------------------
-// Pure helpers
+// Pure helpers (deriveMode, discretizeYaw, evaluateGenome all live in
+// `./evaluate-genome.js` so the sync trainer path and the worker path
+// share one implementation).
 // ---------------------------------------------------------------------------
-
-/**
- * Derive the brain's mode from the same heuristic the hand-coded AI uses.
- * Pure — used by `recordEpisode` so the recording captures what the brain
- * "thinks" it's doing even though the env is the source of truth for
- * positions. Matches `src/entities/ai.js`.
- *
- * @param {{ nearestAsteroidDist: number, powerupDist: number | null }} args
- * @returns {string}
- */
-function deriveMode({ nearestAsteroidDist, powerupDist }) {
-  if (nearestAsteroidDist < 14) return 'dodge';
-  if (nearestAsteroidDist < 90) return 'target';
-  if (powerupDist != null && powerupDist < 200) return 'hunt';
-  return 'wander';
-}
-
-/**
- * Discretize a raw network output [-1, 1] to {-1, 0, 1}.
- * Matches `src/training/ai-brain.js` and `src/entities/ai.js` thresholds.
- * @param {number} raw
- * @returns {-1 | 0 | 1}
- */
-function discretizeYaw(raw) {
-  if (raw > 0.33) return 1;
-  if (raw < -0.33) return -1;
-  return 0;
-}
 
 // ---------------------------------------------------------------------------
 // Trainer factory
@@ -98,6 +82,7 @@ function discretizeYaw(raw) {
  *   envOptions?: object,
  *   seedStrategy?: 'vary' | 'fixed',
  *   movementReward?: number,
+ *   workerCount?: number,
  * }} opts
  */
 export function createTrainer(opts = {}) {
@@ -114,6 +99,7 @@ export function createTrainer(opts = {}) {
     envOptions = {},
     seedStrategy = DEFAULTS.seedStrategy,
     movementReward = DEFAULTS.movementReward,
+    workerCount = DEFAULTS.workerCount,
   } = opts;
 
   // Genome = flat weight array (single source of truth: network.genomeSize)
@@ -129,13 +115,47 @@ export function createTrainer(opts = {}) {
   let generation = 0;
   let bestEver = { genome: null, fitness: -Infinity };
 
-  // Create one reusable environment per trainer (not per episode —
-  // we call `reset()` between episodes, which is cheap).
+  // The single-threaded path needs one env (reused via reset() between
+  // episodes). The multi-threaded path doesn't use this env — each
+  // worker creates its own — so it's fine to leave it constructed
+  // even when workerCount > 0.
   const env = createTrainingEnvironment({
     maxDurationS,
     dt,
     ...envOptions,
   });
+
+  // Optional worker pool for parallel evaluation. Created lazily so
+  // the cost is only paid when workerCount > 0.
+  /** @type {ReturnType<typeof createWorkerPool> | null} */
+  let pool = null;
+  if (workerCount > 0) {
+    pool = createWorkerPool({
+      workerCount,
+      onWorkerError: (err) => {
+        // Surface to the console so the user sees the pool is
+        // having trouble. We don't kill the trainer — the respawn
+        // inside the pool keeps the worker count at the target.
+        // eslint-disable-next-line no-console
+        console.error(`[trainer] worker error: ${err.message}`);
+      },
+    });
+  }
+
+  // The static config that's safe to send to every worker. Built
+  // once at factory time and reused for every task — saves
+  // re-allocating the object on every generation.
+  const workerOptions = {
+    inputSize,
+    hiddenSize,
+    outputSize,
+    maxDurationS,
+    dt,
+    seedStrategy,
+    movementReward,
+    episodesPerGenome,
+    envOptions,
+  };
 
   // -------------------------------------------------------------------------
   // Internal helpers
@@ -143,56 +163,42 @@ export function createTrainer(opts = {}) {
 
   /**
    * Run a single episode with a given genome and return the fitness.
+   * Synchronous (single-threaded path). Delegates to the shared
+   * `evaluateGenome` helper so the sync and worker paths share
+   * one implementation.
    * @param {Float32Array} genome
    * @returns {number}
    */
-  function evaluateGenome(genome) {
+  function evaluateGenomeSync(genome) {
     const network = networkFromGenome(genome, inputSize, hiddenSize, outputSize);
-    let totalFitness = 0;
+    return evaluateGenome({
+      network: { forward: (state) => forward(network, state) },
+      env,
+      options: {
+        dt, maxDurationS, seedStrategy, movementReward, episodesPerGenome,
+      },
+    });
+  }
 
-    for (let ep = 0; ep < episodesPerGenome; ep++) {
-      // Vary the seed per episode so the brain generalizes. The
-      // previous behavior (fixed seed) is preserved when
-      // `seedStrategy === 'fixed'`. Math.random() is acceptable
-      // here because training is non-deterministic by nature
-      // (population init, GA selection, etc. all use Math.random).
-      const resetOpts = seedStrategy === 'vary'
-        ? { systemSeed: Math.floor(Math.random() * 1e9) }
-        : {};
-      env.reset(resetOpts);
-      let done = false;
-      let steps = 0;
-      const maxSteps = Math.ceil(maxDurationS / dt);
-
-      while (!done && steps < maxSteps) {
-        const state = env.getState();
-        const outputs = forward(network, state);
-
-        const yaw = discretizeYaw(outputs[0]);
-        const thrust = outputs[1] > 0;
-        const fire = outputs[2] > 0;
-
-        const result = env.step({ yaw, thrust, fire });
-        done = result.done;
-        steps++;
-      }
-
-      // Fitness: balanced (score + survival + power-ups + movement).
-      // The movement reward (`+ distance * movementReward`) is the
-      // key fix for the "spin in place and shoot" local minimum: a
-      // brain that just spins has low distance traveled; a brain
-      // that chases asteroids and power-ups has high distance. Small
-      // coefficient (default 0.5) keeps movement from dominating
-      // the score/survival/powerups rewards.
-      const score = env.getScore();
-      const survival = env.getSurvivalTime();
-      const powerups = env.getPowerupsCollected();
-      const distance = env.getDistanceTraveled();
-      const fitness = score + survival * 10 + powerups * 100 + distance * movementReward;
-      totalFitness += fitness;
+  /**
+   * Evaluate the whole population. Uses the worker pool when one is
+   * available (workerCount > 0); otherwise falls back to the sync
+   * loop on the main thread. Always returns fitnesses in the same
+   * order as the input population.
+   * @param {Float32Array[]} pop
+   * @returns {Promise<Float32Array>}
+   */
+  async function evaluateAll(pop) {
+    if (pool) {
+      return pool.evaluateAll(pop, workerOptions);
     }
-
-    return totalFitness / episodesPerGenome;
+    // Sync fallback. Wrap in a resolved promise so the call site
+    // is uniform.
+    const fitnesses = new Float32Array(pop.length);
+    for (let i = 0; i < pop.length; i++) {
+      fitnesses[i] = evaluateGenomeSync(pop[i]);
+    }
+    return fitnesses;
   }
 
   // -------------------------------------------------------------------------
@@ -200,23 +206,23 @@ export function createTrainer(opts = {}) {
   // -------------------------------------------------------------------------
 
   /**
-   * Run one generation of evaluation + evolution.
-   * @returns {{ generation: number, bestFitness: number, avgFitness: number, bestGenome: Float32Array }}
+   * Run one generation of evaluation + evolution. Async because it
+   * uses the worker pool when `workerCount > 0`.
+   * @returns {Promise<{ generation: number, bestFitness: number, avgFitness: number, bestGenome: Float32Array, durationMs: number }>}
    */
-  function runGeneration() {
-    const fitnesses = new Float32Array(population.length);
+  async function runGeneration() {
+    const startMs = Date.now();
+    const fitnesses = await evaluateAll(population);
+
     let sum = 0;
     let bestIdx = 0;
-
-    for (let i = 0; i < population.length; i++) {
-      const fit = evaluateGenome(population[i]);
-      fitnesses[i] = fit;
-      sum += fit;
-      if (fit > fitnesses[bestIdx]) bestIdx = i;
+    for (let i = 0; i < fitnesses.length; i++) {
+      sum += fitnesses[i];
+      if (fitnesses[i] > fitnesses[bestIdx]) bestIdx = i;
     }
 
     const bestFitness = fitnesses[bestIdx];
-    const avgFitness = sum / population.length;
+    const avgFitness = sum / fitnesses.length;
     const bestGenome = new Float32Array(population[bestIdx]);
 
     if (bestFitness > bestEver.fitness) {
@@ -229,6 +235,7 @@ export function createTrainer(opts = {}) {
         bestFitness,
         avgFitness,
         bestEverFitness: bestEver.fitness,
+        durationMs: Date.now() - startMs,
       });
     }
 
@@ -241,18 +248,24 @@ export function createTrainer(opts = {}) {
       bestFitness,
       avgFitness,
       bestGenome,
+      durationMs: Date.now() - startMs,
     };
   }
 
   /**
-   * Run N generations in a loop.
+   * Run N generations in a loop. Yields to the event loop between
+   * generations so the HTTP server (in `train-server.js`) stays
+   * responsive while training is in progress.
    * @param {number} count
-   * @returns {{ generation: number, bestFitness: number, avgFitness: number, bestGenome: Float32Array }}
+   * @returns {Promise<{ generation: number, bestFitness: number, avgFitness: number, bestGenome: Float32Array, durationMs: number }>}
    */
-  function runGenerations(count) {
+  async function runGenerations(count) {
     let result;
     for (let i = 0; i < count; i++) {
-      result = runGeneration();
+      result = await runGeneration();
+      // Yield so the server can process HTTP requests between
+      // generations (e.g. /status, /stop, /playback).
+      await new Promise((resolve) => setImmediate(resolve));
     }
     return result;
   }
@@ -289,6 +302,47 @@ export function createTrainer(opts = {}) {
 
   function getBestGenome() {
     return bestEver;
+  }
+
+  /**
+   * The current effective config. Returned as a flat object so the
+   * dashboard can render it as "Live Config" chips. Includes both
+   * the user-supplied overrides AND the resolved GA options so
+   * the user can see every parameter that's actually in use.
+   * @returns {object}
+   */
+  function getConfig() {
+    return {
+      populationSize,
+      inputSize,
+      hiddenSize,
+      outputSize,
+      maxDurationS,
+      dt,
+      episodesPerGenome,
+      seedStrategy,
+      movementReward,
+      workerCount: pool ? pool.workerCount : 0,
+      ga: {
+        mutationRate: gaOptions.mutationRate ?? 0.15,
+        mutationStrength: gaOptions.mutationStrength ?? 0.3,
+        elitismCount: gaOptions.elitismCount ?? 5,
+        crossoverRate: gaOptions.crossoverRate ?? 0.7,
+        tournamentSize: gaOptions.tournamentSize ?? 3,
+      },
+    };
+  }
+
+  /**
+   * Terminate the worker pool. Call this when the trainer is no
+   * longer needed (e.g. on server shutdown). Safe to call when
+   * workerCount was 0 (no-op).
+   */
+  async function close() {
+    if (pool) {
+      await pool.close();
+      pool = null;
+    }
   }
 
   /**
@@ -335,7 +389,7 @@ export function createTrainer(opts = {}) {
       const state = recordEnv.getState();
       const outputs = forward(network, state);
 
-      // Discretize outputs
+      // Discretize outputs (shared helper — same thresholds as the worker)
       const yaw = discretizeYaw(outputs[0]);
       const thrust = outputs[1] > 0;
       const fire = outputs[2] > 0;
@@ -375,6 +429,8 @@ export function createTrainer(opts = {}) {
     setPopulation,
     setGeneration,
     getBestGenome,
+    getConfig,
+    close,
     recordEpisode,
   };
 }

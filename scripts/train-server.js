@@ -51,6 +51,7 @@ let trainingState = {
   avgFitness: 0,
   bestEverFitness: 0,
   bestGenome: null,
+  lastDurationMs: 0,
 };
 let shouldStop = false;
 const sseClients = new Set();
@@ -82,6 +83,20 @@ async function runTrainingLoop(params) {
     Math.round((params.elitismFraction ?? 0.05) * popSize),
   ));
 
+  // Worker count: 0 (sync) by default for tests, or `os.cpus().length - 1`
+  // for the server. The trainer's `createWorkerPool` floors at 1.
+  // `params.workerCount === -1` means "auto" (use cpus-1).
+  let workerCount = params.workerCount ?? -1;
+  if (workerCount === -1 || workerCount == null) {
+    try {
+      const cpus = (await import('node:os')).cpus()?.length ?? 1;
+      workerCount = Math.max(1, cpus - 1);
+    } catch (_) {
+      workerCount = 1;
+    }
+  }
+  if (workerCount < 0) workerCount = 0;
+
   trainer = createTrainer({
     // Core
     populationSize: popSize,
@@ -93,11 +108,15 @@ async function runTrainingLoop(params) {
     // Advanced
     episodesPerGenome: params.episodesPerGenome || 1,
     dt: params.dt || 1 / 60,
-    // GA options (crossoverRate, tournamentSize left as defaults)
+    // Parallelism
+    workerCount,
+    // GA options (crossoverRate, tournamentSize passed through)
     gaOptions: {
       mutationRate: params.mutationRate ?? 0.15,
       mutationStrength: params.mutationStrength ?? 0.3,
       elitismCount,
+      crossoverRate: params.crossoverRate ?? 0.7,
+      tournamentSize: params.tournamentSize ?? 3,
     },
     onProgress: (stats) => {
       trainingState = {
@@ -107,6 +126,7 @@ async function runTrainingLoop(params) {
         avgFitness: stats.avgFitness,
         bestEverFitness: stats.bestEverFitness,
         bestGenome: stats.bestGenome,
+        lastDurationMs: stats.durationMs,
       };
       broadcast({ type: 'progress', ...stats });
     },
@@ -121,7 +141,7 @@ async function runTrainingLoop(params) {
     // while the CPU-intensive neuroevolution generation runs.
     await new Promise((resolve) => setImmediate(resolve));
 
-    const result = trainer.runGeneration();
+    const result = await trainer.runGeneration();
 
     // Keep trainingState.bestGenome in sync (onProgress doesn't carry the genome,
     // so the playback endpoint would 404 without this).
@@ -139,6 +159,9 @@ async function runTrainingLoop(params) {
   }
 
   trainingState.running = false;
+  if (trainer && trainer.close) {
+    try { await trainer.close(); } catch (_) { /* ignore */ }
+  }
   broadcast({ type: 'stopped' });
 }
 
@@ -206,6 +229,22 @@ function handleStop(req, res) {
 function handleStatus(req, res) {
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(trainingState));
+}
+
+/**
+ * Returns the trainer's current effective config (from trainer.getConfig()).
+ * The dashboard fetches this on boot to render the "Live Config" section —
+ * the user can see every parameter that's actually in use, not just the
+ * ones that have UI controls. While training is idle (no trainer yet),
+ * returns an empty object so the dashboard shows a "Not training"
+ * placeholder.
+ */
+function handleConfig(req, res) {
+  const config = trainer && typeof trainer.getConfig === 'function'
+    ? trainer.getConfig()
+    : null;
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ config, running: trainingState.running }));
 }
 
 function handleDownload(req, res) {
@@ -426,6 +465,9 @@ const server = http.createServer((req, res) => {
       break;
     case '/status':
       handleStatus(req, res);
+      break;
+    case '/config':
+      handleConfig(req, res);
       break;
     case '/download':
       handleDownload(req, res);

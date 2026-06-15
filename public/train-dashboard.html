@@ -171,6 +171,14 @@
           <div class="stat-label">Best Ever <span class="help-icon">?</span></div>
           <div class="stat-value">—</div>
         </div>
+        <div class="stat-card" data-stat="workers" title="Number of CPU cores currently evaluating genomes in parallel. Higher = faster generations, up to your CPU's core count.">
+          <div class="stat-label">Workers <span class="help-icon">?</span></div>
+          <div class="stat-value">—</div>
+        </div>
+        <div class="stat-card" data-stat="genTime" title="How long the most recent generation took (in seconds). Lower = faster. Compare with/without workers to see the speedup.">
+          <div class="stat-label">Last Gen Time <span class="help-icon">?</span></div>
+          <div class="stat-value">—</div>
+        </div>
       </section>
 
       <!-- Chart + Controls -->
@@ -281,6 +289,24 @@
             <span class="control-hint" id="hint-elitism">Top 5 brains preserved (5%)</span>
           </div>
 
+          <div class="control-group">
+            <label for="param-crossover-rate">
+              Crossover Rate
+              <span class="help-icon" title="Chance two parents are blended into a child (vs one being cloned). 0.7 = 70% blends, 30% clones. Higher = more genetic mixing.">?</span>
+            </label>
+            <input type="range" id="param-crossover-rate" class="range-slider" min="0" max="1" step="0.05" value="0.7">
+            <span class="control-hint" id="hint-crossover-rate">70% blends, 30% clones</span>
+          </div>
+
+          <div class="control-group">
+            <label for="param-tournament-size">
+              Tournament Size
+              <span class="help-icon" title="How many brains compete in each parent selection. 3 = pick the best of 3 random brains. Higher = more selective (exploitation), lower = more random (exploration).">?</span>
+            </label>
+            <input type="range" id="param-tournament-size" class="range-slider" min="1" max="10" step="1" value="3">
+            <span class="control-hint" id="hint-tournament-size">Pick best of 3 random brains</span>
+          </div>
+
           <details class="advanced-disclosure">
             <summary>
               <span class="advanced-icon">⚙</span>
@@ -319,6 +345,14 @@
                 </div>
                 <span class="control-hint">Don't change — breaks genome compatibility</span>
               </div>
+              <div class="control-group">
+                <label for="param-worker-count">
+                  Worker Count
+                  <span class="help-icon" title="Number of CPU cores to use for parallel genome evaluation. -1 = auto (use cpus.length - 1, leaves 1 core for the main thread + HTTP server). 0 = single-threaded. Higher = faster generations.">?</span>
+                </label>
+                <input type="number" id="param-worker-count" value="-1" min="-1" max="64">
+                <span class="control-hint">-1 = auto (use all but 1 core); 0 = single-threaded</span>
+              </div>
             </div>
           </details>
 
@@ -338,6 +372,17 @@
             <p>Drop a genome JSON here, or click to upload</p>
             <input type="file" id="upload-input" accept=".json,application/json">
           </div>
+        </div>
+      </section>
+
+      <!-- Live Config — shows every param the trainer is actually using, read from /config -->
+      <section class="panel live-config-panel">
+        <h2 class="panel-title">
+          Live Config
+          <span class="panel-hint" id="live-config-status">Connect to server to populate</span>
+        </h2>
+        <div class="live-config-grid" id="live-config-grid">
+          <div class="live-config-empty">Start a training run to see the effective config here.</div>
         </div>
       </section>
 

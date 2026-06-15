@@ -33,12 +33,23 @@ const els = {
   paramEpisodes: document.getElementById('param-episodes'),
   paramDt: document.getElementById('param-dt'),
   paramPreset: document.getElementById('param-preset'),
+  paramWorkerCount: document.getElementById('param-worker-count'),
+  paramCrossoverRate: document.getElementById('param-crossover-rate'),
+  paramTournamentSize: document.getElementById('param-tournament-size'),
   hintMovementReward: document.getElementById('hint-movement-reward'),
   hintMutationRate: document.getElementById('hint-mutation-rate'),
   hintMutationStrength: document.getElementById('hint-mutation-strength'),
   hintElitism: document.getElementById('hint-elitism'),
+  hintCrossoverRate: document.getElementById('hint-crossover-rate'),
+  hintTournamentSize: document.getElementById('hint-tournament-size'),
   hintArchHidden: document.getElementById('hint-arch-hidden'),
   hintPreset: document.getElementById('hint-preset'),
+  // New stat cards
+  workers: document.querySelector('[data-stat="workers"] .stat-value'),
+  genTime: document.querySelector('[data-stat="genTime"] .stat-value'),
+  // Live Config
+  liveConfigGrid: document.getElementById('live-config-grid'),
+  liveConfigStatus: document.getElementById('live-config-status'),
   logEntries: document.getElementById('log-entries'),
   uploadArea: document.getElementById('upload-area'),
   uploadInput: document.getElementById('upload-input'),
@@ -231,6 +242,9 @@ function updateStats(data) {
   if (data.bestFitness != null) els.bestFitness.textContent = data.bestFitness.toFixed(1);
   if (data.avgFitness != null) els.avgFitness.textContent = data.avgFitness.toFixed(1);
   if (data.bestEverFitness != null) els.bestEver.textContent = data.bestEverFitness.toFixed(1);
+  if (data.durationMs != null && els.genTime) {
+    els.genTime.textContent = (data.durationMs / 1000).toFixed(2) + 's';
+  }
   updateButtons();
 }
 
@@ -302,6 +316,19 @@ function updateArchHiddenHint() {
   if (els.hintArchHidden) els.hintArchHidden.textContent = h;
 }
 
+function updateCrossoverRateHint() {
+  const v = parseFloat(els.paramCrossoverRate.value) || 0;
+  const blends = Math.round(v * 100);
+  els.hintCrossoverRate.textContent = `${blends}% blends, ${100 - blends}% clones`;
+}
+
+function updateTournamentSizeHint() {
+  const v = parseInt(els.paramTournamentSize.value, 10) || 3;
+  els.hintTournamentSize.textContent = v === 1
+    ? 'Pick 1 random brain (no selection pressure)'
+    : `Pick best of ${v} random brains`;
+}
+
 // -----------------------------------------------------------------------
 // Training presets — one-click configurations that override every slider
 // below. The single source of truth is PRESETS (each preset is a flat
@@ -318,8 +345,11 @@ const PRESETS = Object.freeze({
     mutationRate: 0.15,
     mutationStrength: 0.3,
     elitismFraction: 0.05,
+    crossoverRate: 0.7,
+    tournamentSize: 3,
     episodesPerGenome: 1,
     dt: 0.016666,
+    workerCount: -1,
     label: '⚖ Balanced — 100 pop, 12 hidden, 60s, 0.5 movement',
   },
   fast: {
@@ -331,8 +361,11 @@ const PRESETS = Object.freeze({
     mutationRate: 0.15,
     mutationStrength: 0.3,
     elitismFraction: 0.05,
+    crossoverRate: 0.7,
+    tournamentSize: 3,
     episodesPerGenome: 1,
     dt: 0.016666,
+    workerCount: -1,
     label: '⚡ Fast — 50 pop, 12 hidden, 30s, no movement reward',
   },
   powerup: {
@@ -344,8 +377,11 @@ const PRESETS = Object.freeze({
     mutationRate: 0.15,
     mutationStrength: 0.3,
     elitismFraction: 0.05,
+    crossoverRate: 0.7,
+    tournamentSize: 3,
     episodesPerGenome: 1,
     dt: 0.016666,
+    workerCount: -1,
     label: '🎯 Power-up hunter — 200 pop, 24 hidden, 60s, 1.0 movement, vary seeds',
   },
   plateau: {
@@ -357,8 +393,11 @@ const PRESETS = Object.freeze({
     mutationRate: 0.25,
     mutationStrength: 0.5,
     elitismFraction: 0.05,
+    crossoverRate: 0.7,
+    tournamentSize: 3,
     episodesPerGenome: 1,
     dt: 0.016666,
+    workerCount: -1,
     label: '💥 Plateau buster — 100 pop, 12 hidden, 60s, 0.25 mutation, 0.5 strength',
   },
 });
@@ -373,8 +412,11 @@ const PRESET_INPUT_MAP = {
   mutationRate: 'paramMutationRate',
   mutationStrength: 'paramMutationStrength',
   elitismFraction: 'paramElitism',
+  crossoverRate: 'paramCrossoverRate',
+  tournamentSize: 'paramTournamentSize',
   episodesPerGenome: 'paramEpisodes',
   dt: 'paramDt',
+  workerCount: 'paramWorkerCount',
 };
 
 /**
@@ -399,6 +441,8 @@ function applyPreset(name) {
   updateMutationRateHint();
   updateMutationStrengthHint();
   updateElitismHint();
+  updateCrossoverRateHint();
+  updateTournamentSizeHint();
   updateArchHiddenHint();
   els.hintPreset.textContent = `Preset applied: ${preset.label}`;
 }
@@ -422,6 +466,8 @@ els.paramMovementReward.addEventListener('input', updateMovementRewardHint);
 els.paramMutationRate.addEventListener('input', updateMutationRateHint);
 els.paramMutationStrength.addEventListener('input', updateMutationStrengthHint);
 els.paramElitism.addEventListener('input', updateElitismHint);
+els.paramCrossoverRate.addEventListener('input', updateCrossoverRateHint);
+els.paramTournamentSize.addEventListener('input', updateTournamentSizeHint);
 els.paramPop.addEventListener('input', updateElitismHint);
 els.paramHidden.addEventListener('input', updateArchHiddenHint);
 
@@ -430,6 +476,8 @@ updateMovementRewardHint();
 updateMutationRateHint();
 updateMutationStrengthHint();
 updateElitismHint();
+updateCrossoverRateHint();
+updateTournamentSizeHint();
 updateArchHiddenHint();
 
 els.btnStart.addEventListener('click', async () => {
@@ -446,9 +494,12 @@ els.btnStart.addEventListener('click', async () => {
     mutationRate: parseFloat(els.paramMutationRate.value) || 0.15,
     mutationStrength: parseFloat(els.paramMutationStrength.value) || 0.3,
     elitismFraction: parseFloat(els.paramElitism.value) || 0.05,
+    crossoverRate: parseFloat(els.paramCrossoverRate.value) || 0.7,
+    tournamentSize: parseInt(els.paramTournamentSize.value, 10) || 3,
     // Advanced
     episodesPerGenome: parseInt(els.paramEpisodes.value, 10) || 1,
     dt: parseFloat(els.paramDt.value) || 1 / 60,
+    workerCount: parseInt(els.paramWorkerCount.value, 10) ?? -1, // -1 = auto
   };
   try {
     const res = await fetch(`${API_BASE}/start`, {
@@ -461,6 +512,9 @@ els.btnStart.addEventListener('click', async () => {
       log(data.error, 'error');
     } else {
       log('Start command sent', 'success');
+      // Refresh Live Config shortly after (so the user sees the new
+      // config the moment training starts).
+      setTimeout(refreshLiveConfig, 100);
     }
   } catch (err) {
     log('Failed to start: ' + err.message, 'error');
@@ -991,6 +1045,116 @@ window.addEventListener('resize', () => {
   if (!els.pbModal.hidden) resizePlaybackCanvas();
 });
 
+// -----------------------------------------------------------------------
+// Live Config — every param the trainer is actually using
+// -----------------------------------------------------------------------
+
+const CONFIG_HINTS = {
+  populationSize: 'Brains per generation',
+  hiddenSize: 'Brain thinking layer size',
+  maxDurationS: 'Seconds per brain per episode',
+  episodesPerGenome: 'Episodes averaged per brain (reduces noise)',
+  dt: 'Brain step interval (s) \u2014 lower = more reactive',
+  seedStrategy: 'Field layout: vary (generalize) or fixed (reproducible)',
+  movementReward: 'Fitness bonus per unit traveled (discourages spin-in-place)',
+  workerCount: 'CPU cores used for parallel evaluation (0 = single-threaded)',
+  inputSize: 'Brain inputs (velocity vx/vz + 11 others)',
+  outputSize: 'Brain outputs (yaw, thrust, fire)',
+  'ga.mutationRate': 'Chance each weight mutates per child',
+  'ga.mutationStrength': 'Magnitude of each mutation',
+  'ga.elitismCount': 'Top brains copied verbatim (no breeding)',
+  'ga.crossoverRate': 'Chance parents are blended vs cloned',
+  'ga.tournamentSize': 'Brains competing for each parent slot',
+};
+
+function renderLiveConfig(config) {
+  if (!config || !els.liveConfigGrid) return;
+  const flat = flattenConfig(config);
+  els.liveConfigGrid.innerHTML = '';
+  for (const [key, value] of Object.entries(flat)) {
+    const chip = document.createElement('div');
+    chip.className = 'live-config-chip';
+    const label = document.createElement('div');
+    label.className = 'chip-label';
+    label.textContent = formatChipLabel(key);
+    const val = document.createElement('div');
+    val.className = 'chip-value';
+    val.textContent = formatConfigValue(value);
+    chip.appendChild(label);
+    chip.appendChild(val);
+    const hint = CONFIG_HINTS[key];
+    if (hint) {
+      const hintEl = document.createElement('div');
+      hintEl.className = 'chip-hint';
+      hintEl.textContent = hint;
+      chip.appendChild(hintEl);
+    }
+    els.liveConfigGrid.appendChild(chip);
+  }
+  if (els.liveConfigStatus) {
+    els.liveConfigStatus.textContent = `${Object.keys(flat).length} parameters \u2014 click any control to change`;
+  }
+}
+
+function formatChipLabel(key) {
+  return key
+    .split('.')
+    .map((segment) =>
+      segment
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .replace(/^./, (c) => c.toUpperCase())
+    )
+    .join(' \u00b7 ');
+}
+
+function flattenConfig(obj, prefix = '') {
+  const out = {};
+  for (const [key, val] of Object.entries(obj)) {
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      Object.assign(out, flattenConfig(val, fullKey));
+    } else {
+      out[fullKey] = val;
+    }
+  }
+  return out;
+}
+
+function formatConfigValue(v) {
+  if (v === null || v === undefined) return '\u2014';
+  if (typeof v === 'number') {
+    if (v > 0 && v < 1 && Math.abs(v * 100 - Math.round(v * 100)) < 0.001) {
+      return `${Math.round(v * 100)}%`;
+    }
+    if (v < 1 && v > 0) {
+      const inv = 1 / v;
+      if (Math.abs(inv - Math.round(inv)) < 0.01) {
+        return `1/${Math.round(inv)}s`;
+      }
+    }
+    return String(v);
+  }
+  return String(v);
+}
+
+async function refreshLiveConfig() {
+  try {
+    const res = await fetch(`${API_BASE}/config`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.config) {
+      renderLiveConfig(data.config);
+      if (data.config.workerCount != null && els.workers) {
+        els.workers.textContent = data.config.workerCount === 0
+          ? 'single-threaded'
+          : String(data.config.workerCount);
+      }
+    }
+  } catch (_) {
+    // Server offline
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
@@ -1016,6 +1180,13 @@ fetch(`${API_BASE}/status`)
     log('Server not reachable. Start it with: npm run train:server', 'error');
   });
 
+// Fetch the current config so the Live Config section populates immediately
+// when the dashboard loads (in case training was started before the page
+// was opened). refreshLiveConfig() handles server-down gracefully.
+refreshLiveConfig();
+
 // First-time-use guidance
 log('Welcome! Read the green "What is happening here?" panel above for a 30-second tour.');
 log('Click ▶ Start to begin training. The first generation takes ~10s, then they run every 5–10s.');
+// Refresh Live Config periodically (every 5s) so changes mid-run are visible
+setInterval(refreshLiveConfig, 5000);
