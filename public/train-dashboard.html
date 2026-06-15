@@ -212,6 +212,99 @@
             <span class="control-hint">60s per brain per generation</span>
           </div>
 
+          <div class="subsection-title">Fitness</div>
+
+          <div class="control-group">
+            <label for="param-movement-reward">
+              Movement Reward
+              <span class="help-icon" title="How much to reward distance traveled (per world unit). Higher = brain flies more; lower = brain camps and shoots. 0 = ignore movement entirely.">?</span>
+            </label>
+            <input type="range" id="param-movement-reward" class="range-slider" min="0" max="2" step="0.05" value="0.5">
+            <span class="control-hint" id="hint-movement-reward">+0.50 per world unit traveled</span>
+          </div>
+
+          <div class="control-group">
+            <label for="param-seed-strategy">
+              Seed Strategy
+              <span class="help-icon" title="Vary = new random field per episode (brain generalizes). Fixed = same field every episode (good for reproducibility + debugging).">?</span>
+            </label>
+            <select id="param-seed-strategy" class="select-input">
+              <option value="vary" selected>Vary (recommended)</option>
+              <option value="fixed">Fixed (reproducible)</option>
+            </select>
+            <span class="control-hint">Vary = brain can't memorize one field</span>
+          </div>
+
+          <div class="subsection-title">GA Evolution</div>
+
+          <div class="control-group">
+            <label for="param-mutation-rate">
+              Mutation Rate
+              <span class="help-icon" title="Chance each weight gets mutated per child. Higher = more exploration, lower = more exploitation. Bump to 0.25+ when stuck at a plateau.">?</span>
+            </label>
+            <input type="range" id="param-mutation-rate" class="range-slider" min="0" max="0.5" step="0.01" value="0.15">
+            <span class="control-hint" id="hint-mutation-rate">15% chance per weight, per child</span>
+          </div>
+
+          <div class="control-group">
+            <label for="param-mutation-strength">
+              Mutation Strength
+              <span class="help-icon" title="Magnitude of each mutation (uniform noise scale). 0.3 = moderate; bump up when stuck, dial down for fine-tuning.">?</span>
+            </label>
+            <input type="range" id="param-mutation-strength" class="range-slider" min="0" max="1" step="0.05" value="0.3">
+            <span class="control-hint" id="hint-mutation-strength">±0.30 typical per-weight change</span>
+          </div>
+
+          <div class="control-group">
+            <label for="param-elitism">
+              Elitism
+              <span class="help-icon" title="Fraction of top brains copied verbatim into the next generation. 0.05 = 5 brains out of 100. Higher = preserves the best strategies but slows exploration.">?</span>
+            </label>
+            <input type="range" id="param-elitism" class="range-slider" min="0" max="0.2" step="0.01" value="0.05">
+            <span class="control-hint" id="hint-elitism">Top 5 brains preserved (5%)</span>
+          </div>
+
+          <details class="advanced-disclosure">
+            <summary>
+              <span class="advanced-icon">⚙</span>
+              <span>Advanced</span>
+            </summary>
+            <div class="advanced-body">
+              <div class="control-group">
+                <label for="param-episodes">
+                  Episodes per Genome
+                  <span class="help-icon" title="How many episodes to run per brain (results averaged). Higher = less noise from unlucky single runs, but slower training.">?</span>
+                </label>
+                <input type="number" id="param-episodes" value="1" min="1" max="10">
+                <span class="control-hint">1 = fastest, 10 = most reliable</span>
+              </div>
+              <div class="control-group">
+                <label for="param-dt">
+                  Brain Step
+                  <span class="help-icon" title="How often the brain decides. 1/60s = 60Hz (default), 1/30s = 30Hz (slower, more reaction time per decision), 1/120s = 120Hz (faster, finer control).">?</span>
+                </label>
+                <select id="param-dt" class="select-input">
+                  <option value="0.008333">1/120s (120 Hz, fast)</option>
+                  <option value="0.016666" selected>1/60s (60 Hz, default)</option>
+                  <option value="0.033333">1/30s (30 Hz, slow)</option>
+                </select>
+                <span class="control-hint">How often the brain re-decides</span>
+              </div>
+              <div class="control-group">
+                <label>
+                  Network Architecture
+                  <span class="help-icon" title="These are baked into the trained genome. Changing them invalidates any saved brain.">?</span>
+                </label>
+                <div class="readonly-row">
+                  <span class="readonly-chip"><span class="readonly-label">Inputs</span><span class="readonly-value">13</span></span>
+                  <span class="readonly-chip"><span class="readonly-label">Hidden</span><span class="readonly-value" id="hint-arch-hidden">12</span></span>
+                  <span class="readonly-chip"><span class="readonly-label">Outputs</span><span class="readonly-value">3</span></span>
+                </div>
+                <span class="control-hint">Don't change — breaks genome compatibility</span>
+              </div>
+            </div>
+          </details>
+
           <div class="button-row">
             <button id="btn-start" class="btn btn-primary" title="Begin training with the settings above.">▶ Start</button>
             <button id="btn-stop" class="btn btn-danger" disabled title="Stop training. Keeps the current best brain so you can deploy it.">⏹ Stop</button>

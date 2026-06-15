@@ -515,6 +515,175 @@ code {
   color: var(--accent-cyan);
 }
 
+/* ----------------------------------------------------------------------
+   Sub-sections within the controls panel
+   ---------------------------------------------------------------------- */
+
+.subsection-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--accent-cyan);
+  margin-top: 6px;
+  margin-bottom: -4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Range sliders — dark theme */
+
+.range-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+  margin: 4px 0;
+}
+
+.range-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  border: 2px solid var(--bg-panel);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.range-slider::-webkit-slider-thumb:hover {
+  background: #7ae5ff;
+  transform: scale(1.15);
+}
+
+.range-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  border: 2px solid var(--bg-panel);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.range-slider::-moz-range-thumb:hover {
+  background: #7ae5ff;
+  transform: scale(1.15);
+}
+
+.range-slider:focus {
+  border-color: var(--accent-cyan);
+}
+
+/* Select dropdown — matches number inputs */
+
+.select-input {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+  cursor: pointer;
+}
+
+.select-input:focus {
+  border-color: var(--accent-cyan);
+}
+
+/* Read-only architecture chips */
+
+.readonly-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.readonly-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.readonly-label {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+
+.readonly-value {
+  color: var(--accent-cyan);
+  font-weight: 700;
+}
+
+/* Advanced disclosure — tighter than .explainer */
+
+.advanced-disclosure {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.advanced-disclosure summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  user-select: none;
+  list-style: none;
+  transition: background 0.15s, color 0.15s;
+}
+
+.advanced-disclosure summary::-webkit-details-marker { display: none; }
+.advanced-disclosure summary::before {
+  content: '▸';
+  color: var(--accent-cyan);
+  font-size: 10px;
+  transition: transform 0.2s;
+}
+.advanced-disclosure[open] summary::before { transform: rotate(90deg); }
+
+.advanced-disclosure summary:hover {
+  background: rgba(72, 219, 251, 0.04);
+  color: var(--text);
+}
+
+.advanced-icon {
+  font-size: 13px;
+}
+
+.advanced-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+}
+
 /* Upload area */
 
 .upload-area {

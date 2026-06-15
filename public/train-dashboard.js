@@ -25,6 +25,18 @@ const els = {
   paramPop: document.getElementById('param-pop'),
   paramHidden: document.getElementById('param-hidden'),
   paramDuration: document.getElementById('param-duration'),
+  paramMovementReward: document.getElementById('param-movement-reward'),
+  paramSeedStrategy: document.getElementById('param-seed-strategy'),
+  paramMutationRate: document.getElementById('param-mutation-rate'),
+  paramMutationStrength: document.getElementById('param-mutation-strength'),
+  paramElitism: document.getElementById('param-elitism'),
+  paramEpisodes: document.getElementById('param-episodes'),
+  paramDt: document.getElementById('param-dt'),
+  hintMovementReward: document.getElementById('hint-movement-reward'),
+  hintMutationRate: document.getElementById('hint-mutation-rate'),
+  hintMutationStrength: document.getElementById('hint-mutation-strength'),
+  hintElitism: document.getElementById('hint-elitism'),
+  hintArchHidden: document.getElementById('hint-arch-hidden'),
   logEntries: document.getElementById('log-entries'),
   uploadArea: document.getElementById('upload-area'),
   uploadInput: document.getElementById('upload-input'),
@@ -255,11 +267,70 @@ function updateButtons() {
 // Controls
 // ---------------------------------------------------------------------------
 
+// Live hint updaters for the slider controls — keep the hint text in
+// sync with the slider's current value so users see exactly what they
+// just set. All values are fractions; the server converts elitismFraction
+// to an absolute elitismCount.
+function updateMovementRewardHint() {
+  const v = parseFloat(els.paramMovementReward.value) || 0;
+  els.hintMovementReward.textContent = v === 0
+    ? '0 = movement ignored (spin in place is free)'
+    : `+${v.toFixed(2)} per world unit traveled`;
+}
+function updateMutationRateHint() {
+  const v = parseFloat(els.paramMutationRate.value) || 0;
+  els.hintMutationRate.textContent = `${Math.round(v * 100)}% chance per weight, per child`;
+}
+function updateMutationStrengthHint() {
+  const v = parseFloat(els.paramMutationStrength.value) || 0;
+  els.hintMutationStrength.textContent = v === 0
+    ? '0 = no mutation (children = exact blends)'
+    : `\u00b1${v.toFixed(2)} typical per-weight change`;
+}
+function updateElitismHint() {
+  const v = parseFloat(els.paramElitism.value) || 0;
+  const pop = parseInt(els.paramPop.value, 10) || 100;
+  const count = Math.max(0, Math.round(v * pop));
+  els.hintElitism.textContent = v === 0
+    ? '0 = no elitism (every brain is bred)'
+    : `Top ${count} brains preserved (${Math.round(v * 100)}% of ${pop})`;
+}
+function updateArchHiddenHint() {
+  const h = parseInt(els.paramHidden.value, 10) || 12;
+  if (els.hintArchHidden) els.hintArchHidden.textContent = h;
+}
+
+els.paramMovementReward.addEventListener('input', updateMovementRewardHint);
+els.paramMutationRate.addEventListener('input', updateMutationRateHint);
+els.paramMutationStrength.addEventListener('input', updateMutationStrengthHint);
+els.paramElitism.addEventListener('input', updateElitismHint);
+els.paramPop.addEventListener('input', updateElitismHint);
+els.paramHidden.addEventListener('input', updateArchHiddenHint);
+
+// Initial hint paint
+updateMovementRewardHint();
+updateMutationRateHint();
+updateMutationStrengthHint();
+updateElitismHint();
+updateArchHiddenHint();
+
 els.btnStart.addEventListener('click', async () => {
+  const popSize = parseInt(els.paramPop.value, 10) || 100;
   const params = {
-    populationSize: parseInt(els.paramPop.value, 10) || 100,
+    // Core
+    populationSize: popSize,
     hiddenSize: parseInt(els.paramHidden.value, 10) || 12,
     maxDurationS: parseInt(els.paramDuration.value, 10) || 60,
+    // Fitness
+    movementReward: parseFloat(els.paramMovementReward.value) || 0,
+    seedStrategy: els.paramSeedStrategy.value || 'vary',
+    // GA (fractions; server converts elitismFraction to elitismCount)
+    mutationRate: parseFloat(els.paramMutationRate.value) || 0.15,
+    mutationStrength: parseFloat(els.paramMutationStrength.value) || 0.3,
+    elitismFraction: parseFloat(els.paramElitism.value) || 0.05,
+    // Advanced
+    episodesPerGenome: parseInt(els.paramEpisodes.value, 10) || 1,
+    dt: parseFloat(els.paramDt.value) || 1 / 60,
   };
   try {
     const res = await fetch(`${API_BASE}/start`, {

@@ -71,11 +71,34 @@ function broadcast(data) {
 // ---------------------------------------------------------------------------
 
 async function runTrainingLoop(params) {
+  // Convert the client-side elitism fraction (0..0.2) to an absolute
+  // elitismCount for the GA. Clamp to [0, populationSize] — the GA
+  // handles 0 correctly (skips the elitism loop and breeds the
+  // whole next generation). Clamping to 1 would silently override
+  // the "0 = no elitism" UI hint.
+  const popSize = params.populationSize || 100;
+  const elitismCount = Math.max(0, Math.min(
+    popSize,
+    Math.round((params.elitismFraction ?? 0.05) * popSize),
+  ));
+
   trainer = createTrainer({
-    populationSize: params.populationSize || 100,
+    // Core
+    populationSize: popSize,
     hiddenSize: params.hiddenSize || 12,
     maxDurationS: params.maxDurationS || 60,
+    // Fitness
+    movementReward: params.movementReward ?? 0.5,
+    seedStrategy: params.seedStrategy || 'vary',
+    // Advanced
+    episodesPerGenome: params.episodesPerGenome || 1,
     dt: params.dt || 1 / 60,
+    // GA options (crossoverRate, tournamentSize left as defaults)
+    gaOptions: {
+      mutationRate: params.mutationRate ?? 0.15,
+      mutationStrength: params.mutationStrength ?? 0.3,
+      elitismCount,
+    },
     onProgress: (stats) => {
       trainingState = {
         running: true,
