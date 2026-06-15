@@ -330,14 +330,15 @@ async function handlePlayback(req, res) {
   const episodeSeed = Number.isFinite(opts.episodeSeed) ? opts.episodeSeed : undefined;
 
   // Infer hidden size from the genome — the genome doesn't carry its own
-  // architecture, so we have to reverse-engineer it.    const hiddenSize = inferHiddenSize(trainingState.bestGenome.length);
-    if (hiddenSize == null) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        error: `Genome length ${trainingState.bestGenome.length} doesn't match a known architecture (13×H + H + H×3 + 3 = 17H + 3, valid H: ${[...VALID_HIDDEN_SIZES].join(', ')})`,
-      }));
-      return;
-    }
+  // architecture, so we have to reverse-engineer it.
+  const hiddenSize = inferHiddenSize(trainingState.bestGenome.length);
+  if (hiddenSize == null) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      error: `Genome length ${trainingState.bestGenome.length} doesn't match a known architecture (13×H + H + H×3 + 3 = 17H + 3, valid H: ${[...VALID_HIDDEN_SIZES].join(', ')})`,
+    }));
+    return;
+  }
 
   recordingInProgress = true;
   try {
