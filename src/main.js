@@ -24,6 +24,8 @@ import { createStateMachine, State } from './systems/state.js';
 import { createHud } from './ui/hud.js';
 import { createDebugHud } from './ui/debug-hud.js';
 import { createDemoAi } from './entities/ai.js';
+import { createTrainedAiBrain } from './training/ai-brain.js';
+import { deserializeGenome } from './training/network.js';
 import { createAsteroidField } from './systems/asteroid-field.js';
 import { createAsteroidUvDebugOverlay } from './systems/asteroid-uv-debug-overlay.js';
 import { createUvUnwrapViewer } from './systems/uv-unwrap-viewer.js';
@@ -360,6 +362,33 @@ const aiWeapon = {
     return aiBullets.fire({ origin, direction });
   },
 };
+
+/**
+ * Try to load a trained genome from `/trained-genome.json` (served by
+ * Vite from the public/ folder). If found, create a neural-network
+ * brain and pass it to the AI. If not found, the AI falls back to
+ * the hand-coded rule-based brain.
+ */
+async function loadTrainedBrain() {
+  try {
+    const res = await fetch('/trained-genome.json');
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data || !Array.isArray(data.genome)) return null;
+    const genome = deserializeGenome(data.genome);
+    const brain = createTrainedAiBrain({ genome });
+    if (typeof console !== 'undefined') {
+      console.log(`[main] Loaded trained brain (gen ${data.generation}, fitness=${data.fitness.toFixed(1)})`);
+    }
+    return brain;
+  } catch (e) {
+    if (typeof console !== 'undefined') {
+      console.log('[main] No trained genome found — using hand-coded AI');
+    }
+    return null;
+  }
+}
+
 const demoAi = createDemoAi({
   scene,
   asteroids: field.getEntities(),
@@ -371,7 +400,46 @@ const demoAi = createDemoAi({
     const p = powerupSystem.getPendingSpawn();
     return p ? p.getPosition() : null;
   },
+  // Trained brain is loaded asynchronously and swapped in once ready.
+  // Until then the AI uses the hand-coded rule-based brain.
+  options: {
+    brain: null,
+  },
 });
+
+// Async: load the trained brain and swap it in when ready.
+loadTrainedBrain().then((brain) => {
+  if (brain) {
+    // The AI's options are immutable after creation, so we recreate
+    // the AI with the trained brain. We must preserve the ship's
+    // current position/yaw so the swap is invisible.
+    const oldShip = demoAi.getShip();
+    const oldPos = { ...oldShip.position };
+    const oldYaw = oldShip.rotation.yaw;
+    demoAi.dispose();
+    // Recreate with the trained brain
+    const newAi = createDemoAi({
+      scene,
+      asteroids: field.getEntities(),
+      weapon: aiWeapon,
+      getPowerupPos: () => {
+        const p = powerupSystem.getPendingSpawn();
+        return p ? p.getPosition() : null;
+      },
+      options: { brain },
+    });
+    newAi.getShip().position = oldPos;
+    newAi.getShip().rotation.yaw = oldYaw;
+    // Swap the reference so the rest of main.js uses the new AI.
+    // We mutate the demoAi object in place because it's captured
+    // by many closures above (aiWeapon, powerupSystem, etc.).
+    Object.assign(demoAi, newAi);
+    if (typeof console !== 'undefined') {
+      console.log('[main] Trained brain swapped in — AI now uses neural network');
+    }
+  }
+});
+
 // Same GLB swap for the AI demo ship, so the player and the NPC match.
 loadShipModel(demoAi.getShip(), '/models/skyfighter.glb', { modelRotationY: -Math.PI / 2 }).then((result) => {
   if (result.success && typeof console !== 'undefined') {

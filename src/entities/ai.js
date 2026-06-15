@@ -436,6 +436,7 @@ export function pickAiSpawn(radius = DEFAULTS.spawnRadius, rng = Math.random) {
  *     fireConeHalfAngle?: number,
  *     shipFactory?: (opts: { scene: import('three').Scene, position: {x:number,y:number,z:number} }) => any,
  *     rng?: () => number,
+ *     brain?: { tick: (args: any) => { yaw: number, thrust: boolean, mode: string, fire: boolean } } | null,
  *   },
  * }} opts
  */
@@ -446,6 +447,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
   const opts = { ...DEFAULTS, ...options };
   const rng = opts.rng || Math.random;
   const shipFactory = opts.shipFactory || createShip;
+  const brain = opts.brain || null;
 
   // ---- Initial spawn ---------------------------------------------------
   const initial = pickAiSpawn(opts.spawnRadius, rng);
@@ -488,7 +490,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     }
 
     // Decide what to do
-    const decision = aiBrainTick({
+    const brainArgs = {
       aiPos: ship.position,
       aiYaw: ship.rotation.yaw,
       aiVel: ship.velocity,
@@ -502,7 +504,8 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       wanderHeading,
       wanderHeadingExpiresAt,
       rng,
-    });
+    };
+    const decision = brain ? brain.tick(brainArgs) : aiBrainTick(brainArgs);
 
     // Commit wander state changes (side-channel from brain)
     if (decision._wanderHeading !== undefined) {
@@ -554,20 +557,23 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     setEnabled: (v) => { enabled = !!v; },
     isEnabled: () => enabled,
     /** Exposed for tests / dev tooling. */
-    getMode: () => aiBrainTick({
-      aiPos: ship.position,
-      aiYaw: ship.rotation.yaw,
-      aiVel: ship.velocity,
-      asteroids,
-      time,
-      powerupPos: getPowerupPos ? getPowerupPos() : null,
-      dodgeDist: opts.dodgeDist,
-      targetDist: opts.targetDist,
-      wanderTurnPeriod: opts.wanderTurnPeriod,
-      fireConeHalfAngle: opts.fireConeHalfAngle,
-      wanderHeading,
-      wanderHeadingExpiresAt,
-      rng,
-    }).mode,
+    getMode: () => {
+      const modeArgs = {
+        aiPos: ship.position,
+        aiYaw: ship.rotation.yaw,
+        aiVel: ship.velocity,
+        asteroids,
+        time,
+        powerupPos: getPowerupPos ? getPowerupPos() : null,
+        dodgeDist: opts.dodgeDist,
+        targetDist: opts.targetDist,
+        wanderTurnPeriod: opts.wanderTurnPeriod,
+        fireConeHalfAngle: opts.fireConeHalfAngle,
+        wanderHeading,
+        wanderHeadingExpiresAt,
+        rng,
+      };
+      return brain ? brain.tick(modeArgs).mode : aiBrainTick(modeArgs).mode;
+    },
   };
 }
