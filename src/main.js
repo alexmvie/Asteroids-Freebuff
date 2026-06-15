@@ -537,31 +537,26 @@ function resetRunState() {
   bus.emit('lives:changed', { lives });
 }
 
-// ---- Input --------------------------------------------------------------
-/**
- * Fire the active weapon. Gated to PLAYING state only:
- *   - DEMO: Space starts the game (onStart), not fire.
- *   - GAME_OVER: the game is over; no shooting through the overlay.
- *   - PLAYING: normal weapon fire.
- *
- * While the laser power-up is active, fires the laser; otherwise fires
- * a bullet. Both weapons use the ship's current yaw to compute the
- * forward direction.
- */
-function fireFromShip() {
-  if (stateMachine.getState() !== State.PLAYING) return;
-  const yaw = ship.rotation.yaw;
-  const direction = { x: -Math.sin(yaw), y: 0, z: -Math.cos(yaw) };
-  if (powerupSystem.isLaserActive()) {
-    laser.fire({ origin: ship.position, direction, asteroids: demoAsteroids });
-  } else {
-    playerBullets.fire({ origin: ship.position, direction });
-  }
-}
+// ---- Player weapon ------------------------------------------------------
+// Mirrors the AI weapon pattern: a duck-typed `{ fire(opts) }` object that
+// derives direction from the ship's yaw and routes through the laser
+// (when active) or the player's bullet pool. Gated to PLAYING state only.
+const playerWeapon = {
+  fire({ asteroids }) {
+    if (stateMachine.getState() !== State.PLAYING) return;
+    const yaw = ship.rotation.yaw;
+    const direction = { x: -Math.sin(yaw), y: 0, z: -Math.cos(yaw) };
+    if (powerupSystem.isLaserActive()) {
+      return laser.fire({ origin: ship.position, direction, asteroids });
+    }
+    return playerBullets.fire({ origin: ship.position, direction });
+  },
+};
 
+// ---- Input --------------------------------------------------------------
 const input = createInputSystem({
   ship,
-  onFire: fireFromShip,
+  onFire: () => playerWeapon.fire({ asteroids: demoAsteroids }),
   onStart: () => {
     // any-key: DEMO → PLAYING (start) or GAME_OVER → PLAYING (restart).
     // The state machine enforces which transitions are legal.
@@ -845,7 +840,7 @@ function tick(dt) {
     !laser.isFiring() &&
     !laser.isOnCooldown()
   ) {
-    fireFromShip();
+    playerWeapon.fire({ asteroids: demoAsteroids });
   }
 
   // ---- Laser update (follows the active firer, accumulates hits) ----
