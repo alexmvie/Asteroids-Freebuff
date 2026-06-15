@@ -443,6 +443,121 @@ test('pickAiSpawn: deterministic with a fixed rng', () => {
   assert.equal(yaw, 0);
 });
 
+// ---- aiBrainTick: HUNT mode (intercept controller) -------------------
+
+test('aiBrainTick: hunt mode → approach when aligned and need speed', () => {
+  // Ship at origin facing +X (yaw = -PI/2). Power-up at (60, 0).
+  // No velocity. closingSpeed = 0, desiredClosing = min(20, 60) = 20.
+  // needSpeed = true, aligned = true → thrust.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2, // facing +X
+    aiVel: { x: 0, z: 0 },
+    asteroids: [],
+    time: 0,
+    powerupPos: { x: 60, z: 0 },
+  });
+  assert.equal(result.mode, 'hunt');
+  assert.equal(result.thrust, true);
+  assert.equal(result.fire, false);
+});
+
+test('aiBrainTick: hunt mode → brake when approaching too fast', () => {
+  // Ship at origin, velocity (80, 0) → moving +X at 80 u/s.
+  // Power-up at (50, 0). closingSpeed = 80, desiredClosing = min(20, 50) = 20.
+  // closingSpeed (80) > desiredClosing * 1.5 (30) → BRAKE.
+  // brakeAngle = atan2(0, -80) = PI (pointing -X).
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2, // facing +X
+    aiVel: { x: 80, z: 0 },
+    asteroids: [],
+    time: 0,
+    powerupPos: { x: 50, z: 0 },
+  });
+  assert.equal(result.mode, 'hunt');
+  // Brake direction is -X. facingAngle(-PI/2) = +X (atan2 convention).
+  // brakeAngle = PI. diff = PI - 0 = PI > 0.2 → yaw: -1.
+  assert.equal(result.yaw, -1);
+  // Ship is facing +X but brake is -X: |diff| = PI > 0.6 → no thrust.
+  assert.equal(result.thrust, false);
+});
+
+test('aiBrainTick: hunt mode → brake thrusts when pointing in brake direction', () => {
+  // Ship at origin, velocity (80, 0), facing -X (yaw = PI/2).
+  // Power-up at (50, 0). closingSpeed = 80 > 30 → BRAKE.
+  // brakeAngle = PI (pointing -X). facingAngle(PI/2) = PI.
+  // diff = PI - PI = 0 → |diff| < 0.6 → thrust.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: Math.PI / 2, // facing -X
+    aiVel: { x: 80, z: 0 },
+    asteroids: [],
+    time: 0,
+    powerupPos: { x: 50, z: 0 },
+  });
+  assert.equal(result.mode, 'hunt');
+  assert.equal(result.yaw, 0); // aligned with brake direction
+  assert.equal(result.thrust, true); // braking thrust
+});
+
+test('aiBrainTick: hunt mode → final approach (coast in when close and slow)', () => {
+  // Ship at (45, 0), velocity (5, 0), facing +X. Power-up at (50, 0).
+  // pdist = 5 (< 8), closingSpeed = 5 (< 15), speed = 5 (< 20) → FINAL.
+  // coast in: thrust = false.
+  const result = aiBrainTick({
+    aiPos: { x: 45, z: 0 },
+    aiYaw: -Math.PI / 2, // facing +X
+    aiVel: { x: 5, z: 0 },
+    asteroids: [],
+    time: 0,
+    powerupPos: { x: 50, z: 0 },
+  });
+  assert.equal(result.mode, 'hunt');
+  assert.equal(result.thrust, false); // coast
+});
+
+test('aiBrainTick: hunt mode → no thrust when not aligned in approach', () => {
+  // Ship at origin, velocity (0, 0), facing -Z (yaw 0). Power-up at (60, 0).
+  // targetAngle = atan2(0, 60) = 0. facingAngle(0) = -PI/2.
+  // diff = 0 - (-PI/2) = PI/2 > 0.5 → aligned = false → no thrust.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0, // facing -Z
+    aiVel: { x: 0, z: 0 },
+    asteroids: [],
+    time: 0,
+    powerupPos: { x: 60, z: 0 },
+  });
+  assert.equal(result.mode, 'hunt');
+  assert.equal(result.thrust, false); // not aligned
+});
+
+test('aiBrainTick: hunt mode → defaults aiVel to zero when omitted', () => {
+  // Same as approach test but without aiVel — should default to {0,0}.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [],
+    time: 0,
+    powerupPos: { x: 60, z: 0 },
+  });
+  assert.equal(result.mode, 'hunt');
+  assert.equal(result.thrust, true); // aligned + needSpeed
+});
+
+test('aiBrainTick: hunt mode ignores power-up beyond huntDist', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [],
+    time: 0,
+    powerupPos: { x: 600, z: 0 }, // beyond default 500
+  });
+  assert.equal(result.mode, 'wander'); // falls through to wander
+});
+
 // ---- createDemoAi factory ---------------------------------------------
 
 test('createDemoAi: requires scene and asteroids', () => {

@@ -158,13 +158,14 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
  * Returns `{ yaw, thrust, mode, fire }` where:
  *   - `yaw`     ∈ {-1, 0, +1}  (steering; -1 = turn left, +1 = turn right)
  *   - `thrust`  boolean         (true = accelerate)
- *   - `mode`    'dodge' | 'target' | 'wander'
+ *   - `mode`    'hunt' | 'dodge' | 'target' | 'wander'
  *   - `fire`    boolean         (true when the target is roughly in
  *                                front of the ship — only in TARGET mode)
  *
  * @param {{
  *   aiPos: { x: number, z: number },
  *   aiYaw: number,                            // current yaw in radians
+ *   aiVel?: { x: number, z: number },         // current velocity (default zero)
  *   asteroids: Array<{ getPosition: () => any }>,
  *   time: number,                             // seconds since boot (for wander clock)
  *   powerupPos?: { x: number, z: number } | null,  // pending power-up position (optional)
@@ -181,6 +182,7 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
 export function aiBrainTick({
   aiPos,
   aiYaw,
+  aiVel = { x: 0, z: 0 },
   asteroids,
   time,
   powerupPos = null,
@@ -200,30 +202,91 @@ export function aiBrainTick({
   const nearest = findNearestAsteroid(aiPos, asteroids);
 
   // ---- 1. HUNT POWER-UP (highest priority) ----------------------------
+  //
+  // Intercept controller — acts like a human pilot. Instead of
+  // blindly pointing at the target and thrusting (which causes
+  // circular orbits), it reads the ship's velocity and computes
+  // a closing speed, then decides between three phases:
+  //
+  //   BRAKE:  closing too fast → flip opposite velocity + burn
+  //   FINAL:  close & slow → coast in with gentle steering
+  //   APPROACH: steer toward target, thrust when aligned & need speed
+  //
+  // The result is a natural "approach → brake → coast" cycle that
+  // looks like a pilot managing their approach. No more circles.
   if (powerupPos && typeof powerupPos.x === 'number') {
     const pdx = powerupPos.x - aiPos.x;
     const pdz = powerupPos.z - aiPos.z;
     const pdist = Math.hypot(pdx, pdz);
     if (pdist < powerupHuntDist) {
+      const speed = Math.hypot(aiVel.x, aiVel.z);
+      // Closing speed: velocity component toward the target.
+      // Positive = approaching, negative = receding.
+      const closingSpeed = pdist > 0.01
+        ? (pdx * aiVel.x + pdz * aiVel.z) / pdist
+        : 0;
+
+      // Desired closing speed: proportional to distance, capped
+      // at 20 u/s. At distance 50+ the AI cruises at 20 u/s;
+      // at distance 10 it slows to 10 u/s; at distance 2 it
+      // wants 2 u/s. This prevents overshoot.
+      const desiredClosing = Math.min(20, pdist * 1.0);
+
+      // ---- Phase 1: FINAL APPROACH (coast in) ------------------------
+      // Very close and slow enough. Coast in with gentle steering.
+      // No thrust — let momentum carry us to the pickup. The
+      // pickup radius handles the actual collection.
+      //
+      // Checked BEFORE brake so the ship doesn't flip-and-burn
+      // when it's practically on top of the power-up. Only extreme
+      // close-range overshoots (closingSpeed > 15 at pdist < 8)
+      // fall through to the brake phase.
+      if (pdist < 8 && closingSpeed < 15 && speed < 20) {
+        const targetAngle = Math.atan2(pdz, pdx);
+        const diff = wrapAngle(targetAngle - facingAngle(aiYaw));
+        return {
+          yaw: diff > 0.3 ? -1 : diff < -0.3 ? 1 : 0,
+          thrust: false,
+          mode: 'hunt',
+          fire: false,
+        };
+      }
+
+      // ---- Phase 2: BRAKE (flip and burn) ----------------------------
+      // We're approaching too fast to stop in time. Turn opposite
+      // to velocity and thrust to decelerate. This is the key
+      // behavior that prevents circular orbits — a human pilot
+      // would do exactly this: "I'm going too fast, let me flip
+      // and burn."
+      if (closingSpeed > desiredClosing * 1.5 && speed > 2) {
+        const brakeAngle = Math.atan2(-aiVel.z, -aiVel.x);
+        const diff = wrapAngle(brakeAngle - facingAngle(aiYaw));
+        return {
+          yaw: diff > 0.2 ? -1 : diff < -0.2 ? 1 : 0,
+          // Only thrust when pointing in the brake direction.
+          // If we thrust while still facing forward, we'd
+          // accelerate toward the target we're trying to stop for.
+          thrust: Math.abs(diff) < 0.6,
+          mode: 'hunt',
+          fire: false,
+        };
+      }
+
+      // ---- Phase 3: NORMAL APPROACH ----------------------------------
+      // Steer toward the target. Only thrust when we need more
+      // speed AND we're pointing the right way. This is the
+      // "cruise and correct" phase — the pilot sees the target,
+      // adjusts heading, and accelerates when aligned.
       const targetAngle = Math.atan2(pdz, pdx);
       const diff = wrapAngle(targetAngle - facingAngle(aiYaw));
-      // Angle-based thrust: only accelerate when pointing at the
-      // target. When the target is off-axis (> 0.4 rad ≈ 23°),
-      // coast and turn. This is the key to avoiding circular
-      // orbits — the ship decelerates via drag while turning,
-      // then re-accelerates once aligned. Each cycle is slower
-      // and tighter, spiraling in toward the pickup.
       const absDiff = Math.abs(diff);
-      const facing = absDiff < 0.4;
-
-      // Distance-based steering dead zone: wider when close to
-      // prevent oversteering and overshoot at the final approach.
-      const deadZone = pdist < 15 ? 0.8 : pdist < 40 ? 0.3 : 0.1;
+      const needSpeed = closingSpeed < desiredClosing;
+      const aligned = absDiff < 0.5;
       return {
-        yaw: diff > deadZone ? -1 : diff < -deadZone ? 1 : 0,
-        thrust: facing,
+        yaw: diff > 0.15 ? -1 : diff < -0.15 ? 1 : 0,
+        thrust: needSpeed && aligned,
         mode: 'hunt',
-        fire: false, // don't fire at the power-up (it's a pickup, not an enemy)
+        fire: false,
       };
     }
   }
@@ -428,6 +491,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     const decision = aiBrainTick({
       aiPos: ship.position,
       aiYaw: ship.rotation.yaw,
+      aiVel: ship.velocity,
       asteroids,
       time,
       powerupPos: getPowerupPos ? getPowerupPos() : null,
@@ -493,6 +557,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     getMode: () => aiBrainTick({
       aiPos: ship.position,
       aiYaw: ship.rotation.yaw,
+      aiVel: ship.velocity,
       asteroids,
       time,
       powerupPos: getPowerupPos ? getPowerupPos() : null,
