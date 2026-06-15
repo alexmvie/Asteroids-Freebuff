@@ -606,14 +606,23 @@ demoAi.setEnabled(stateMachine.getState() === State.DEMO); // seed initial
 stateMachine.onEnter(State.DEMO, () => demoAi.setEnabled(true));
 stateMachine.onExit(State.DEMO, () => demoAi.setEnabled(false));
 
-// The AI's mesh is only visible during DEMO (decorative NPC).
+// AI mesh: visible only in DEMO. Player mesh: hidden in DEMO (the
+// attract screen shows the NPC, not the player's idle ship at origin).
+//
+// Seed the initial visibility — onEnter doesn't fire for the initial
+// state, so the player mesh (visible by default) would otherwise show
+// on the first frame.
+if (ship && ship.mesh) ship.mesh.visible = false;
+
 stateMachine.onEnter(State.DEMO, () => {
   const aiShip = demoAi && demoAi.getShip();
   if (aiShip && aiShip.mesh) aiShip.mesh.visible = true;
+  if (ship && ship.mesh) ship.mesh.visible = false;
 });
 stateMachine.onExit(State.DEMO, () => {
   const aiShip = demoAi && demoAi.getShip();
   if (aiShip && aiShip.mesh) aiShip.mesh.visible = false;
+  if (ship && ship.mesh) ship.mesh.visible = true;
 });
 
 // ---- Camera target switching ------------------------------------------
