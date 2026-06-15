@@ -111,6 +111,36 @@ export function createStateMachine({ initial = State.DEMO, events = null } = {})
   }
 
   /**
+   * Convenience: call `fn` on every transition INTO `state`.
+   * Returns an unsubscribe function. Sugar over `subscribe`.
+   * @param {string} state  must be a valid State value
+   * @param {(e: TransitionEvent) => void} fn
+   * @returns {() => void}
+   */
+  function onEnter(state, fn) {
+    if (!Object.values(State).includes(state)) {
+      throw new Error(`createStateMachine.onEnter: invalid state "${state}"`);
+    }
+    if (typeof fn !== 'function') throw new Error('createStateMachine.onEnter: fn must be a function');
+    return subscribe((e) => { if (e.to === state) fn(e); });
+  }
+
+  /**
+   * Convenience: call `fn` on every transition OUT OF `state`.
+   * Returns an unsubscribe function. Sugar over `subscribe`.
+   * @param {string} state  must be a valid State value
+   * @param {(e: TransitionEvent) => void} fn
+   * @returns {() => void}
+   */
+  function onExit(state, fn) {
+    if (!Object.values(State).includes(state)) {
+      throw new Error(`createStateMachine.onExit: invalid state "${state}"`);
+    }
+    if (typeof fn !== 'function') throw new Error('createStateMachine.onExit: fn must be a function');
+    return subscribe((e) => { if (e.from === state) fn(e); });
+  }
+
+  /**
    * Serialize the current state. MVP stub — only the state name.
    * @returns {{ state: string }}
    */
@@ -139,6 +169,8 @@ export function createStateMachine({ initial = State.DEMO, events = null } = {})
     canTransition,
     transition,
     subscribe,
+    onEnter,
+    onExit,
     serialize,
     deserialize,
   };

@@ -597,14 +597,23 @@ stateMachine.subscribe((e) => {
   }
 });
 
-// ---- Demo AI visibility ------------------------------------------------
-// The AI ship is a decoration for the DEMO state — it shows the player
-// what the game looks like with an NPC flying around. During PLAYING
-// and GAME_OVER the player should only see their own ship, so we hide
-// the AI's mesh on every state transition.
-stateMachine.subscribe(({ to }) => {
+// ---- Demo AI visibility + lifecycle ------------------------------------
+// The AI ship is self-gating: it enables itself on DEMO enter and
+// disables on DEMO exit. This replaces the inline state check in
+// tick() — the AI's `update()` is a no-op when paused, so the
+// render loop can call it unconditionally.
+demoAi.setEnabled(stateMachine.getState() === State.DEMO); // seed initial
+stateMachine.onEnter(State.DEMO, () => demoAi.setEnabled(true));
+stateMachine.onExit(State.DEMO, () => demoAi.setEnabled(false));
+
+// The AI's mesh is only visible during DEMO (decorative NPC).
+stateMachine.onEnter(State.DEMO, () => {
   const aiShip = demoAi && demoAi.getShip();
-  if (aiShip && aiShip.mesh) aiShip.mesh.visible = (to === State.DEMO);
+  if (aiShip && aiShip.mesh) aiShip.mesh.visible = true;
+});
+stateMachine.onExit(State.DEMO, () => {
+  const aiShip = demoAi && demoAi.getShip();
+  if (aiShip && aiShip.mesh) aiShip.mesh.visible = false;
 });
 
 // ---- Camera target switching ------------------------------------------
@@ -623,7 +632,11 @@ function setCameraForState(state) {
     setChaseTarget(ship);
   }
 }
-stateMachine.subscribe(({ to }) => setCameraForState(to));
+stateMachine.onEnter(State.PLAYING, () => setCameraForState(State.PLAYING));
+stateMachine.onEnter(State.GAME_OVER, () => setCameraForState(State.GAME_OVER));
+stateMachine.onEnter(State.DEMO, () => setCameraForState(State.DEMO));
+// onEnter only fires on transitions — seed the initial state manually.
+setCameraForState(stateMachine.getState());
 setCameraForState(stateMachine.getState());
 
 // ---- Reset score + lives on DEMO → PLAYING transition ----------------
@@ -631,8 +644,8 @@ setCameraForState(stateMachine.getState());
 // pool to clear. But the demo score (accumulated from AI kills in the
 // attract screen) still lives in the `score` variable, so we reset it
 // here for a clean start.
-stateMachine.subscribe(({ from, to }) => {
-  if (from === State.DEMO && to === State.PLAYING) {
+stateMachine.onExit(State.DEMO, () => {
+  if (stateMachine.getState() === State.PLAYING) {
     score = 0;
     lives = 3;
     bus.emit('score:changed', { score });
@@ -769,14 +782,9 @@ function tick(dt) {
 
   // ---- Asteroid streaming (delegated to the field module) ----------
   field.update(ship.position, dt, camera);
-  // AI only runs in DEMO (attract screen). Paused in PLAYING and
-  // GAME_OVER so it doesn't waste CPU/GPU on invisible ship physics
-  // and bullets nobody checks. With separate pools (Phase 1), the AI
-  // could technically run in any state without correctness issues —
-  // this gate is a pure performance optimization.
-  if (stateMachine.getState() === State.DEMO) {
-    demoAi.update(dt);
-  }
+  // AI is self-gating — calls update() every frame; the AI pauses
+  // itself when disabled (outside DEMO). See onEnter/onExit above.
+  demoAi.update(dt);
 
   // ---- Power-up system -----------------------------------------------
   // Updates the active power-up's countdown, the pending power-up's

@@ -339,8 +339,14 @@ export function createDemoAi({ scene, asteroids, weapon = null, options = {} } =
   let time = 0;
 
   // ---- Per-tick --------------------------------------------------------
+  // When paused (enabled = false), the AI is a no-op — no movement,
+  // no shooting, no brain activity. Used to pause the AI outside of
+  // DEMO (see Phase 5: state-driven lifecycle).
+  let enabled = true;
+
   function update(dt) {
     if (dt <= 0) return;
+    if (!enabled) return;
     time += dt;
 
     // Reset if too far from origin
@@ -416,6 +422,9 @@ export function createDemoAi({ scene, asteroids, weapon = null, options = {} } =
     update,
     dispose,
     getShip: () => ship,
+    /** Pause or resume the AI. When paused, update() is a no-op. */
+    setEnabled: (v) => { enabled = !!v; },
+    isEnabled: () => enabled,
     /** Exposed for tests / dev tooling. */
     getMode: () => aiBrainTick({
       aiPos: ship.position,

@@ -242,6 +242,99 @@ test('state machine: serialize + deserialize round-trips', () => {
   assert.equal(sm2.getState(), sm.getState());
 });
 
+// ---- onEnter / onExit --------------------------------------------------
+
+test('state machine: onEnter fires when entering the specified state', () => {
+  const sm = createStateMachine({ initial: State.DEMO });
+  let count = 0;
+  sm.onEnter(State.PLAYING, () => count++);
+  sm.transition(State.PLAYING);
+  assert.equal(count, 1);
+  // Leaving PLAYING and re-entering should fire again
+  sm.transition(State.GAME_OVER);
+  assert.equal(count, 1, 'onEnter should not fire on exit');
+  sm.transition(State.PLAYING);
+  assert.equal(count, 2, 'onEnter should fire on re-entry');
+});
+
+test('state machine: onEnter does NOT fire when entering a different state', () => {
+  const sm = createStateMachine({ initial: State.DEMO });
+  let count = 0;
+  sm.onEnter(State.GAME_OVER, () => count++);
+  sm.transition(State.PLAYING);
+  assert.equal(count, 0);
+});
+
+test('state machine: onExit fires when leaving the specified state', () => {
+  const sm = createStateMachine({ initial: State.DEMO });
+  let count = 0;
+  sm.onExit(State.DEMO, () => count++);
+  sm.transition(State.PLAYING);
+  assert.equal(count, 1);
+});
+
+test('state machine: onExit does NOT fire when leaving a different state', () => {
+  const sm = createStateMachine({ initial: State.DEMO });
+  let count = 0;
+  sm.onExit(State.PLAYING, () => count++);
+  sm.transition(State.PLAYING);
+  assert.equal(count, 0, 'onExit for PLAYING should not fire when leaving DEMO');
+});
+
+test('state machine: onEnter and onExit return unsubscribe functions', () => {
+  const sm = createStateMachine({ initial: State.DEMO });
+  let enter = 0, exit = 0;
+  const unEnter = sm.onEnter(State.PLAYING, () => enter++);
+  const unExit = sm.onExit(State.DEMO, () => exit++);
+  sm.transition(State.PLAYING);
+  assert.equal(enter, 1);
+  assert.equal(exit, 1);
+  unEnter();
+  unExit();
+  sm.transition(State.GAME_OVER);
+  sm.transition(State.PLAYING);
+  assert.equal(enter, 1, 'unsubscribed onEnter should not fire');
+  assert.equal(exit, 1, 'unsubscribed onExit should not fire');
+});
+
+test('state machine: onEnter receives the transition event', () => {
+  const sm = createStateMachine({ initial: State.DEMO });
+  let received = null;
+  sm.onEnter(State.PLAYING, (e) => { received = e; });
+  sm.transition(State.PLAYING, { reason: 'test' });
+  assert.equal(received.from, 'DEMO');
+  assert.equal(received.to, 'PLAYING');
+  assert.deepEqual(received.payload, { reason: 'test' });
+});
+
+test('state machine: onEnter throws on invalid state', () => {
+  const sm = createStateMachine();
+  assert.throws(() => sm.onEnter('INVALID', () => {}), /invalid state/);
+  assert.throws(() => sm.onExit('FOO', () => {}), /invalid state/);
+});
+
+test('state machine: onEnter throws on non-function', () => {
+  const sm = createStateMachine();
+  assert.throws(() => sm.onEnter(State.DEMO, null), /fn must be a function/);
+  assert.throws(() => sm.onExit(State.DEMO, 42), /fn must be a function/);
+});
+
+test('state machine: onEnter does NOT fire on failed transitions', () => {
+  const sm = createStateMachine({ initial: State.DEMO });
+  let count = 0;
+  sm.onEnter(State.GAME_OVER, () => count++);
+  sm.transition(State.GAME_OVER); // disallowed from DEMO
+  assert.equal(count, 0);
+});
+
+test('state machine: onExit does NOT fire on failed transitions', () => {
+  const sm = createStateMachine({ initial: State.DEMO });
+  let count = 0;
+  sm.onExit(State.DEMO, () => count++);
+  sm.transition(State.GAME_OVER); // disallowed — not actually leaving DEMO
+  assert.equal(count, 0);
+});
+
 // ---- State enum --------------------------------------------------------
 
 test('State: frozen and has exactly DEMO, PLAYING, GAME_OVER', () => {
