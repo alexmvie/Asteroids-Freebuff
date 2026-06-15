@@ -14,7 +14,7 @@
  * @module evolution
  */
 
-const DEFAULTS = Object.freeze({
+export const DEFAULTS = Object.freeze({
   populationSize: 100,
   elitismCount: 5,
   tournamentSize: 3,
