@@ -220,14 +220,55 @@ test('aiBrainTick: does not target if all asteroids are beyond targetDist', () =
 // ---- aiBrainTick: WANDER mode -----------------------------------------
 
 test('aiBrainTick: empty asteroid list → wander', () => {
+  // Provide an aligned heading so thrust is true (the new wander
+  // behavior only thrusts when roughly aligned with the heading).
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
     asteroids: [],
     time: 0,
+    wanderHeading: -Math.PI / 2, // aligned with facingAngle(0) = -PI/2
+    wanderHeadingExpiresAt: 5.0,
   });
   assert.equal(result.mode, 'wander');
   assert.equal(result.thrust, true);
+});
+
+test('aiBrainTick: wander → no thrust when heading is misaligned', () => {
+  // Ship faces -Z (yaw 0 → facingAngle = -PI/2). Heading = +PI/2
+  // (opposite direction). diff = PI → well outside 0.6 alignment
+  // window → thrust: false.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [],
+    time: 0,
+    wanderHeading: Math.PI / 2,
+    wanderHeadingExpiresAt: 5.0,
+  });
+  assert.equal(result.mode, 'wander');
+  assert.equal(result.thrust, false);
+});
+
+test('aiBrainTick: wander biases heading toward nearest asteroid', () => {
+  // Asteroid at (0, 150) — within awareness range (targetDist×2.5 = 225)
+  // but outside targetDist (90) and dodgeDist (14) → wander mode.
+  // With a fixed rng returning 0.5, jitter = 0, so heading should be
+  // exactly the angle to the asteroid.
+  const asteroids = [mockAsteroid(0, 150)];
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids,
+    time: 0,
+    wanderHeading: null,
+    wanderHeadingExpiresAt: 0,
+    targetDist: 90,
+    rng: () => 0.5, // jitter = (0.5*2-1) * PI * 0.4 = 0
+  });
+  assert.equal(result.mode, 'wander');
+  // targetAngle = atan2(150, 0) = PI/2. jitter = 0. heading = PI/2.
+  assert.ok(Math.abs(result._wanderHeading - Math.PI / 2) < 1e-9);
 });
 
 test('aiBrainTick: wander picks a new heading on first call (wanderHeading=null)', () => {

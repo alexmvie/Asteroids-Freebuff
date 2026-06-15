@@ -38,7 +38,7 @@ const DEFAULTS = Object.freeze({
   /** Targets the nearest asteroid when any are within this many units. */
   targetDist: 90,
   /** Seconds between random heading changes during WANDER. */
-  wanderTurnPeriod: 2.5,
+  wanderTurnPeriod: 1.5,
   /** If the AI drifts beyond this radius from origin, reset it. */
   resetDist: 220,
   /** Spawn radius (XZ) from origin for the initial position. */
@@ -207,9 +207,20 @@ export function aiBrainTick({
     if (pdist < powerupHuntDist) {
       const targetAngle = Math.atan2(pdz, pdx);
       const diff = wrapAngle(targetAngle - facingAngle(aiYaw));
+      // Proportional approach: coast when close to avoid the
+      // "circular orbit" problem. At high speed + tight dead zone
+      // the ship overshoots, has to turn, overshoots again, etc.
+      //   - Far  (> 40): full thrust, tight steering (0.1 rad)
+      //   - Mid  (15–40): full thrust, wider dead zone (0.3 rad)
+      //   - Close (< 15): coast (no thrust), very wide dead zone
+      //     (0.8 rad) — drag decelerates the ship so it glides in
+      //     for a clean pickup.
+      const close = pdist < 15;
+      const medium = !close && pdist < 40;
+      const deadZone = close ? 0.8 : medium ? 0.3 : 0.1;
       return {
-        yaw: diff > 0.1 ? -1 : diff < -0.1 ? 1 : 0,
-        thrust: true,
+        yaw: diff > deadZone ? -1 : diff < -deadZone ? 1 : 0,
+        thrust: !close,
         mode: 'hunt',
         fire: false, // don't fire at the power-up (it's a pickup, not an enemy)
       };
@@ -269,22 +280,43 @@ export function aiBrainTick({
   }
 
   // ---- 4. WANDER (default) --------------------------------------------
-  // Pick (or refresh) a wander heading. We always emit yaw + thrust on
-  // a wander tick — the factory decides whether to commit a heading
-  // change by mutating `wanderHeading` / `wanderHeadingExpiresAt`. The
-  // heading is an angle in the (x, z) atan2 frame, so we compare it
-  // to the ship's actual facing direction, not to `yaw` directly.
+  // Pick (or refresh) a wander heading. The heading is an angle in the
+  // (x, z) atan2 frame, so we compare it to the ship's actual facing
+  // direction (facingAngle), not to `yaw` directly.
+  //
+  // When asteroids are within awareness range (2.5× targetDist), the
+  // heading is biased toward the nearest one. This makes the AI drift
+  // toward the action instead of rocketing off into empty space. The
+  // jitter (±72°) keeps the approach from being a dead-straight line.
+  //
+  // Thrust is only applied when the heading is roughly aligned
+  // (|diff| < 0.6 rad ≈ 34°). This prevents the ship from blasting
+  // past asteroids at full speed — it turns first, THEN accelerates.
+  // The result: more time in TARGET range, more shots fired.
   let heading = wanderHeading;
   let expiresAt = wanderHeadingExpiresAt;
   if (heading === null || time >= expiresAt) {
-    // New heading: a random angle in (-PI, PI].
-    heading = (rng() * 2 - 1) * Math.PI;
+    // Bias toward nearest asteroid if one is within awareness range.
+    const awarenessDist = targetDist * 2.5;
+    if (nearest && nearest.dist < awarenessDist) {
+      const targetAngle = Math.atan2(nearest.dz, nearest.dx);
+      const jitter = (rng() * 2 - 1) * Math.PI * 0.4; // ±72°
+      heading = targetAngle + jitter;
+    } else {
+      // No nearby asteroids — fully random heading.
+      heading = (rng() * 2 - 1) * Math.PI;
+    }
     expiresAt = time + wanderTurnPeriod;
   }
   const diff = wrapAngle(heading - facingAngle(aiYaw));
+  // Only thrust when roughly aligned with the heading. This is the
+  // key behavior change: the AI "turns then accelerates" instead of
+  // always thrusting. At high speed the ship would blow past the
+  // target zone; coasting while turning keeps the speed manageable.
+  const aligned = Math.abs(diff) < 0.6;
   return {
     yaw: diff > 0.1 ? -1 : diff < -0.1 ? 1 : 0,
-    thrust: true,
+    thrust: aligned,
     mode: 'wander',
     fire: false,
     // Side-channel: the factory reads these to maintain wander state.
