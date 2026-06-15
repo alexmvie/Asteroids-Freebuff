@@ -465,6 +465,10 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
   let wanderHeading = null;
   let wanderHeadingExpiresAt = 0;
   let time = 0;
+  // Cached mode from the most recent brain decision. The HUD reads
+  // this via `getLastMode()` once per frame, so we don't pay the
+  // cost of re-running the brain (especially the trained network).
+  let lastMode = 'wander';
 
   // ---- Per-tick --------------------------------------------------------
   // When paused (enabled = false), the AI is a no-op — no movement,
@@ -506,6 +510,11 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       rng,
     };
     const decision = brain ? brain.tick(brainArgs) : aiBrainTick(brainArgs);
+
+    // Cache the mode the brain actually decided on, for the HUD.
+    if (typeof decision.mode === 'string') {
+      lastMode = decision.mode;
+    }
 
     // Commit wander state changes (side-channel from brain)
     if (decision._wanderHeading !== undefined) {
@@ -556,7 +565,8 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     /** Pause or resume the AI. When paused, update() is a no-op. */
     setEnabled: (v) => { enabled = !!v; },
     isEnabled: () => enabled,
-    /** Exposed for tests / dev tooling. */
+    /** Exposed for tests / dev tooling. Re-runs the brain — cheap
+     * for the heuristic, but the trained net pays a forward pass. */
     getMode: () => {
       const modeArgs = {
         aiPos: ship.position,
@@ -575,5 +585,13 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       };
       return brain ? brain.tick(modeArgs).mode : aiBrainTick(modeArgs).mode;
     },
+    /**
+     * Read the mode the AI decided on its most recent update(). Cheap
+     * (closure read). Use this from per-frame consumers like the
+     * debug HUD — `getMode()` re-runs the brain, which is wasteful
+     * for the trained network.
+     * @returns {string}
+     */
+    getLastMode: () => lastMode,
   };
 }

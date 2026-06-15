@@ -369,12 +369,17 @@ const aiWeapon = {
  * brain and pass it to the AI. If not found, the AI falls back to
  * the hand-coded rule-based brain.
  */
+// Captured by the brain-swap closure so the HUD can read
+// generation/fitness from the loaded payload.
+let trainedGenomePayload = null;
+
 async function loadTrainedBrain() {
   try {
     const res = await fetch('/trained-genome.json');
     if (!res.ok) return null;
     const data = await res.json();
     if (!data || !Array.isArray(data.genome)) return null;
+    trainedGenomePayload = data;
     const genome = deserializeGenome(data.genome);
     const brain = createTrainedAiBrain({ genome });
     if (typeof console !== 'undefined') {
@@ -407,6 +412,12 @@ const demoAi = createDemoAi({
   },
 });
 
+// AI brain info for the debug HUD. Seeded to the hand-coded brain
+// (the demo's default). When the trained brain loads (async below),
+// `kind` flips to 'trained' and the generation/fitness fields
+// populate from the loaded JSON.
+let aiBrainInfo = { kind: 'hand-coded', generation: null, fitness: null };
+
 // Async: load the trained brain and swap it in when ready.
 loadTrainedBrain().then((brain) => {
   if (brain) {
@@ -434,6 +445,17 @@ loadTrainedBrain().then((brain) => {
     // We mutate the demoAi object in place because it's captured
     // by many closures above (aiWeapon, powerupSystem, etc.).
     Object.assign(demoAi, newAi);
+    // Update the HUD info. `trainedGenomePayload` is closed over from
+    // the loadTrainedBrain fetch — we read generation/fitness from it.
+    if (trainedGenomePayload) {
+      aiBrainInfo = {
+        kind: 'trained',
+        generation: trainedGenomePayload.generation ?? null,
+        fitness: trainedGenomePayload.fitness ?? null,
+      };
+    } else {
+      aiBrainInfo = { kind: 'trained', generation: null, fitness: null };
+    }
     if (typeof console !== 'undefined') {
       console.log('[main] Trained brain swapped in — AI now uses neural network');
     }
@@ -940,6 +962,14 @@ function tick(dt) {
     },
   });
 
+  // Subject for the debug HUD position rows: the AI in DEMO (camera
+  // follows the AI there), the player otherwise. Mirrors
+  // `setCameraForState` so the row tracks what the player is actually
+  // looking at.
+  const subject = stateMachine.getState() === State.DEMO
+    ? (demoAi && demoAi.getShip()) || ship
+    : ship;
+
   // Push the latest diagnostic snapshot to the debug HUD. The HUD
   // throttles its DOM writes to ~12Hz internally.
   debugHud.update({
@@ -957,7 +987,20 @@ function tick(dt) {
     sceneVerts: sceneGeom.vertices,
     sceneTris: sceneGeom.triangles,
     camera: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
-    ship: { x: ship.position.x, y: ship.position.y, z: ship.position.z },
+    // `ship` slot now means "subject" — the entity the camera follows.
+    // See the comment above.
+    ship: { x: subject.position.x, y: subject.position.y, z: subject.position.z },
+    // AI brain info + the mode the brain actually decided on this
+    // frame. `getLastMode()` is a closure read (cheap); it returns
+    // the cached mode from the AI's most recent update(). When the
+    // AI is disabled (outside DEMO) it returns the seed 'wander'
+    // from the closure initial value.
+    aiBrain: aiBrainInfo.kind,
+    aiGen: aiBrainInfo.generation,
+    aiFitness: aiBrainInfo.fitness,
+    aiMode: demoAi && typeof demoAi.getLastMode === 'function'
+      ? demoAi.getLastMode()
+      : null,
   });
 }
 
