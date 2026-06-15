@@ -353,7 +353,18 @@ const aiWeapon = {
     return aiBullets.fire({ origin, direction });
   },
 };
-const demoAi = createDemoAi({ scene, asteroids: field.getEntities(), weapon: aiWeapon });
+const demoAi = createDemoAi({
+  scene,
+  asteroids: field.getEntities(),
+  weapon: aiWeapon,
+  // The AI chases pending power-ups as its highest-priority behavior.
+  // getPendingSpawn() returns the power-up entity (with .getPosition())
+  // or null when no power-up is waiting in the world.
+  getPowerupPos: () => {
+    const p = powerupSystem.getPendingSpawn();
+    return p ? p.getPosition() : null;
+  },
+});
 // Same GLB swap for the AI demo ship, so the player and the NPC match.
 loadShipModel(demoAi.getShip(), '/models/skyfighter.glb', { modelRotationY: -Math.PI / 2 }).then((result) => {
   if (result.success && typeof console !== 'undefined') {
@@ -645,7 +656,6 @@ stateMachine.onEnter(State.PLAYING, () => setCameraForState(State.PLAYING));
 stateMachine.onEnter(State.GAME_OVER, () => setCameraForState(State.GAME_OVER));
 stateMachine.onEnter(State.DEMO, () => setCameraForState(State.DEMO));
 // onEnter only fires on transitions — seed the initial state manually.
-setCameraForState(stateMachine.getState());
 setCameraForState(stateMachine.getState());
 
 // ---- Reset score + lives on DEMO → PLAYING transition ----------------

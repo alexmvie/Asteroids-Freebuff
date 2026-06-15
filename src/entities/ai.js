@@ -6,12 +6,14 @@
  *
  * Behaviors (priority order, evaluated each tick):
  *
- *   1. DODGE   — if any asteroid is within `dodgeDist`, thrust perpendicular
- *                to escape (steer 90° from the threat, full thrust).
- *   2. TARGET  — if any asteroid is within `targetDist`, steer toward the
- *                nearest one, full thrust.
- *   3. WANDER  — no asteroids in range. Pick a random heading, full thrust;
- *                pick a new heading every `wanderTurnPeriod` seconds.
+ *   1. HUNT   — if a power-up is pending in the world, steer toward it
+ *               (highest priority; the AI chases the glowing pickup).
+ *   2. DODGE  — if any asteroid is within `dodgeDist`, thrust perpendicular
+ *               to escape.
+ *   3. TARGET — if any asteroid is within `targetDist`, steer toward the
+ *               nearest one, full thrust.
+ *   4. WANDER — no asteroids in range. Pick a random heading, full thrust;
+ *               pick a new heading every `wanderTurnPeriod` seconds.
  *
  * The brain is a pure function (`aiBrainTick`) — it takes the ship's
  * current position + yaw, the live asteroid list, and a `time` clock, and
@@ -53,6 +55,12 @@ const DEFAULTS = Object.freeze({
    * aggressive pursuit without making the AI feel like a turret.
    */
   fireConeHalfAngle: 0.35,
+  /**
+   * Maximum pursuit range for power-ups (world units). If a pending
+   * power-up is farther than this, the AI ignores it and falls
+   * through to asteroid hunting.
+   */
+  powerupHuntDist: 500,
 });
 
 /**
@@ -159,12 +167,14 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
  *   aiYaw: number,                            // current yaw in radians
  *   asteroids: Array<{ getPosition: () => any }>,
  *   time: number,                             // seconds since boot (for wander clock)
+ *   powerupPos?: { x: number, z: number } | null,  // pending power-up position (optional)
  *   dodgeDist?: number,
  *   targetDist?: number,
  *   wanderTurnPeriod?: number,
  *   wanderHeading?: number | null,            // current wander target (radians); null = pick one
  *   wanderHeadingExpiresAt?: number,          // time at which to pick a new wander heading
  *   fireConeHalfAngle?: number,
+ *   powerupHuntDist?: number,
  *   rng?: () => number,                       // injectable for tests; default Math.random
  * }} args
  */
@@ -173,12 +183,14 @@ export function aiBrainTick({
   aiYaw,
   asteroids,
   time,
+  powerupPos = null,
   dodgeDist = DEFAULTS.dodgeDist,
   targetDist = DEFAULTS.targetDist,
   wanderTurnPeriod = DEFAULTS.wanderTurnPeriod,
   wanderHeading = null,
   wanderHeadingExpiresAt = 0,
   fireConeHalfAngle = DEFAULTS.fireConeHalfAngle,
+  powerupHuntDist = DEFAULTS.powerupHuntDist,
   rng = Math.random,
 }) {
   if (!aiPos) throw new Error('aiBrainTick: aiPos is required');
@@ -187,7 +199,24 @@ export function aiBrainTick({
 
   const nearest = findNearestAsteroid(aiPos, asteroids);
 
-  // ---- 1. DODGE (highest priority) -------------------------------------
+  // ---- 1. HUNT POWER-UP (highest priority) ----------------------------
+  if (powerupPos && typeof powerupPos.x === 'number') {
+    const pdx = powerupPos.x - aiPos.x;
+    const pdz = powerupPos.z - aiPos.z;
+    const pdist = Math.hypot(pdx, pdz);
+    if (pdist < powerupHuntDist) {
+      const targetAngle = Math.atan2(pdz, pdx);
+      const diff = wrapAngle(targetAngle - facingAngle(aiYaw));
+      return {
+        yaw: diff > 0.1 ? -1 : diff < -0.1 ? 1 : 0,
+        thrust: true,
+        mode: 'hunt',
+        fire: false, // don't fire at the power-up (it's a pickup, not an enemy)
+      };
+    }
+  }
+
+  // ---- 2. DODGE -------------------------------------------------------
   if (nearest && nearest.dist < dodgeDist) {
     // Steer 90° counter-clockwise from the threat direction (in the
     // (x, z) atan2 frame), so the ship thrusts perpendicular to the
@@ -208,7 +237,7 @@ export function aiBrainTick({
     };
   }
 
-  // ---- 2. TARGET (middle priority) ------------------------------------
+  // ---- 3. TARGET (middle priority) ------------------------------------
   if (nearest && nearest.dist < targetDist) {
     // Steer toward the nearest asteroid. The angle to the target from
     // our position is atan2(dz, dx) in the (x, z) plane. Our facing
@@ -239,7 +268,7 @@ export function aiBrainTick({
     };
   }
 
-  // ---- 3. WANDER (default) --------------------------------------------
+  // ---- 4. WANDER (default) --------------------------------------------
   // Pick (or refresh) a wander heading. We always emit yaw + thrust on
   // a wander tick — the factory decides whether to commit a heading
   // change by mutating `wanderHeading` / `wanderHeadingExpiresAt`. The
@@ -300,7 +329,8 @@ export function pickAiSpawn(radius = DEFAULTS.spawnRadius, rng = Math.random) {
  * @param {{
  *   scene: import('three').Scene,
  *   asteroids: Array<{ getPosition: () => any }>,
- *   weapon?: { fire: (opts: any) => number | boolean } | null,  // duck-typed weapon (laser or bullets)
+ *   weapon?: { fire: (opts: any) => number | boolean } | null,  // duck-typed weapon
+ *   getPowerupPos?: () => { x: number, z: number } | null,      // pending power-up position
  *   options?: {
  *     dodgeDist?: number,
  *     targetDist?: number,
@@ -313,7 +343,7 @@ export function pickAiSpawn(radius = DEFAULTS.spawnRadius, rng = Math.random) {
  *   },
  * }} opts
  */
-export function createDemoAi({ scene, asteroids, weapon = null, options = {} } = {}) {
+export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = null, options = {} } = {}) {
   if (!scene) throw new Error('createDemoAi: `scene` is required');
   if (!Array.isArray(asteroids)) throw new Error('createDemoAi: `asteroids` must be an array');
 
@@ -367,6 +397,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, options = {} } =
       aiYaw: ship.rotation.yaw,
       asteroids,
       time,
+      powerupPos: getPowerupPos ? getPowerupPos() : null,
       dodgeDist: opts.dodgeDist,
       targetDist: opts.targetDist,
       wanderTurnPeriod: opts.wanderTurnPeriod,
@@ -431,6 +462,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, options = {} } =
       aiYaw: ship.rotation.yaw,
       asteroids,
       time,
+      powerupPos: getPowerupPos ? getPowerupPos() : null,
       dodgeDist: opts.dodgeDist,
       targetDist: opts.targetDist,
       wanderTurnPeriod: opts.wanderTurnPeriod,
