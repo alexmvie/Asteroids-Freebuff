@@ -137,6 +137,14 @@ export class NoisyIcosphere extends THREE.BufferGeometry {
     }
 
     this.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    // Copy the built-in spherical UVs from the base IcosahedronGeometry.
+    // Without this, the asteroid renders black — MeshStandardMaterial's
+    // texture maps need a `uv` attribute to sample from.
+    if (baseGeom.attributes.uv) {
+      this.setAttribute('uv', new THREE.BufferAttribute(
+        new Float32Array(baseGeom.attributes.uv.array), 2,
+      ));
+    }
     this.computeVertexNormals();
 
     baseGeom.dispose();
