@@ -25,7 +25,7 @@ import { createHud } from './ui/hud.js';
 import { createDebugHud } from './ui/debug-hud.js';
 import { createDemoAi } from './entities/ai.js';
 import { createTrainedAiBrain } from './training/ai-brain.js';
-import { DEFAULTS as TRAIN_DEFAULTS } from './training/trainer.js';
+import { TRAINER_DEFAULTS } from './training/defaults.js';
 import { deserializeGenome, genomeSize } from './training/network.js';
 import { createAsteroidField } from './systems/asteroid-field.js';
 import { createAsteroidUvDebugOverlay } from './systems/asteroid-uv-debug-overlay.js';
@@ -384,9 +384,9 @@ async function loadTrainedBrain() {
     const genome = deserializeGenome(data.genome);
     // Validate input size match: a saved genome from a previous (pre-velocity) training
     // run will have a different length and throw at networkFromGenome. Skip it cleanly.
-    // Use TRAIN_DEFAULTS (not aiBrain) because aiBrain is the hand-coded closure and
+    // Use TRAINER_DEFAULTS (not aiBrain) because aiBrain is the hand-coded closure and
     // does not expose inputSize/hiddenSize/outputSize as plain properties.
-    const { inputSize, hiddenSize, outputSize } = TRAIN_DEFAULTS;
+    const { inputSize, hiddenSize, outputSize } = TRAINER_DEFAULTS;
     const expected = genomeSize(inputSize, hiddenSize, outputSize);
     if (genome.length !== expected) {
       console.warn(

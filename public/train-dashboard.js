@@ -512,9 +512,10 @@ els.btnStart.addEventListener('click', async () => {
       log(data.error, 'error');
     } else {
       log('Start command sent', 'success');
-      // Refresh Live Config shortly after (so the user sees the new
-      // config the moment training starts).
-      setTimeout(refreshLiveConfig, 100);
+      // The trainer is created asynchronously inside the server's
+      // training loop — poll /config a few times to catch the moment
+      // it transitions from "preview" to the real live config.
+      pollLiveConfigUntilLive();
     }
   } catch (err) {
     log('Failed to start: ' + err.message, 'error');
@@ -1142,17 +1143,58 @@ async function refreshLiveConfig() {
     const res = await fetch(`${API_BASE}/config`);
     if (!res.ok) return;
     const data = await res.json();
-    if (data.config) {
-      renderLiveConfig(data.config);
-      if (data.config.workerCount != null && els.workers) {
-        els.workers.textContent = data.config.workerCount === 0
-          ? 'single-threaded'
-          : String(data.config.workerCount);
-      }
+    if (!data.config) return;
+    renderLiveConfig(data.config);
+    // Update the Workers stat card. The server sends a preview
+    // (with a resolved worker count from `os.cpus().length - 1`)
+    // even when no trainer is running, so the card populates from
+    // page load instead of staying at "—" until the user clicks Start.
+    if (data.config.workerCount != null && els.workers) {
+      els.workers.textContent = data.config.workerCount === 0
+        ? 'single-threaded'
+        : String(data.config.workerCount);
+    }
+    // Differentiate the Live Config header so the user knows
+    // whether the chips reflect a running trainer or a preview.
+    if (els.liveConfigStatus) {
+      const status = data.running
+        ? `${Object.keys(flattenConfig(data.config)).length} live parameters \u2014 click any control to change`
+        : `${Object.keys(flattenConfig(data.config)).length} preview parameters \u2014 start training to lock in`;
+      els.liveConfigStatus.textContent = status;
     }
   } catch (_) {
-    // Server offline
+    // Server offline — keep the current state
   }
+}
+
+/**
+ * After clicking Start, the trainer is created asynchronously inside
+ * `runTrainingLoop`. There's a brief window (a few ms) where
+ * `/config` still returns the preview instead of the real config.
+ * Poll a few times to catch the transition, then stop.
+ */
+function pollLiveConfigUntilLive(retries = 10, intervalMs = 200) {
+  let attempt = 0;
+  const tick = async () => {
+    attempt++;
+    try {
+      const res = await fetch(`${API_BASE}/config`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.running && data.config) {
+          await refreshLiveConfig();
+          return;
+        }
+      }
+    } catch (_) { /* keep trying */ }
+    if (attempt < retries) {
+      setTimeout(tick, intervalMs);
+    } else {
+      // Last try even if not running — at least we have the latest state
+      refreshLiveConfig();
+    }
+  };
+  setTimeout(tick, intervalMs);
 }
 
 // ---------------------------------------------------------------------------

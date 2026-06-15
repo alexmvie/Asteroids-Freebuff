@@ -33,6 +33,8 @@ import {
   serializeGenome,
   deserializeGenome,
 } from '../src/training/index.js';
+import { TRAINER_DEFAULTS } from '../src/training/defaults.js';
+import { DEFAULTS as EVOLUTION_DEFAULTS } from '../src/training/evolution.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -86,16 +88,7 @@ async function runTrainingLoop(params) {
   // Worker count: 0 (sync) by default for tests, or `os.cpus().length - 1`
   // for the server. The trainer's `createWorkerPool` floors at 1.
   // `params.workerCount === -1` means "auto" (use cpus-1).
-  let workerCount = params.workerCount ?? -1;
-  if (workerCount === -1 || workerCount == null) {
-    try {
-      const cpus = (await import('node:os')).cpus()?.length ?? 1;
-      workerCount = Math.max(1, cpus - 1);
-    } catch (_) {
-      workerCount = 1;
-    }
-  }
-  if (workerCount < 0) workerCount = 0;
+  const workerCount = await resolveWorkerCount(params.workerCount ?? -1);
 
   trainer = createTrainer({
     // Core
@@ -232,17 +225,105 @@ function handleStatus(req, res) {
 }
 
 /**
+ * Compute the worker count the server will use for the next /start call.
+ * `workerCount === -1` (or null/undefined) means "auto" — use
+ * `cpus.length - 1`. The trainer's worker pool floors at 1, so this
+ * always returns >= 1 when auto-resolving.
+ * @param {number|undefined|null} workerCount
+ * @returns {Promise<number>}
+ */
+async function resolveWorkerCount(workerCount) {
+  if (typeof workerCount === 'number' && workerCount >= 0) return workerCount;
+  try {
+    const cpus = (await import('node:os')).cpus()?.length ?? 1;
+    return Math.max(1, cpus - 1);
+  } catch (_) {
+    return 1;
+  }
+}
+
+/**
+ * Build a "preview" config that mirrors what the next /start would
+ * use, even before the trainer exists. Lets the dashboard populate
+ * the Workers card and a preview set of Live Config chips from page
+ * load (instead of "—" until the user clicks Start).
+ *
+ * Values are sourced from `TRAINER_DEFAULTS` (the same single source
+ * of truth the trainer factory uses), with GA defaults mirrored from
+ * `src/training/evolution.js` DEFAULTS. This eliminates the drift
+ * risk: change a default in trainer.js / evolution.js and the
+ * preview updates automatically.
+ */
+function buildPreviewConfig() {
+  return {
+    populationSize: TRAINER_DEFAULTS.populationSize,
+    architecture: {
+      inputSize: TRAINER_DEFAULTS.inputSize,
+      hiddenSize: TRAINER_DEFAULTS.hiddenSize,
+      outputSize: TRAINER_DEFAULTS.outputSize,
+    },
+    maxDurationS: TRAINER_DEFAULTS.maxDurationS,
+    dt: TRAINER_DEFAULTS.dt,
+    episodesPerGenome: TRAINER_DEFAULTS.episodesPerGenome,
+    seedStrategy: TRAINER_DEFAULTS.seedStrategy,
+    movementReward: TRAINER_DEFAULTS.movementReward,
+    workerCount: null, // resolved async on first /config call
+    ga: {
+      // Sourced from `src/training/evolution.js` DEFAULTS — the same
+      // single source of truth the GA uses. Eliminates the drift
+      // risk: change a default in evolution.js and the preview
+      // updates automatically. (The preview is still labeled
+      // "preview parameters" so the user knows these are
+      // defaults, not the live values from a running trainer.)
+      mutationRate: EVOLUTION_DEFAULTS.mutationRate,
+      mutationStrength: EVOLUTION_DEFAULTS.mutationStrength,
+      elitismCount: EVOLUTION_DEFAULTS.elitismCount,
+      crossoverRate: EVOLUTION_DEFAULTS.crossoverRate,
+      tournamentSize: EVOLUTION_DEFAULTS.tournamentSize,
+    },
+  };
+}
+
+// Memoized preview so the 10×/2s poll loop doesn't allocate a new
+// config object on every /config hit. The `workerCount` field is
+// patched in at response time (it's the only async-resolved value).
+let memoizedPreview = null;
+function getMemoizedPreview() {
+  if (!memoizedPreview) memoizedPreview = buildPreviewConfig();
+  return memoizedPreview;
+}
+
+// Memoized worker-count resolution so we don't re-import `node:os`
+// on every /config call. Resolved once on the first request.
+let previewWorkerCountPromise = null;
+function getPreviewWorkerCount() {
+  if (!previewWorkerCountPromise) {
+    previewWorkerCountPromise = resolveWorkerCount(-1);
+  }
+  return previewWorkerCountPromise;
+}
+
+/**
  * Returns the trainer's current effective config (from trainer.getConfig()).
  * The dashboard fetches this on boot to render the "Live Config" section —
  * the user can see every parameter that's actually in use, not just the
- * ones that have UI controls. While training is idle (no trainer yet),
- * returns an empty object so the dashboard shows a "Not training"
- * placeholder.
+ * ones that have UI controls.
+ *
+ * When training is idle (no trainer yet), returns a "preview" config that
+ * mirrors the defaults the next /start would use, with the worker count
+ * resolved from the system's CPU count. This lets the Workers stat card
+ * populate from page load instead of showing "—" until Start is clicked.
  */
-function handleConfig(req, res) {
-  const config = trainer && typeof trainer.getConfig === 'function'
-    ? trainer.getConfig()
-    : null;
+async function handleConfig(req, res) {
+  let config = null;
+  if (trainer && typeof trainer.getConfig === 'function') {
+    config = trainer.getConfig();
+  } else {
+    // Spread the memoized preview so the per-request `workerCount`
+    // mutation doesn't leak across requests / poll iterations.
+    config = { ...getMemoizedPreview() };
+    config.workerCount = await getPreviewWorkerCount();
+  }
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ config, running: trainingState.running }));
 }

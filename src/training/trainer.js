@@ -26,37 +26,21 @@ import { createNetwork, forward, genomeSize, networkFromGenome } from './network
 import { createEpisodeRecorder } from './recorder.js';
 import { createWorkerPool } from './worker-pool.js';
 import { evaluateGenome, discretizeYaw, deriveMode } from './evaluate-genome.js';
+import { TRAINER_DEFAULTS } from './defaults.js';
 
 // ---------------------------------------------------------------------------
-// Defaults
+// Defaults — sourced from `./defaults.js` so the game (`src/main.js`)
+// can import the architecture params (`inputSize`/`hiddenSize`/`outputSize`)
+// without transitively pulling in the server-only worker pool. See the
+// JSDoc in `./defaults.js` for the full rationale.
 // ---------------------------------------------------------------------------
 
-export const DEFAULTS = Object.freeze({
-  populationSize: 100,
-  // inputSize: 13 (was 11; added velocity vx/vz so the
-  // brain can distinguish "flying right" from "spinning right").
-  inputSize: 13,
-  hiddenSize: 12,
-  outputSize: 3,
-  maxDurationS: 60,
-  dt: 1 / 60,
-  episodesPerGenome: 1,
-  onProgress: null, // ({ generation, bestFitness, avgFitness }) => void
-  // Per-episode seed strategy. `'vary'` picks a fresh random seed
-  // for every episode so the brain can't memorize one field layout;
-  // `'fixed'` uses the factory's `systemSeed` for every episode (the
-  // old default, useful for reproducibility).
-  seedStrategy: 'vary',
-  // Movement reward coefficient. Added to the fitness for every unit
-  // of distance traveled (sum of `speed * dt`). Small values (0.1–0.5)
-  // discourage the "spin in place" local minimum without dominating
-  // the score/survival/powerups rewards. Set to 0 to disable.
-  movementReward: 0.5,
-  // Parallelism. 0 = single-threaded (no worker pool, useful for
-  // tests + debugging), 1+ = number of worker threads. The server
-  // defaults to `os.cpus().length - 1` (computed inside the pool).
-  workerCount: 0,
-});
+/**
+ * @deprecated Import from `./defaults.js` instead. Kept as a re-export
+ * for backward compatibility with any external consumer that imports
+ * `DEFAULTS` from `trainer.js` directly.
+ */
+export const DEFAULTS = TRAINER_DEFAULTS;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (deriveMode, discretizeYaw, evaluateGenome all live in
@@ -87,19 +71,19 @@ export const DEFAULTS = Object.freeze({
  */
 export function createTrainer(opts = {}) {
   const {
-    populationSize = DEFAULTS.populationSize,
-    inputSize = DEFAULTS.inputSize,
-    hiddenSize = DEFAULTS.hiddenSize,
-    outputSize = DEFAULTS.outputSize,
-    maxDurationS = DEFAULTS.maxDurationS,
-    dt = DEFAULTS.dt,
-    episodesPerGenome = DEFAULTS.episodesPerGenome,
-    onProgress = DEFAULTS.onProgress,
+    populationSize = TRAINER_DEFAULTS.populationSize,
+    inputSize = TRAINER_DEFAULTS.inputSize,
+    hiddenSize = TRAINER_DEFAULTS.hiddenSize,
+    outputSize = TRAINER_DEFAULTS.outputSize,
+    maxDurationS = TRAINER_DEFAULTS.maxDurationS,
+    dt = TRAINER_DEFAULTS.dt,
+    episodesPerGenome = TRAINER_DEFAULTS.episodesPerGenome,
+    onProgress = TRAINER_DEFAULTS.onProgress,
     gaOptions = {},
     envOptions = {},
-    seedStrategy = DEFAULTS.seedStrategy,
-    movementReward = DEFAULTS.movementReward,
-    workerCount = DEFAULTS.workerCount,
+    seedStrategy = TRAINER_DEFAULTS.seedStrategy,
+    movementReward = TRAINER_DEFAULTS.movementReward,
+    workerCount = TRAINER_DEFAULTS.workerCount,
   } = opts;
 
   // Genome = flat weight array (single source of truth: network.genomeSize)
@@ -469,11 +453,11 @@ export function createTrainer(opts = {}) {
 export function runRecordEpisode(opts) {
   const {
     genome,
-    inputSize = DEFAULTS.inputSize,
-    hiddenSize = DEFAULTS.hiddenSize,
-    outputSize = DEFAULTS.outputSize,
-    maxDurationS = DEFAULTS.maxDurationS,
-    dt = DEFAULTS.dt,
+    inputSize = TRAINER_DEFAULTS.inputSize,
+    hiddenSize = TRAINER_DEFAULTS.hiddenSize,
+    outputSize = TRAINER_DEFAULTS.outputSize,
+    maxDurationS = TRAINER_DEFAULTS.maxDurationS,
+    dt = TRAINER_DEFAULTS.dt,
     episodeSeed,
     envOptions = {},
   } = opts;
