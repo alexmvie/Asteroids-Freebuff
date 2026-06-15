@@ -29,6 +29,7 @@ import { createAsteroidUvDebugOverlay } from './systems/asteroid-uv-debug-overla
 import { createUvUnwrapViewer } from './systems/uv-unwrap-viewer.js';
 import { createEditObjectScreen } from './systems/edit-object-screen.js';
 import { createPowerUpSystem } from './systems/powerup-system.js';
+import { createParticleSystem } from './systems/particles.js';
 
 // ---- Power-up drop frequency -------------------------------------------
 // Probability (0.0–1.0) that an asteroid destroy spawns a laser
@@ -331,6 +332,12 @@ const laser = createLaser({ scene });
 //   field.getWorld()                     — world object (for powerupSystem)
 const field = createAsteroidField({ scene, uvDebugOverlay: asteroidUvDebug });
 
+// ---- Particle system ---------------------------------------------------
+// Smoke puffs + stone debris on asteroid destruction. Updated every
+// frame in the render loop; emits on each asteroid kill in
+// processCollisions. See src/systems/particles.js.
+const particles = createParticleSystem({ scene });
+
 // ---- Demo AI -----------------------------------------------------------
 // NPC ship that hunts the nearest asteroid and shoots at it when the
 // target is in front (a ~20° cone), in addition to the original
@@ -453,6 +460,8 @@ function resetRunState() {
   // Wipe the power-up state. The next PLAYING tick will spawn
   // a fresh power-up.
   powerupSystem.clearAll();
+  // Clear lingering explosion particles from the previous run.
+  particles.clear();
   bus.emit('score:changed', { score });
   bus.emit('lives:changed', { lives });
 }
@@ -559,9 +568,12 @@ function processCollisions() {
   for (const idx of indices) {
     const a = asteroids[idx];
     const destroyedPos = a.getPosition();
+    const asteroidRadius = a.spec ? a.spec.radius : 2;
     const childSpecs = a.split();
     a.dispose();
     asteroids.splice(idx, 1);
+    // ---- Explosion particle effect ----------------------------
+    particles.emitExplosion(destroyedPos, asteroidRadius);
     for (const spec of childSpecs) {
       asteroids.push(createAsteroidFromSpec({ spec, scene, uvDebugOverlay: asteroidUvDebug }));
     }
@@ -813,6 +825,7 @@ function tick(dt) {
   powerupSystem.update(dt, field.getEntities());
 
   processCollisions();
+  particles.update(dt);
   updateCamera(dt);
 
   // ---- NEBULA_RENDER_THRESHOLD wiring --------------------------------
