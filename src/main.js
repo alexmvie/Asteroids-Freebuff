@@ -965,45 +965,43 @@ console.log(
 console.log('Ship online. WASD/arrows to fly, Space to fire, any key to start.');
 console.log(`State: ${stateMachine.getState()}   Energy: ${ship.getEnergy()}   Score: ${score}`);
 
-// ---- Dev-friendly console banner ----------------------------------------
-console.log(
-  '%c Asteroids -> Elite %c scaffolded ',
-  'background:#48dbfb;color:#05060c;font-weight:bold;padding:2px 6px;border-radius:2px;',
-  'color:#97a3c4;',
-);
-console.log('Ship online. WASD/arrows to fly, Space to fire, any key to start.');
-console.log(`State: ${stateMachine.getState()}   Energy: ${ship.getEnergy()}   Score: ${score}`);
-
-// ---- Game version chip (bottom-right HUD) -------------------------------
-// SSOT for the visible build version. Standing rule from the user
-// (2026-07-04): bump GAME_VERSION in EVERY commit AND `git push -u origin
-// <branch>` immediately after, so the corner chip + the remote are
-// always in sync with the local checkout. GAME_BRANCH + GAME_COMMIT
-// separately track the branch + short SHA so the user can verify at a
-// glance they're on the up-to-date build AND the right branch.
-const GAME_VERSION = 'v0.17.1'; // hotfix: removed duplicate bottom console.logs
+const GAME_VERSION = 'v0.17.3'; // final cleanup: drop dead GAME_COMMIT + dead .game-version__commit CSS + add escapeHtml defense
 const GAME_BRANCH = 'refine-coded-ai';
-const GAME_COMMIT = 'TBD'; // filled by the post-commit hook (no hook yet)
+
+// escapeHtml -- defense-in-depth against accidental HTML injection when
+// the chip constants become dynamic in a future iteration (a post-commit
+// hook reading `git rev-parse --short HEAD`, or `process.env.GITHUB_REF`).
+// Today the values are build-time constants (alphanumeric + hyphen +
+// dot) so this helper is a no-op, but the moment any of them becomes
+// user-influenced the helper treats accidental HTML injection as an
+// invalid-character sequence rather than an XSS bug. Comments drift;
+// defense-in-depth doesn't.
+function escapeHtml(s) {
+  return String(s).replace(/[<>&"]/g, (c) => ({
+    '<': '&lt;',
+    '>': '&gt;',
+    '&': '&amp;',
+    '"': '&quot;',
+  })[c]);
+}
+
 {
   const v = document.getElementById('game-version');
   if (v) {
+    // Two-span chip (branch + version). The commit-span was dropped:
+    // a hard-coded or stale SHA leaves the chip disagreeing with
+    // itself. Future post-commit-hook iteration will re-add it.
     v.innerHTML =
-      '<span class="game-version__branch">' + GAME_BRANCH + '</span>' +
-      '<span class="game-version__ver">' + GAME_VERSION + '</span>' +
-      '<span class="game-version__commit">' + GAME_COMMIT + '</span>';
+      `<span class="game-version__branch">${escapeHtml(GAME_BRANCH)}</span>` +
+      `<span class="game-version__ver">${escapeHtml(GAME_VERSION)}</span>`;
   }
 }
 
-// One extra console.log stamping the version. The 3 logs above this
-// block are NOT duplicated here — the prior commit accidentally re-
-// emitted all three (banner + Ship online + State) on top of the
-// new version line; this hotfix fixes that regression.
+// One extra console.log stamping the version + branch (matches the
+// chip so DevTools and the corner chip agree). ONE log, not two:
 console.log(
-  '%c' + GAME_VERSION + '%c on %c' + GAME_BRANCH + '%c @ %c' + GAME_COMMIT + '%c',
+  `%c${GAME_VERSION}%c on %c${GAME_BRANCH}%c`,
   'background:#48dbfb;color:#05060c;padding:2px 6px;border-radius:2px;font-weight:bold;',
   'color:#97a3c4;',
   'color:#48dbfb;',
-  'color:#97a3c4;',
-  'color:#48dbfb;',
-  'color:#97a3c4;',
 );
