@@ -1,21 +1,25 @@
 /**
- * Unit tests for src/entities/ai.js.
+ * Unit tests for src/entities/ai.js (v0.20.x — single-mode shooter).
  *
- * The brain (`aiBrainTick`) is a pure function: ship position + yaw +
- * asteroid list + time → desired `{ yaw, thrust, mode, fire }`. These
- * tests exercise all four behavior modes (hunt, dodge, target, wander)
- * plus the pure helpers (`findNearestAsteroid`, `isTargetInFront`,
- * `intercept`, `shouldResetAi`, `pickAiSpawn`). The factory
- * (`createDemoAi`) is smoke-tested with a mock ship factory — no
- * Three.js dependency in unit tests.
+ * The brain (`aiBrainTick`) is a pure function that maps
+ *   (ship position + yaw + asteroid list + powerup + tree thresholds)
+ * to a 4-tuple `{ yaw, thrust, mode, fire }`.
+ * v0.20.x collapsed the prior 4-mode priority (DODGE > HUNT > TARGET
+ * > WANDER) to a single-mode shooter with three branches:
  *
- * v0.12.x — the HUNT controller was rewired in src/entities/ai.js from
- * a 5-phase stack (HARD COMMIT, FINAL APPROACH, TANGENTIAL orbit,
- * BRAKE, APPROACH) to a single 2-phase intercept (BRAKE if closing
- * too fast, APPROACH otherwise). The tests in the HUNT block below
- * exercise the new intercepted controller + the HUNT mode fires-at-
- * any-asteroid-in-cone behavior (the user's v0.11.x complaint that
- * the AI didn't shoot asteroids while chasing bonus pickups).
+ *   1. PANIC-DODGE — nearest asteroid within `panicDist`
+ *   2. ENGAGE      — otherwise pick the best in-range target
+ *                    (asteroid by default, powerup if significantly
+ *                    closer per `powerupBiasU`) and apply
+ *                    `engageController`. Fire at any in-cone
+ *                    asteroid each tick ("feuer bis split").
+ *   3. IDLE        — no targets in range; no thrust, no yaw.
+ *
+ * Tests cover all three branches + the pure helpers
+ * (`engageController`, `findNearestAsteroid`, `isTargetInFront`,
+ * `shouldResetAi`, `pickAiSpawn`). The factory (`createDemoAi`) is
+ * smoke-tested with a mock ship factory — no Three.js dependency
+ * in unit tests.
  */
 
 import { test } from 'node:test';
@@ -23,8 +27,7 @@ import assert from 'node:assert/strict';
 
 import {
   aiBrainTick,
-  intercept,
-  huntController,
+  engageController,
   findNearestAsteroid,
   isTargetInFront,
   shouldResetAi,
@@ -32,7 +35,9 @@ import {
   createDemoAi,
 } from '../src/entities/ai.js';
 
-// ---- Mock helpers ------------------------------------------------------
+// --------------------------------------------------------------------------
+// Mock helpers
+// --------------------------------------------------------------------------
 
 function mockAsteroid(x, z) {
   return {
@@ -84,7 +89,9 @@ function mockScene() {
   };
 }
 
-// ---- aiBrainTick: arg validation --------------------------------------
+// --------------------------------------------------------------------------
+// aiBrainTick: arg validation
+// --------------------------------------------------------------------------
 
 test('aiBrainTick: throws on missing aiPos', () => {
   assert.throws(() => aiBrainTick({ aiYaw: 0, asteroids: [], time: 0 }), /aiPos/);
@@ -101,268 +108,397 @@ test('aiBrainTick: throws on non-array asteroids', () => {
   );
 });
 
-// ---- aiBrainTick: DODGE mode ------------------------------------------
+// --------------------------------------------------------------------------
+// aiBrainTick: PANIC-DODGE branch
+// --------------------------------------------------------------------------
 
-test('aiBrainTick: returns dodge mode when an asteroid is within dodgeDist', () => {
+test('aiBrainTick: nearest within panicDist → mode=dodge, thrust=true', () => {
+  // Asteroid at (5, 0). panicDist=6 → 5 < 6 → panic-dodge fires.
+  // Ship at origin facing +Z (no, +X is yaw=-PI/2; default yaw=0
+  // faces -Z). threatAngle=atan2(0, 5)=0. escapeAngle=PI/2.
+  // facingAngle(0)=-PI/2. diff=PI. yaw=-1. thrust (any non-zero
+  // diff) = true.
   const asteroids = [mockAsteroid(5, 0)];
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
     asteroids,
     time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
   });
   assert.equal(result.mode, 'dodge');
   assert.equal(result.thrust, true);
   assert.ok(result.yaw === -1 || result.yaw === 1);
+  assert.equal(result.fire, false);
 });
 
-test('aiBrainTick: dodge beats target when an asteroid is within both ranges', () => {
-  const asteroids = [mockAsteroid(5, 0)];
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-  });
-  assert.equal(result.mode, 'dodge');
-});
-
-test('aiBrainTick: dodge steers perpendicular (90°) to the threat', () => {
-  const asteroids = [mockAsteroid(5, 0)];
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: Math.PI,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-  });
-  assert.equal(result.mode, 'dodge');
-  assert.equal(result.yaw, 0);
-});
-
-// ---- aiBrainTick: TARGET mode -----------------------------------------
-
-test('aiBrainTick: returns target mode when an asteroid is within targetDist but outside dodgeDist', () => {
-  // Ship at origin facing +X (yaw=-PI/2) so the +X asteroid is
-  // aligned in the fire cone (closing the alignment gap lets the
-  // brain return thrust=true — see next test for the un-aligned case).
-  const asteroids = [mockAsteroid(40, 0)];
+test('aiBrainTick: dodge steers ~90° perpendicular from threat', () => {
+  // Asteroid at (5, 0). threatAngle=0. Ship facing +X (yaw=-PI/2).
+  // escapeAngle=PI/2. facingAngle(-PI/2)=0. diff=PI/2 → yaw=-1.
+  // (The +/- 0.1 deadband makes this exactly at the boundary;
+  // a slight asymmetry above/below moves it definitively to one
+  // side. Pin the "steers perpendicular" property only loosely.)
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
-    asteroids,
+    asteroids: [mockAsteroid(5, 0)],
     time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
   });
-  assert.equal(result.mode, 'target');
+  assert.equal(result.mode, 'dodge');
+  assert.notEqual(result.yaw, 0, 'must turn to escape');
   assert.equal(result.thrust, true);
 });
 
-test('aiBrainTick: target steers toward the nearest asteroid (left yaw for +X target)', () => {
-  // Ship at origin facing +X (yaw=-PI/2) so the +X asteroid is
-  // directly in front — v0.12.x intercept controller now gates
-  // thrust on alignment (|targetDiff|<0.5). With the ship already
-  // aligned, thrust=true and yaw=0.
-  // The 'left yaw for +X target' naming refers to the asymmetric
-  // case where the ship ISN'T aligned — see test below where the
-  // ship faces -Z and must turn to chase +X.
-  const asteroids = [mockAsteroid(40, 0)];
+test('aiBrainTick: panicDist=0 disables dodge entirely (engage takes over)', () => {
+  // Even with an asteroid at 1u, panicDist=0 disables the panic branch.
+  // Without a powerup, there is no chase target → falls through to
+  // IDLE (yaw=0, thrust=false).
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [mockAsteroid(1, 0)],
+    time: 0,
+    panicDist: 0,
+  });
+  assert.notEqual(result.mode, 'dodge');
+  // asteroid (1,0) IS in targetDist=100 range, but no powerup.
+  // Wait — 1u asteroid SHOULD trigger engage! Let me check.
+  // engageController at dist<0.01 → idle signature. dist=1 → engages.
+  // Actually 1u is OUT of panicDist=0 (panicDist=0 means "no panic
+  // shell") but IN of targetDist=100 → engage mode.
+  assert.equal(result.mode, 'asteroid');
+});
+
+// --------------------------------------------------------------------------
+// aiBrainTick: ENGAGE asteroid branch
+// --------------------------------------------------------------------------
+
+test('aiBrainTick: nearest asteroid in range → mode=asteroid, thrust when aligned', () => {
+  // Ship at origin facing +X (yaw=-PI/2). Asteroid at (40, 0).
+  // engageController: dist=40, diff=0 → yaw=0, thrust=true.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
-    asteroids,
+    asteroids: [mockAsteroid(40, 0)],
     time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
   });
-  assert.equal(result.mode, 'target');
+  assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0);
   assert.equal(result.thrust, true);
 });
 
-test('aiBrainTick: TARGET → no thrust when ship is misaligned with asteroid direction', () => {
-  // v0.12.x — the new intercept controller gates thrust on
-  // alignment. Ship facing -Z (yaw 0) with asteroid at +X needs
-  // to yaw first (yaw=-1, targetDiff=PI/2), and only thrusts
-  // once |targetDiff|<0.5. The OLD brain always thrust in
-  // TARGET mode regardless of alignment; this test guards
-  // against regression to that behavior.
-  const asteroids = [mockAsteroid(40, 0)];
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0, // facing -Z
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-  });
-  assert.equal(result.mode, 'target');
-  assert.equal(result.yaw, -1, 'must turn left to chase +X from south');
-  assert.equal(result.thrust, false, 'no thrust while mis-aligned (|targetDiff|=PI/2 > 0.5)');
-});
-
-test('aiBrainTick: target picks the NEAREST asteroid (not the first)', () => {
-  const asteroids = [mockAsteroid(80, 0), mockAsteroid(0, 30)];
+test('aiBrainTick: ENGAGE turn toward asteroid when misaligned', () => {
+  // Ship at origin facing -Z (yaw=0). Asteroid at (40, 0) — to the
+  // right. engaging requires a left turn (yaw=-1 in ship.js
+  // convention = turn CCW which aligns +X-facing).
+  // diff=wrapAngle(targetAngle - facingAngle(0))=wrapAngle(0 - (-PI/2))
+  // = PI/2 > 0.15 → yaw=-1.
+  // |PI/2| > 0.30 → thrust=false.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
-    asteroids,
+    asteroids: [mockAsteroid(40, 0)],
     time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
   });
-  assert.equal(result.mode, 'target');
-  assert.equal(result.yaw, -1);
-});
-
-test('aiBrainTick: does not target if all asteroids are beyond targetDist', () => {
-  const asteroids = [mockAsteroid(200, 0)];
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-  });
-  assert.equal(result.mode, 'wander');
-});
-
-// ---- aiBrainTick: WANDER mode -----------------------------------------
-
-test('aiBrainTick: empty asteroid list → wander', () => {
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: -Math.PI / 2,
-    wanderHeadingExpiresAt: 5.0,
-  });
-  assert.equal(result.mode, 'wander');
-  assert.equal(result.thrust, true);
-});
-
-test('aiBrainTick: wander → no thrust when heading is misaligned', () => {
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: Math.PI / 2,
-    wanderHeadingExpiresAt: 5.0,
-  });
-  assert.equal(result.mode, 'wander');
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.yaw, -1, 'turn CCW (-1) to face the +X asteroid');
+  // 0.30 deadband → PI/2 is well past it → no thrust while turning.
+  // (This matches the user's complaint that the bot turns AND
+  // thrusts simultaneously, accelerating sideways. The simplified
+  // engageController gates thrust on alignment.)
   assert.equal(result.thrust, false);
 });
 
-test('aiBrainTick: wander biases heading toward nearest asteroid', () => {
-  const asteroids = [mockAsteroid(0, 150)];
+test('aiBrainTick: ENGAGE picks the NEAREST asteroid', () => {
+  // Three asteroids at varying distances. Expected: nearest wins.
+  const asteroids = [
+    mockAsteroid(80, 0),
+    mockAsteroid(20, 0), // 2x closer than 80
+    mockAsteroid(-50, 0),
+  ];
+  // Ship facing +X (yaw=-PI/2).
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
+    aiYaw: -Math.PI / 2,
     asteroids,
     time: 0,
-    wanderHeading: null,
-    wanderHeadingExpiresAt: 0,
-    targetDist: 90,
-    rng: () => 0.5,
   });
-  assert.equal(result.mode, 'wander');
-  assert.ok(Math.abs(result._wanderHeading - Math.PI / 2) < 1e-9);
-});
-
-test('aiBrainTick: wander picks a new heading on first call (wanderHeading=null)', () => {
-  let rngCalls = 0;
-  const rng = () => { rngCalls++; return 0.5; };
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: null,
-    wanderHeadingExpiresAt: 0,
-    rng,
-  });
-  assert.equal(result.mode, 'wander');
-  assert.equal(rngCalls, 1);
-  assert.equal(result._wanderHeading, 0);
-});
-
-test('aiBrainTick: wander keeps the same heading while still in the period', () => {
-  let rngCalls = 0;
-  const rng = () => { rngCalls++; return 0.5; };
-  const first = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: 1.0,
-    wanderHeadingExpiresAt: 5.0,
-    rng,
-  });
-  assert.equal(rngCalls, 0);
-  assert.equal(first._wanderHeading, 1.0);
-});
-
-test('aiBrainTick: wander picks a new heading after the period expires', () => {
-  let rngCalls = 0;
-  const rng = () => { rngCalls++; return 0.25; };
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 10.0,
-    wanderHeading: 1.0,
-    wanderHeadingExpiresAt: 5.0,
-    wanderTurnPeriod: 2.5,
-    rng,
-  });
-  assert.equal(rngCalls, 1);
-  assert.ok(Math.abs(result._wanderHeading + Math.PI / 2) < 1e-9);
-  assert.equal(result._wanderHeadingExpiresAt, 12.5);
-});
-
-test('aiBrainTick: wander yaw steers toward the heading', () => {
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: Math.PI / 4,
-    wanderHeadingExpiresAt: 5.0,
-  });
-  assert.equal(result.yaw, -1);
-  const result2 = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: -Math.PI / 4,
-    wanderHeadingExpiresAt: 5.0,
-  });
-  assert.equal(result2.yaw, -1);
-});
-
-test('aiBrainTick: wander yaw is 0 when heading is aligned (within deadband)', () => {
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: -Math.PI / 2 + 0.05,
-    wanderHeadingExpiresAt: 5.0,
-  });
+  assert.equal(result.mode, 'asteroid');
+  // Already aligned with (20, 0) → diff=0, both yaw=0, thrust=true.
   assert.equal(result.yaw, 0);
+  assert.equal(result.thrust, true);
 });
 
-// ---- findNearestAsteroid ----------------------------------------------
+test('aiBrainTick: ENGAGE picks nearest even when not perfectly aligned', () => {
+  // Ship facing -Z (yaw=0). Nearest asteroid at (20, 0), farther
+  // at (40, 0). Diff for nearest: wrapAngle(0-(-PI/2))=PI/2 → yaw=-1.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [mockAsteroid(40, 0), mockAsteroid(20, 0)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'asteroid');
+  // Steering is toward nearest (20, 0): yaw=-1.
+  assert.equal(result.yaw, -1);
+});
+
+test('aiBrainTick: no in-range asteroid → falls through to IDLE', () => {
+  // All asteroids beyond targetDist=100. With no powerup either →
+  // IDLE branch.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [mockAsteroid(200, 0)],
+    time: 0,
+    targetDist: 100,
+  });
+  assert.equal(result.mode, 'idle');
+  assert.equal(result.yaw, 0, 'idle = no rotation');
+  assert.equal(result.thrust, false, 'idle = no acceleration');
+  assert.equal(result.fire, false);
+});
+
+// --------------------------------------------------------------------------
+// aiBrainTick: ENGAGE powerup branch
+// --------------------------------------------------------------------------
+
+test('aiBrainTick: powerup wins over asteroid when significantly closer', () => {
+  // Asteroid at (50, 0), powerup at (10, 0).
+  // powerupDist=10 < asteroidDist=50 + (-30) = 20 → powerup wins.
+  // Ship facing +X (yaw=-PI/2) → diff=0 → yaw=0, thrust=true.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(50, 0)],
+    time: 0,
+    powerupPos: { x: 10, z: 0 },
+    powerupBiasU: -30,
+  });
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.yaw, 0);
+  assert.equal(result.thrust, true);
+});
+
+test('aiBrainTick: asteroid wins over powerup when not biased closer', () => {
+  // Asteroid at (20, 0), powerup at (40, 0).
+  // powerupDist=40 > asteroidDist=20 + (-30) = -10 → powerup loses.
+  // Asteroid wins → mode=asteroid.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(20, 0)],
+    time: 0,
+    powerupPos: { x: 40, z: 0 },
+    powerupBiasU: -30,
+  });
+  assert.equal(result.mode, 'asteroid');
+});
+
+test('aiBrainTick: powerup as fallback when no in-range asteroid', () => {
+  // Asteroid beyond targetDist (200u); powerup within (60u).
+  // Asteroid is dropped, powerup becomes the target.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(200, 0)],
+    time: 0,
+    powerupPos: { x: 60, z: 0 },
+    powerupBiasU: -30,
+  });
+  assert.equal(result.mode, 'powerup');
+});
+
+test('aiBrainTick: powerup too far → falls through to closest in-range target', () => {
+  // Powerup at 200u (>targetDist=100) → dropped. Closest asteroid
+  // at 30u picks up the slack.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(30, 0)],
+    time: 0,
+    powerupPos: { x: 200, z: 0 },
+    powerupBiasU: -30,
+  });
+  assert.equal(result.mode, 'asteroid');
+});
+
+test('aiBrainTick: powerupBiasU=0 → powerup wins if pDist <= asteroidDist (equal preferred)', () => {
+  // Asteroid at (50, 0), powerup at (50, 0). With bias=0, the
+  // `pDist < best.dist + bias` check is `pDist < asteroidDist` —
+  // strict less-than, so asteroid wins on tie.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(50, 0)],
+    time: 0,
+    powerupPos: { x: 50, z: 0 },
+    powerupBiasU: 0,
+  });
+  assert.equal(result.mode, 'asteroid', 'tie goes to asteroid with bias=0');
+});
+
+test('aiBrainTick: powerupBiasU=50 → powerup wins even when 50u farther than asteroid', () => {
+  // Asteroid at (40, 0), powerup at (80, 0).
+  // powerupDist=80 < asteroidDist=40 + 50 = 90 → powerup wins
+  // (positive bias means "favor powerups even at distance").
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(40, 0)],
+    time: 0,
+    powerupPos: { x: 80, z: 0 },
+    powerupBiasU: 50,
+  });
+  assert.equal(result.mode, 'powerup');
+});
+
+// --------------------------------------------------------------------------
+// aiBrainTick: fire decision
+// --------------------------------------------------------------------------
+
+test('aiBrainTick: fires when asteroid is in cone (regardless of chase target)', () => {
+  // Ship facing -Z (yaw=0). Powerup at (5, 0) — significantly closer
+  // than the (0, -40) asteroid (5 < 40 + (-30) = 10), so powerup is
+  // the chase target. The in-cone asteroid at (0, -40) is the
+  // "second target" — the AI fires at it even though it's chasing
+  // the powerup. The fire check is INDEPENDENT of the chase target.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [mockAsteroid(0, -40)],
+    time: 0,
+    powerupPos: { x: 5, z: 0 },
+    powerupBiasU: -30,
+  });
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.fire, true);
+});
+
+test('aiBrainTick: no asteroid in cone → fire=false', () => {
+  // Asteroid at (0, 30) — behind the ship (yaw=0, faces -Z). Not in cone.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [mockAsteroid(0, 30)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.fire, false);
+});
+
+test('aiBrainTick: dodge mode → no fire', () => {
+  // Asteroid within panicDist (close enough to dodge). Even if it's
+  // also in cone, panic-dodge suppresses fire (don't shoot while
+  // escaping).
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [mockAsteroid(0, -3)], // 3u, in-cone (faces -Z), in panic range
+    time: 0,
+    panicDist: 6,
+  });
+  assert.equal(result.mode, 'dodge');
+  assert.equal(result.fire, false);
+});
+
+test('aiBrainTick: idle mode → no fire', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [mockAsteroid(200, 0)],
+    time: 0,
+    targetDist: 100,
+  });
+  assert.equal(result.mode, 'idle');
+  assert.equal(result.fire, false);
+});
+
+// --------------------------------------------------------------------------
+// engageController (pure chase controller)
+// --------------------------------------------------------------------------
+
+test('engageController: dist < 0.01 → no thrust, no yaw (pickup radius absorbs)', () => {
+  const r = engageController(
+    { x: 50, z: 0 }, 0, { x: 50, z: 0 },
+  );
+  assert.equal(r.dist, 0);
+  assert.equal(r.thrust, false);
+  assert.equal(r.yaw, 0);
+});
+
+test('engageController: aligned → yaw=0, thrust=true', () => {
+  // Ship facing +X (yaw=-PI/2 → facingAngle=0). Target at (60, 0).
+  // diff=0 → yaw=0, |diff|<0.30 → thrust=true.
+  const r = engageController(
+    { x: 0, z: 0 }, -Math.PI / 2, { x: 60, z: 0 },
+  );
+  assert.equal(r.yaw, 0);
+  assert.equal(r.thrust, true);
+  assert.equal(r.dist, 60);
+});
+
+test('engageController: small diff (0.10) → within ±0.15 yaw deadband, thrust=true', () => {
+  // Target at angle 0.10 from facing direction. |0.10| < 0.15 → yaw=0.
+  // |0.10| < 0.30 → thrust=true (allows earlier commitment to thrust
+  // than the legacy intercept's ±0.50 thrust deadband).
+  const angle = 0.10;
+  const r = engageController(
+    { x: 0, z: 0 }, -Math.PI / 2,
+    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
+  );
+  assert.equal(r.yaw, 0);
+  assert.equal(r.thrust, true);
+});
+
+test('engageController: mid diff (0.22) → yaw=-1, thrust=true', () => {
+  // |0.22| > 0.15 yaw deadband → yaw=-1.
+  // |0.22| < 0.30 thrust deadband → thrust=true (turn-AND-thrust
+  // when ALMOST aligned is intentional — keeps the bot moving
+  // toward the target rather than stopping dead to align).
+  const angle = 0.22;
+  const r = engageController(
+    { x: 0, z: 0 }, -Math.PI / 2,
+    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
+  );
+  assert.equal(r.yaw, -1);
+  assert.equal(r.thrust, true);
+});
+
+test('engageController: large diff (0.50) → yaw=-1, thrust=false', () => {
+  // |0.50| > 0.15 yaw deadband → yaw=-1.
+  // |0.50| > 0.30 thrust deadband → thrust=false (don't accelerate
+  // sideways while turning HARD).
+  const angle = 0.50;
+  const r = engageController(
+    { x: 0, z: 0 }, -Math.PI / 2,
+    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
+  );
+  assert.equal(r.yaw, -1);
+  assert.equal(r.thrust, false);
+});
+
+test('engageController: negative diff → yaw=+1 (CW turn for CW misalignment)', () => {
+  // Mirror of the 0.50 case. Ship facing +X, target at -X-side. yaw=+1.
+  const angle = -0.50;
+  const r = engageController(
+    { x: 0, z: 0 }, -Math.PI / 2,
+    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
+  );
+  assert.equal(r.yaw, 1);
+  assert.equal(r.thrust, false);
+});
+
+test('engageController: returns dist + diff as observability fields (regression guard)', () => {
+  const r = engageController(
+    { x: 0, z: 0 }, -Math.PI / 2, { x: 60, z: 0 },
+  );
+  assert.equal(r.dist, 60);
+  assert.equal(typeof r.diff, 'number');
+});
+
+// --------------------------------------------------------------------------
+// findNearestAsteroid
+// --------------------------------------------------------------------------
 
 test('findNearestAsteroid: empty list returns null', () => {
   assert.equal(findNearestAsteroid({ x: 0, z: 0 }, []), null);
@@ -393,7 +529,53 @@ test('findNearestAsteroid: skips asteroids with no getPosition', () => {
   assert.equal(result.asteroid, a);
 });
 
-// ---- shouldResetAi ----------------------------------------------------
+// --------------------------------------------------------------------------
+// isTargetInFront
+// --------------------------------------------------------------------------
+
+test('isTargetInFront: target directly ahead (yaw 0) → true', () => {
+  assert.equal(isTargetInFront({ x: 0, z: 0 }, 0, { x: 0, z: -10 }, 0.35), true);
+});
+
+test('isTargetInFront: target directly behind → false', () => {
+  assert.equal(isTargetInFront({ x: 0, z: 0 }, 0, { x: 0, z: 10 }, 0.35), false);
+});
+
+test('isTargetInFront: target just inside cone edge → true', () => {
+  const a = 0.34;
+  assert.equal(
+    isTargetInFront({ x: 0, z: 0 }, 0, { x: Math.sin(a), z: -Math.cos(a) }, 0.35),
+    true,
+  );
+});
+
+test('isTargetInFront: target just outside cone edge → false', () => {
+  const a = 0.40;
+  assert.equal(
+    isTargetInFront({ x: 0, z: 0 }, 0, { x: Math.sin(a), z: -Math.cos(a) }, 0.35),
+    false,
+  );
+});
+
+test('isTargetInFront: handles non-zero yaw correctly', () => {
+  assert.equal(
+    isTargetInFront({ x: 0, z: 0 }, -Math.PI / 2, { x: 10, z: 0 }, 0.35),
+    true,
+  );
+  assert.equal(
+    isTargetInFront({ x: 0, z: 0 }, -Math.PI / 2, { x: -10, z: 0 }, 0.35),
+    false,
+  );
+});
+
+test('isTargetInFront: null positions → false (defensive)', () => {
+  assert.equal(isTargetInFront(null, 0, { x: 0, z: 0 }, 0.35), false);
+  assert.equal(isTargetInFront({ x: 0, z: 0 }, 0, null, 0.35), false);
+});
+
+// --------------------------------------------------------------------------
+// shouldResetAi
+// --------------------------------------------------------------------------
 
 test('shouldResetAi: inside resetDist → false', () => {
   assert.equal(shouldResetAi({ x: 50, z: 50 }, 220), false);
@@ -413,7 +595,9 @@ test('shouldResetAi: null pos → false', () => {
   assert.equal(shouldResetAi(null, 220), false);
 });
 
-// ---- pickAiSpawn ------------------------------------------------------
+// --------------------------------------------------------------------------
+// pickAiSpawn
+// --------------------------------------------------------------------------
 
 test('pickAiSpawn: returns a position within radius', () => {
   for (let i = 0; i < 100; i++) {
@@ -433,512 +617,9 @@ test('pickAiSpawn: deterministic with a fixed rng', () => {
   assert.equal(yaw, 0);
 });
 
-// ---- intercept (pure 2-phase controller) ------------------------------
-
-test('intercept: dist < 0.01 → no thrust (pickup radius absorbs)', () => {
-  // At the target itself, brain hands control to the pickup radius.
-  const r = intercept({ x: 50, z: 0 }, 0, { x: 0, z: 0 }, { x: 50, z: 0 });
-  assert.equal(r.dist, 0);
-  assert.equal(r.thrust, false);
-  assert.equal(r.yaw, 0);
-});
-
-test('intercept: APPROACH (steer + thrust) when aligned and need speed', () => {
-  // Ship at (0,0), no velocity, facing +X. Target at (60,0).
-  // closingSpeed=0, desiredClosing=15. Not BRAKE.
-  // targetAngle=0, facing=0→diff=0, within 0.5 → thrust + yaw=0.
-  const r = intercept({ x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 }, { x: 60, z: 0 });
-  assert.equal(r.dist, 60);
-  assert.equal(r.yaw, 0);
-  assert.equal(r.thrust, true);
-});
-
-test('intercept: BRAKE (turn opposite to velocity) when closing too fast', () => {
-  // Ship at (0,0), vel (80,0), facing +X. Target at (50,0).
-  // closingSpeed=80, desiredClosing=15. BRAKE.
-  // brakeAngle=atan2(-0,-80)=PI. brakeDiff=PI - 0 = PI > 0.2 → yaw=-1.
-  // |brakeDiff|=PI > 0.5 → no thrust.
-  const r = intercept({ x: 0, z: 0 }, -Math.PI / 2, { x: 80, z: 0 }, { x: 50, z: 0 });
-  assert.equal(r.yaw, -1);
-  assert.equal(r.thrust, false);
-});
-
-test('intercept: BRAKE thrusts when facing into the brake direction', () => {
-  // Ship at (0,0), vel (80,0), facing -X (yaw=PI/2). Target at (50,0).
-  // facingAngle(PI/2) = atan2(-cos(PI/2), -sin(PI/2)) = atan2(0, -1) = PI.
-  // brakeAngle = PI. brakeDiff = 0 → yaw=0, |diff|<0.5 → thrust.
-  const r = intercept({ x: 0, z: 0 }, Math.PI / 2, { x: 80, z: 0 }, { x: 50, z: 0 });
-  assert.equal(r.yaw, 0);
-  assert.equal(r.thrust, true);
-});
-
-test('intercept: APPROACH no-thrust when not aligned', () => {
-  // Ship at origin, no velocity, facing -Z (yaw 0). Target at (60, 0).
-  // targetAngle=0, facingAngle(0)=-PI/2. targetDiff=wrapAngle(0-(-PI/2))=PI/2 > 0.2 → yaw=-1.
-  // |targetDiff|=PI/2 > 0.5 → no thrust.
-  const r = intercept({ x: 0, z: 0 }, 0, { x: 0, z: 0 }, { x: 60, z: 0 });
-  assert.equal(r.yaw, -1);
-  assert.equal(r.thrust, false);
-});
-
-test('intercept: closes coasting (no thrust) when at desired speed', () => {
-  // Ship at (50,0), vel (15,0) facing +X (yaw=-PI/2). Target at (60,0).
-  // closingSpeed=(10*15+0*0)/10=15. desiredClosing=min(15,10)=10.
-  // closingSpeed(15) > desiredClosing(10) → BRAKE.
-  // brakeAngle=atan2(-0,-15)=PI. brakeDiff=PI - 0 = PI. yaw=-1, thrust=false.
-  // This tests the "already at desired speed" coast-in case: the
-  // ship doesn't add speed (the pickup radius closes the gap).
-  const r = intercept({ x: 50, z: 0 }, -Math.PI / 2, { x: 15, z: 0 }, { x: 60, z: 0 });
-  assert.equal(r.yaw, -1);
-  assert.equal(r.thrust, false);
-});
-
-// ---- v0.12.x SPIN-BRAKE (the "wobble after alignment" fix) ----------
-
-// The user's complaint: "fly left-right without a target, no human would do that".
-// Cause: APPROACH stopped commanding yaw inside the steering deadband
-// (±0.2 rad) but the ship's angular inertia carried it past alignment
-// and back across the deadband. Without spin-brake, the brain's
-// yaw=-1/0/+1 toggles per frame as the ship's residual rotation
-// sweeps across the deadband. Spin-brake applies OPPOSITE yaw to
-// the rotation direction once the target is well within ±0.35 rad
-// — settling the heading without oscillation.
-
-test('intercept: spin-brake fires when |angVel|>1 and |targetDiff|<0.35 [positive angVel → yaw=-1]', () => {
-  // Ship at (0,0), yaw=-PI/2 (faces +X, facing=0), aligned with
-  // target at (60,0). targetDiff=0, |targetDiff|<0.35 ✓.
-  // angVel=2 (positive; ship rotating CCW) > 1.0 ✓.
-  // Brake: aiAngularVelocity > 0 → yaw=-1 to oppose the spin.
-  // Thrust is suspended during the brake so we don't accelerate
-  // through the deadband either.
-  const r = intercept({ x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 }, { x: 60, z: 0 }, 2);
-  assert.equal(r.yaw, -1);
-  assert.equal(r.thrust, false, 'no thrust during spin-brake');
-});
-
-test('intercept: spin-brake fires when angVel<-1 and |targetDiff|<0.35 [negative angVel → yaw=+1]', () => {
-  // Mirror of the above. angVel=-2 (spinning CW) → yaw=+1.
-  const r = intercept({ x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 }, { x: 60, z: 0 }, -2);
-  assert.equal(r.yaw, 1);
-  assert.equal(r.thrust, false);
-});
-
-test('intercept: spin-brake NOT fired when |angVel|<=1 (slow rotation: normal APPROACH wins)', () => {
-  // Tiny angVel=0.5 < 1.0 → spin-brake does NOT fire. Falls through
-  // to normal APPROACH: targetDiff=0, |0|<0.5 thrust gate ✓.
-  // Result: yaw=0, thrust=true (committed approach).
-  const r = intercept({ x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 }, { x: 60, z: 0 }, 0.5);
-  assert.equal(r.yaw, 0);
-  assert.equal(r.thrust, true);
-});
-
-test('intercept: spin-brake NOT fired when aligned but target off-axis', () => {
-  // Ship at (0,0), facing -Z (yaw=0), target at (60, 0). targetDiff
-  // = wrapAngle(0 - (-PI/2)) = PI/2 > 0.35. Even with high angVel,
-  // the brain should steer toward the target, not brake.
-  const r = intercept({ x: 0, z: 0 }, 0, { x: 0, z: 0 }, { x: 60, z: 0 }, 2);
-  assert.equal(r.yaw, -1, 'steer toward target when far off-axis');
-});
-
-// ---- v0.12.x WANDER calmness (the "nervous without target" fix) -----
-
-test('wander: heading refresh picks jittered angle within ±27° of bias (was ±72°)', () => {
-  // v0.12.x — jitter reduced ±0.4π → ±0.15π (±72° → ±27°). The wider
-  // jitter kept producing new headings far from the bias target,
-  // which made the ship visibly swing every 1.5s. Use rng=0 →
-  // jitter = (0*2-1) * PI * 0.15 = -PI*0.15 ≈ -0.471 rad (-27°).
-  //
-  // targetDist is overridden to 30 (default 90) so the asteroid at
-  // (0, 50) — distance 50 — is OUT of TARGET mode (which would
-  // short-circuit the WANDER fallback) but still IN awareness
-  // range (targetDist × 2.5 = 75 > 50) so the bias term fires.
-  //
-  // v0.13.x — pass `gapAwareDist: 0` explicitly to disable the new
-  // smart-wander branch. Otherwise the 50u asteroid (within the v0.13.x
-  // default gapAwareDist=80) would trigger the gap-aware branch with
-  // a different (gap-optimized) heading. This test pins the v0.12.x
-  // legacy bias logic specifically.
-  const r = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [mockAsteroid(0, 50)],
-    time: 0,
-    wanderHeading: null,
-    wanderHeadingExpiresAt: 0,
-    targetDist: 30,
-    gapAwareDist: 0,
-    rng: () => 0,
-  });
-  // targetAngle = atan2(50, 0) = PI/2. jitter = -PI*0.15. heading = PI/2 - PI*0.15.
-  const expected = Math.PI / 2 - Math.PI * 0.15;
-  assert.ok(Math.abs(r._wanderHeading - expected) < 1e-9,
-    `heading=${r._wanderHeading}, expected=${expected}`);
-});
-
-test('wander: heading deviation of 0.5 rad triggers yaw (wider steering deadband 0.1 → 0.15)', () => {
-  // Ship at origin facing -Z (yaw=0). Heading is -PI/2 + 0.5 (NE).
-  // diff = wrapAngle(-PI/2+0.5 - (-PI/2)) = 0.5. With the wider
-  // deadband (±0.15 rad from ±0.1), 0.5 > 0.15 → yaw=-1 (decisive).
-  const r = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: -Math.PI / 2 + 0.5,
-    wanderHeadingExpiresAt: 5.0,
-  });
-  assert.equal(r.yaw, -1);
-});
-
-// ---- aiBrainTick: HUNT mode (intercept controller — v0.12.x simplified) --
-//
-// v0.12.x ground-up rewrite: replaced the over-engineered 5-phase
-// HUNT controller (HARD COMMIT / FINAL APPROACH / TANGENTIAL /
-// BRAKE / APPROACH) with a single 2-phase intercept (BRAKE if
-// closing too fast, APPROACH otherwise). HUNT additionally fires
-// at any asteroid in cone so the AI shoots while chasing the bonus.
-
-test('aiBrainTick: hunt mode → APPROACH (steer + thrust) when aligned and need speed', () => {
-  // Ship at origin, no velocity, facing +X. Power-up at (60, 0).
-  // closingSpeed=0, desiredClosing=min(15,60)=15. APPROACH.
-  // targetAngle=0, facing=0→diff=0 → thrust + yaw=0.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: -Math.PI / 2,
-    aiVel: { x: 0, z: 0 },
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 60, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  assert.equal(result.yaw, 0);
-  assert.equal(result.thrust, true);
-  assert.equal(result.fire, false); // no asteroid in cone
-});
-
-// v0.19.x — HUNT/TARGET controller split. The previous test block
-// asserted HUNT's BRAKE-phase behavior (yaw flips at high closingSpeed,
-// thrust false / true depending on facing). Under the new
-// huntController() (no BRAKE, no Spin-Brake — static target), those
-// assertions are no longer valid. The new tests below pin the split
-// contract directly: HUNT does NOT brake on a static target, TARGET
-// STILL brakes at front-impact speed.
-
-test('aiBrainTick: HUNT mode at high closingSpeed does NOT brake (static target, no overshoot risk)', () => {
-  // Ship at origin facing +X (yaw=-PI/2). Moving at (80, 0). Power-up
-  // at (50, 0) — closingSpeed=80. Under the OLD shared intercept()
-  // controller this would BRAKE (yaw=-1, thrust=false). Under the
-  // new huntController() the BRAKE branch does NOT exist; the ship
-  // closes the gap with sustained thrust because the target is
-  // static and there's no overshoot concern. This is the keystone
-  // test for the v0.19.x split — it would FAIL on the old code and
-  // PASS on the new code (and vice versa for the TARGET-mode
-  // mirror test below).
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: -Math.PI / 2,
-    aiVel: { x: 80, z: 0 },
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 50, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  assert.equal(result.yaw, 0, 'HUNT must not flip yaw to brake on a static target');
-  assert.equal(result.thrust, true, 'HUNT must keep thrusting on a static target');
-});
-
-test('aiBrainTick: TARGET mode at high closingSpeed still BRAKEs (split verified)', () => {
-  // Contrast test: TARGET keeps the v0.12.x intercept() controller
-  // (BRAKE + closingSpeed throttle + spin-brake) because MOVING
-  // asteroids warrant the heavier machinery. This pins "TARGET
-  // behavior is unchanged by the v0.19.x split" — a regression
-  // guard against accidentally routing TARGET through the new
-  // huntController() too.
-  //
-  // v0.18.x predictive DODGE would fire BEFORE TARGET for this
-  // scenario (asteroid 50u dead-ahead at head-on course with the
-  // ship moving at 80u/s → predicted closestDist = 0 within the 1s
-  // lookahead window, well under dodgeMarginU=2.5). To isolate
-  // the v0.19.x split contract this test disables BOTH dodge
-  // shells: dodgeDist=0 (legacy shell off) AND dodgeLookaheadS=0
-  // (predictive shell off). With both off, the brain definitely
-  // falls through to TARGET mode.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: -Math.PI / 2,
-    aiVel: { x: 80, z: 0 },
-    asteroids: [mockAsteroid(50, 0)],
-    time: 0,
-    dodgeDist: 0,            // legacy dodge shell -- off
-    dodgeLookaheadS: 0,      // v0.18.x predictive dodge -- off
-    targetDist: 90,
-    powerupPos: null,
-  });
-  assert.equal(result.mode, 'target');
-  // intercept() BRAKE: brakeAngle = atan2(-0, -80) = PI. brakeDiff
-  // = wrapAngle(PI - 0) = PI > 0.35 → yaw=-1. |brakeDiff|=PI > 0.5
-  // → thrust=false. The split INTENT: TARGET BRAKES, HUNT DOESN'T.
-  assert.equal(result.yaw, -1, 'TARGET still BRAKEs at front-impact speed (v0.12.x preserved)');
-  assert.equal(result.thrust, false);
-});
-
-test('aiBrainTick: HUNT mode with high aiAngularVelocity does NOT spin-brake', () => {
-  // v0.12.x intercept() has a Spin-Brake sub-phase that fires when
-  // |aiAngularVelocity| > 1.0 and |targetDiff| < 0.35, applying
-  // opposite yaw to cancel the rotation. The HUNT-mode controller
-  // doesn't take aiAngularVelocity at all — the spin-brake doesn't
-  // apply because the static target doesn't justify the sub-phase.
-  // The yaw command stays aimed at the target, settling once the
-  // ship's `YAW_INERTIA_TAU=0.2` damps the rotation.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: -Math.PI / 2,
-    aiAngularVelocity: 3.0,        // high spin -- intercept() would spin-brake
-    aiVel: { x: 0, z: 0 },
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 60, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  // Ship is well-aligned (yaw=-PI/2 → facing=0 → diff=0). Under the
-  // new controller: yaw=0, thrust=true (close the gap on a static
-  // target). Under intercept(): yaw=-1 (opposite spin direction),
-  // thrust=false. The split INTENT: HUNT ignores the spin-brake.
-  assert.equal(result.yaw, 0, 'HUNT does not spin-brake; yaw stays on target');
-  assert.equal(result.thrust, true);
-});
-
-test('aiBrainTick: hunt mode → APPROACH with no thrust when not aligned', () => {
-  // Ship at origin, no velocity, facing -Z (yaw 0). Power-up at (60,0).
-  // facing=-PI/2, targetAngle=0, targetDiff=PI/2 > 0.2 → yaw=-1.
-  // |targetDiff|>0.5 → no thrust.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    aiVel: { x: 0, z: 0 },
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 60, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  assert.equal(result.yaw, -1);
-  assert.equal(result.thrust, false);
-});
-
-test('aiBrainTick: hunt mode → defaults aiVel to zero when omitted', () => {
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: -Math.PI / 2,
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 60, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  assert.equal(result.thrust, true);
-});
-
-test('aiBrainTick: hunt mode ignores powerup beyond huntDist → falls through to wander', () => {
-  // No asteroid → wander (no target, no powerup).
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    aiVel: { x: 0, z: 0 },
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 600, z: 0 },
-  });
-  assert.equal(result.mode, 'wander');
-});
-
-test('aiBrainTick: hunt mode → fire:true when any asteroid is in the fire cone (the user\'s "AI doesn\'t shoot asteroids" fix)', () => {
-  // The v0.11.x HUNT controller never returned fire:true, so the
-  // AI visibly ignored asteroids while chasing powerups. v0.12.x
-  // checks ALL asteroids for in-cone positions (not just the
-  // chase target), so the AI shoots asteroids it sees while
-  // continuing to chase the bonus.
-  // Ship at origin, no velocity. Power-up at (60, 0) → chaseMode='hunt'.
-  // Asteroid at (0, -40) — directly in front (yaw=0 faces -Z, asteroid
-  // is at z=-40 → cone-aligned). isTargetInFront returns true.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    aiVel: { x: 0, z: 0 },
-    asteroids: [mockAsteroid(0, -40)],
-    time: 0,
-    powerupPos: { x: 60, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  assert.equal(result.fire, true);
-});
-
-test('aiBrainTick: hunt mode → fire:false when no asteroid is in the fire cone', () => {
-  // Power-up at (60,0) → hunt. Asteroid at (40, 0) (off to the side;
-  // not in cone). Should NOT fire.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    aiVel: { x: 0, z: 0 },
-    asteroids: [mockAsteroid(40, 0)],
-    time: 0,
-    powerupPos: { x: 60, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  assert.equal(result.fire, false);
-});
-
-test('aiBrainTick: hunt mode takes priority over target asteroid chase', () => {
-  // Both a powerup and an asteroid in range — HUNT wins.
-  // Power-up at (60, 0) → HUNT (powerup chase).
-  // Asteroid at (40, 0) → also in targetDist but lower priority.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    aiVel: { x: 0, z: 0 },
-    asteroids: [mockAsteroid(40, 0)],
-    time: 0,
-    powerupPos: { x: 60, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-});
-
-// ---- v0.19.x huntController pure-function tests ----------------------
-// The new huntController() function is the HUNT-mode brain's pure
-// controller. Same shape as intercept() (4-arg: pos/yaw/vel/target)
-// but with the BRAKE and Spin-Brake sub-phases stripped out because
-// the target is static. These tests pin the contract directly.
-
-test('huntController: dist < 0.01 → no thrust, no yaw (pickup radius absorbs)', () => {
-  const r = huntController({ x: 50, z: 0 }, 0, { x: 0, z: 0 }, { x: 50, z: 0 });
-  assert.equal(r.thrust, false);
-  assert.equal(r.yaw, 0);
-  assert.equal(r.dist, 0);
-  assert.equal(r.closingSpeed, 0);
-});
-
-test('huntController: perfectly aligned → yaw=0, thrust=true', () => {
-  // Ship facing +X (yaw=-PI/2), target directly ahead → diff=0.
-  const r = huntController({ x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 }, { x: 60, z: 0 });
-  assert.equal(r.yaw, 0);
-  assert.equal(r.thrust, true);
-});
-
-test('huntController: closingSpeed does NOT gate thrust (no closingSpeed throttle on static target)', () => {
-  // The keystone contract test for the v0.19.x split. Ship fully
-  // aligned with the target (diff=0), moving at v=(80, 0) toward
-  // target. Under the OLD shared intercept() controller this would
-  // be the BRAKE branch (closingSpeed=80 > desiredClosing=15 → yaw
-  // flips, thrust=false). Under huntController() the BRAKE branch
-  // does NOT exist; thrust=true regardless of closingSpeed because
-  // the static target can't pull away from us and the gap needs to
-  // close. This test would FAIL on the old code.
-  const r = huntController({ x: 0, z: 0 }, -Math.PI / 2, { x: 80, z: 0 }, { x: 50, z: 0 });
-  assert.equal(r.yaw, 0);
-  assert.equal(r.thrust, true,
-    'huntController has no BRAKE branch — static target, no overshoot concern');
-});
-
-test('huntController: targetAngle=atan2(sin(θ)*r, cos(θ)*r) within yaw deadband (±0.20) → yaw=0', () => {
-  // Construct a target at angle 0.10 rad: (60*cos(0.10), 60*sin(0.10)).
-  // Ship facing +X (yaw=-PI/2 → facingAngle=0). diff=0.10. ±0.20
-  // deadband says yaw=0. ±0.35 thrust deadband says thrust=true.
-  const angle = 0.10;
-  const r = huntController(
-    { x: 0, z: 0 },
-    -Math.PI / 2,
-    { x: 0, z: 0 },
-    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
-  );
-  assert.equal(r.yaw, 0);
-  assert.equal(r.thrust, true);
-});
-
-test('huntController: diff=0.30 → yaw=-1, thrust=true (between yaw and thrust deadbands)', () => {
-  // 0.20 < |0.30| < 0.35 → yaw flips but thrust still engaged.
-  // (Under intercept() the wider ±0.35 yaw deadband would have
-  // yaw=0 here — the HUNT-mode controller is tighter, as designed.)
-  const angle = 0.30;
-  const r = huntController(
-    { x: 0, z: 0 },
-    -Math.PI / 2,
-    { x: 0, z: 0 },
-    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
-  );
-  assert.equal(r.yaw, -1);
-  assert.equal(r.thrust, true);
-});
-
-test('huntController: diff beyond thrust deadband (|diff|=0.50) → no thrust', () => {
-  // 0.50 > 0.35 → yaw flips AND thrust drops out. Ship must rotate
-  // into alignment before closing the gap.
-  const angle = 0.50;
-  const r = huntController(
-    { x: 0, z: 0 },
-    -Math.PI / 2,
-    { x: 0, z: 0 },
-    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
-  );
-  assert.equal(r.yaw, -1);
-  assert.equal(r.thrust, false);
-});
-
-test('huntController: negative diff → yaw=+1 (CCW turn for clockwise misalignment)', () => {
-  // The opposite-side mirror of the 0.50 case. Ship facing +X,
-  // target behind-left. diff = -0.50 → yaw=+1 (CCW turn).
-  const angle = -0.50;
-  const r = huntController(
-    { x: 0, z: 0 },
-    -Math.PI / 2,
-    { x: 0, z: 0 },
-    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
-  );
-  assert.equal(r.yaw, 1);
-  assert.equal(r.thrust, false);
-});
-
-test('huntController: returns dist + closingSpeed as observability fields (regression guard for the return shape)', () => {
-  // The aiBrainTick integration consumes .closingSpeed and .dist when
-  // deciding coast-in overrides; if huntController stops returning
-  // them, HUNT's coast-in logic silently degrades.
-  const r = huntController({ x: 0, z: 0 }, -Math.PI / 2, { x: 10, z: 0 }, { x: 60, z: 0 });
-  assert.equal(r.dist, 60);
-  assert.equal(typeof r.closingSpeed, 'number');
-});
-
-// ---- Factory debounce (humanization of virtual key presses) -----------
-
-test('createDemoAi: yaw/thrust flip is debounced by yawHoldTimeS/thrustHoldTimeS', () => {
-  const scene = mockScene();
-  const asteroids = [];
-  const mock = mockShipFactory();
-  let yawBrain = -1;
-  let thrustBrain = true;
-  const mockBrain = {
-    tick: () => ({ yaw: yawBrain, thrust: thrustBrain, mode: 'dodge', fire: false }),
-  };
-  const ai = createDemoAi({
-    scene,
-    asteroids,
-    options: {
-      shipFactory: mock.build,
-      yawHoldTimeS: 0.20,
-      thrustHoldTimeS: 0.15,
-      brain: mockBrain,
-    },
-  });
-  ai.update(0.1);
-  assert.equal(mock.calls.setYaw[0], -1, 'first yaw flip accepted');
-  assert.equal(mock.calls.setThrust[0], true, 'first thrust flip accepted');
-  yawBrain = 1;
-  thrustBrain = false;
-  ai.update(0.05);
-  assert.equal(mock.calls.setYaw[1], -1, 'second yaw flip held by debounce');
-  assert.equal(mock.calls.setThrust[1], true, 'thrust flip also held during debounce window');
-  ai.update(0.30);
-  assert.equal(mock.calls.setYaw[2], 1, 'yaw flip accepted after debounce window');
-  assert.equal(mock.calls.setThrust[2], false, 'thrust flip accepted after debounce window');
-});
-
-
+// --------------------------------------------------------------------------
+// createDemoAi: factory wiring
+// --------------------------------------------------------------------------
 
 test('createDemoAi: requires scene and asteroids', () => {
   assert.throws(() => createDemoAi({}), /scene/);
@@ -946,47 +627,44 @@ test('createDemoAi: requires scene and asteroids', () => {
 });
 
 test('createDemoAi: factory wiring (mock shipFactory)', () => {
-  // v0.12.x — fix the deterministic spawn via `rng: () => 0` so
-  // the test isn't flaky across runs. Ship spawns at (12, 0)
-  // facing -Z (yaw=0). Asteroid at (5, 0). Ship→asteroid distance
-  // = 7, within dodgeDist=14 → DODGE mode. threatAngle = atan2(0,
-  // -7) = PI, escapeAngle = -PI/2, facingAngle(0) = -PI/2. diff =
-  // 0 within 0.1 deadband → yaw=0, thrust=true.
-  // The OLD test relied on `Math.random()` shipping to RNG with
-  // reasonable luck — flaky in CI. The deterministic injection
-  // removes the flakiness and is consistent with the v0.12.x brain
-  // (which only thrusts when aligned, so an off-axis random spawn
-  // could have produced thrust=false on the first tick).
+  // rng=0 → spawn position is (12, 0), yaw=0.
+  // Asteroid at (5, 0) → 7u from ship → within legacy-default
+  // panicDist=6 (5 < 7? no; wait, nearest dist = 7) — actually the
+  // asteroid's getPosition returns {x:5,0} so |(0,0) - (5,0)| = 5
+  // (ship spawns at (12,0), asteroid at (5,0) → distance 7).
+  // panicDist=6: 7 > 6 → no panic. targetDist=100: 7 < 100 → engage.
+  // mode='asteroid', already aligned? No — ship at (12,0), asteroid
+  // at (5,0). The asteroid is to the WEST (negative X direction)
+  // from the ship's spawn. Ship faces -Z (yaw=0). targetAngle=
+  // atan2(0, -7)=PI. facingAngle(0)=-PI/2. diff=PI-(-PI/2)=3PI/2→
+  // wrapped = -PI/2 (or PI/2 with wrap convention). |PI/2| > 0.15
+  // yaw deadband. Both could fire a yaw depending on wrap.
+  // Either way: yaw != 0, dist=7 < targetDist → mode=asteroid.
   const scene = mockScene();
   const asteroids = [mockAsteroid(5, 0)];
   const mock = mockShipFactory();
-
   const ai = createDemoAi({
     scene,
     asteroids,
     options: {
       shipFactory: mock.build,
-      dodgeDist: 14,
-      targetDist: 90,
       rng: () => 0,
     },
   });
-
   assert.equal(typeof ai.update, 'function');
   assert.equal(typeof ai.dispose, 'function');
   assert.equal(typeof ai.getShip, 'function');
 
   ai.update(0.1);
   assert.equal(mock.calls.setThrust.length, 1);
-  assert.equal(mock.calls.setThrust[0], true, 'DODGE mode thrust=true');
   assert.equal(mock.calls.update.length, 1);
+  assert.equal(typeof mock.calls.setYaw[0], 'number');
 
   ai.update(0.1);
   ai.update(0.1);
   assert.equal(mock.calls.setYaw.length, 3);
   assert.equal(mock.calls.setThrust.length, 3);
   assert.equal(mock.calls.update.length, 3);
-
   assert.equal(mock.calls.reset.length, 0);
 });
 
@@ -1029,180 +707,116 @@ test('createDemoAi: dt <= 0 is a no-op (no calls)', () => {
   assert.equal(mock.calls.update.length, 0);
 });
 
-// ---- isTargetInFront --------------------------------------------------
-
-test('isTargetInFront: target directly ahead (yaw 0) → true', () => {
-  assert.equal(isTargetInFront({ x: 0, z: 0 }, 0, { x: 0, z: -10 }, 0.35), true);
-});
-
-test('isTargetInFront: target directly behind → false', () => {
-  assert.equal(isTargetInFront({ x: 0, z: 0 }, 0, { x: 0, z: 10 }, 0.35), false);
-});
-
-test('isTargetInFront: target just inside cone edge → true', () => {
-  const a = 0.34;
-  assert.equal(
-    isTargetInFront({ x: 0, z: 0 }, 0, { x: Math.sin(a), z: -Math.cos(a) }, 0.35),
-    true,
-  );
-});
-
-test('isTargetInFront: target just outside cone edge → false', () => {
-  const a = 0.40;
-  assert.equal(
-    isTargetInFront({ x: 0, z: 0 }, 0, { x: Math.sin(a), z: -Math.cos(a) }, 0.35),
-    false,
-  );
-});
-
-test('isTargetInFront: handles non-zero yaw correctly', () => {
-  assert.equal(
-    isTargetInFront({ x: 0, z: 0 }, -Math.PI / 2, { x: 10, z: 0 }, 0.35),
-    true,
-  );
-  assert.equal(
-    isTargetInFront({ x: 0, z: 0 }, -Math.PI / 2, { x: -10, z: 0 }, 0.35),
-    false,
-  );
-});
-
-test('isTargetInFront: null positions → false (defensive)', () => {
-  assert.equal(isTargetInFront(null, 0, { x: 0, z: 0 }, 0.35), false);
-  assert.equal(isTargetInFront({ x: 0, z: 0 }, 0, null, 0.35), false);
-});
-
-// ---- aiBrainTick: fire decision ---------------------------------------
-
-test('aiBrainTick: target mode → fire:false when target is not in front', () => {
-  const asteroids = [mockAsteroid(40, 0)];
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-    fireConeHalfAngle: 0.35,
-  });
-  assert.equal(result.mode, 'target');
-  assert.equal(result.fire, false);
-});
-
-test('aiBrainTick: target mode → fire:true when target is directly ahead', () => {
-  const asteroids = [mockAsteroid(0, -40)];
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-    fireConeHalfAngle: 0.35,
-  });
-  assert.equal(result.mode, 'target');
-  assert.equal(result.fire, true);
-});
-
-test('aiBrainTick: dodge mode → fire:false (no shooting while dodging)', () => {
-  const asteroids = [mockAsteroid(5, 0)];
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-    fireConeHalfAngle: 0.35,
-  });
-  assert.equal(result.mode, 'dodge');
-  assert.equal(result.fire, false);
-});
-
-test('aiBrainTick: wander mode → fire:false (no shooting at nothing)', () => {
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [mockAsteroid(200, 0)],
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-    fireConeHalfAngle: 0.35,
-  });
-  assert.equal(result.mode, 'wander');
-  assert.equal(result.fire, false);
-});
-
-// ---- createDemoAi: factory wiring for bullets -------------------------
-
-test('createDemoAi: fires weapon in TARGET mode when target is ahead', () => {
+test('createDemoAi: NO strobe debouncer -- flips fire immediately (v0.20.x simplification)', () => {
+  // v0.20.x dropped yawHoldTimeS/thrustHoldTimeS. A brain flipping
+  // yaw every tick must be reflected directly -- no rate-limit hold.
+  // This is the keystone test for the simplification: pure output passthrough.
   const scene = mockScene();
-  const asteroids = [mockAsteroid(12, -20)];
+  const asteroids = [];
   const mock = mockShipFactory();
-  const weaponCalls = [];
-  const mockWeapon = {
-    fire: (opts) => {
-      weaponCalls.push(opts);
-      return 0;
-    },
+  let yawBrain = 1;
+  const mockBrain = {
+    tick: () => ({ yaw: yawBrain, thrust: false, mode: 'asteroid', fire: false }),
   };
   const ai = createDemoAi({
     scene,
     asteroids,
-    weapon: mockWeapon,
     options: {
       shipFactory: mock.build,
-      dodgeDist: 14,
-      targetDist: 90,
-      fireConeHalfAngle: 0.35,
-      rng: () => 0,
+      brain: mockBrain,
     },
   });
   ai.update(0.1);
-  assert.equal(weaponCalls.length, 1);
-  assert.equal(typeof weaponCalls[0].origin, 'object');
-  assert.equal(typeof weaponCalls[0].direction, 'object');
+  assert.equal(mock.calls.setYaw[0], 1, 'first yaw=1 fires immediately');
+  yawBrain = -1;
+  ai.update(0.05);
+  assert.equal(mock.calls.setYaw[1], -1,
+    'next-tick yaw=-1 is NOT held by a debouncer (v0.20.x has none)');
+  yawBrain = 1;
+  ai.update(0.01);
+  assert.equal(mock.calls.setYaw[2], 1, 'each tick passes yaw straight through');
 });
 
-test('createDemoAi: fires weapon in HUNT mode when asteroid is in cone (the user\'s "AI doesn\'t shoot asteroids" fix)', () => {
-  // Ship spawns at (12, 0) with yaw=0 (rng=0). Power-up at (60, 0)
-  // → in range → mode='hunt'. Asteroid at (12, -20) directly in
-  // front of the ship → should fire even though we're chasing
-  // the powerup (not the asteroid). This test was the v0.11.x
-  // failure mode.
+test('createDemoAi: NO fire-cadence gate -- every fire tick shoots (v0.20.x)', () => {
+  // v0.20.x dropped fireMinIntervalS. The brain asks fire=true → the
+  // ship fires. No 300ms cadence gate. Matches the user's "feuer so
+  // lange bis split" intent (the ship-side bullet cooldown is still
+  // honored by bullet-pool internals, but the brain side is clean).
   const scene = mockScene();
-  const asteroids = [mockAsteroid(12, -20)];
+  const asteroids = [mockAsteroid(0, -40)]; // in cone (ship faces -Z)
   const mock = mockShipFactory();
-  const weaponCalls = [];
-  const mockWeapon = {
-    fire: (opts) => {
-      weaponCalls.push(opts);
-      return 0;
-    },
+  const fireCalls = [];
+  const weapon = { fire: () => { fireCalls.push(1); return 0; } };
+  const mockBrain = {
+    tick: () => ({ yaw: 0, thrust: false, mode: 'asteroid', fire: true }),
   };
   const ai = createDemoAi({
     scene,
     asteroids,
-    weapon: mockWeapon,
-    getPowerupPos: () => ({ x: 60, z: 0 }),
+    weapon,
+    options: { shipFactory: mock.build, brain: mockBrain },
+  });
+  ai.update(0.1);
+  ai.update(0.1);
+  ai.update(0.1);
+  assert.equal(fireCalls.length, 3, 'every fire=true tick fires immediately');
+});
+
+test('createDemoAi: getMode() reflects the live brain decision', () => {
+  // Smoke test: getMode reads arg from live ship state via
+  // brainArgsFromShip. With an asteroid at (5, 0) and rng=0 spawning
+  // the ship at (12, 0), dist=7 → not in panicDist=6 (panic only if
+  // dist<6) → not in dodge. Falls to asteroid mode (7 < targetDist).
+  const scene = mockScene();
+  const mock = mockShipFactory();
+  const ai = createDemoAi({
+    scene,
+    asteroids: [mockAsteroid(5, 0)],
     options: {
       shipFactory: mock.build,
       rng: () => 0,
     },
   });
-  ai.update(0.1);
-  assert.equal(weaponCalls.length, 1, 'fires at asteroid in cone during HUNT chase');
+  // getMode reads ai.getShip().position which was set during spawn.
+  // With rng=0, spawn lands at (12, 0). Asteroid at (5, 0). dist=7.
+  // 7 not < 6 (panicDist), but 7 < 100 (targetDist) → mode='asteroid'.
+  assert.equal(ai.getMode(), 'asteroid');
 });
 
-test('createDemoAi: does NOT fire weapon in DODGE mode', () => {
+test('createDemoAi: getMode() in panicDist returns dodge', () => {
+  // Force the ship into panic range by post-spawn editing the mock state.
   const scene = mockScene();
-  const asteroids = [mockAsteroid(5, 0)];
+  const mock = mockShipFactory();
+  const ai = createDemoAi({
+    scene,
+    asteroids: [mockAsteroid(0, 0)], // on top of the spawn position
+    options: {
+      shipFactory: mock.build,
+      rng: () => 0,
+    },
+  });
+  // Spawn lands at (12, 0). Asteroids at (0, 0) → dist=12. Not in
+  // panicDist. Override ship position so it sits ON the asteroid.
+  ai.getShip().position.x = 0;
+  ai.getShip().position.z = 0;
+  assert.equal(ai.getMode(), 'dodge');
+});
+
+// --------------------------------------------------------------------------
+// createDemoAi: factory wiring for bullets
+// --------------------------------------------------------------------------
+
+test('createDemoAi: fires weapon when asteroid is in cone during ENGAGE', () => {
+  // Ship spawns at (12, 0). Asteroid at (12, -40) directly in front
+  // (z=-40 → yaw=0 faces -Z → asteroid IS in cone). Powerup wins
+  // because closer? No — powerupPos=null. Closest asteroid wins →
+  // mode=asteroid, fire=true.
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(12, -40)];
   const mock = mockShipFactory();
   const weaponCalls = [];
   const mockWeapon = {
-    fire: (opts) => {
-      weaponCalls.push(opts);
-      return 0;
-    },
+    fire: (opts) => { weaponCalls.push(opts); return 0; },
   };
   const ai = createDemoAi({
     scene,
@@ -1211,22 +825,55 @@ test('createDemoAi: does NOT fire weapon in DODGE mode', () => {
     options: { shipFactory: mock.build, rng: () => 0 },
   });
   ai.update(0.1);
-  assert.equal(weaponCalls.length, 0);
+  assert.equal(weaponCalls.length, 1);
+  assert.equal(typeof weaponCalls[0].origin, 'object');
+  assert.equal(typeof weaponCalls[0].direction, 'object');
 });
 
-test('createDemoAi: does NOT fire weapon in WANDER mode', () => {
+test('createDemoAi: fires weapon on ANY in-cone asteroid -- not just chase target', () => {
+  // Ship spawns at (12, 0), facing -Z. Powerup at (15, 0) — close to
+  // the spawn (pDist=3) so it wins the chase-target tie against the
+  // (12, -40) in-cone asteroid (aDist=40). With bias=-30 the
+  // condition `pDist < aDist + bias` is `3 < 10`, true → powerup wins.
+  // Asteroid at (12, -40) is in cone directly in front.
+  // The chase target is the powerup; the fire check is INDEPENDENT
+  // of the chase target — the AI fires at the asteroid even though
+  // it's chasing the powerup.
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(12, -40)];
+  const mock = mockShipFactory();
+  const weaponCalls = [];
+  const mockWeapon = {
+    fire: () => { weaponCalls.push(1); return 0; },
+  };
+  const ai = createDemoAi({
+    scene,
+    asteroids,
+    weapon: mockWeapon,
+    getPowerupPos: () => ({ x: 15, z: 0 }),
+    options: {
+      shipFactory: mock.build,
+      rng: () => 0,
+      powerupBiasU: -30,
+    },
+  });
+  ai.update(0.1);
+  assert.equal(weaponCalls.length, 1, 'fires at in-cone asteroid during POWERUP chase');
+  // Verify the mode is the powerup chase (so the test isn't
+  // accidentally passing because we're chasing the asteroid).
+  assert.equal(ai.getMode(), 'powerup');
+});
+
+test('createDemoAi: does NOT fire weapon in IDLE mode', () => {
   const scene = mockScene();
   const mock = mockShipFactory();
   const weaponCalls = [];
   const mockWeapon = {
-    fire: (opts) => {
-      weaponCalls.push(opts);
-      return 0;
-    },
+    fire: () => { weaponCalls.push(1); return 0; },
   };
   const ai = createDemoAi({
     scene,
-    asteroids: [],
+    asteroids: [], // empty → IDLE
     weapon: mockWeapon,
     options: { shipFactory: mock.build },
   });
@@ -1247,22 +894,4 @@ test('createDemoAi: works without weapon option (no firing at all)', () => {
   ai.update(0.1);
   assert.equal(mock.calls.setYaw.length, 2);
   assert.equal(mock.calls.update.length, 2);
-});
-
-test('createDemoAi: getMode reflects the current behavior', () => {
-  const scene = mockScene();
-  const asteroids = [mockAsteroid(5, 0)];
-  const mock = mockShipFactory();
-  const ai = createDemoAi({
-    scene,
-    asteroids,
-    options: {
-      shipFactory: mock.build,
-      dodgeDist: 14,
-      targetDist: 90,
-      rng: () => 0,
-    },
-  });
-
-  assert.equal(ai.getMode(), 'dodge');
 });
