@@ -634,6 +634,66 @@ export function intercept(aiPos, aiYaw, aiVel, targetPos, aiAngularVelocity = 0)
 }
 
 /**
+ * Pure: HUNT-specific controller for STATIC targets (power-ups).
+ *
+ * The target doesn't move, so the trailer of v0.12.x's intercept
+ * controller (BRAKE phase + Spin-Brake sub-phase) was producing
+ * visible "wild left/right" wobble during long power-up chases:
+ *
+ *   - BRAKE flips the ship 180° at peak closing velocity. With a
+ *     STATIC target (the power-up never moves), going 180° around
+ *     at top speed is gratuitous — the ship lurches between
+ *     "thrust toward" and "thrust away from a phantom threat",
+ *     producing visible flailing at 200u distances.
+ *   - Spin-Brake fires only at |aiAngularVelocity| > 1.0. Below
+ *     the threshold, the ship's angular inertia carries the
+ *     heading past alignment and back across the deadband,
+ *     producing residual wiggles even at small angular velocities.
+ *     The static target doesn't justify a sophisticated deadband-
+ *     tuned brake; simpler is calmer.
+ *
+ * v0.19.x — dedicated HUNT controller: turn to face the target,
+ * thrust when aligned, and trust the ship's `YAW_INERTIA_TAU=0.2`
+ * angular momentum to settle the heading. No BRAKE phase, no
+ * Spin-Brake sub-phase, no closing-speed throttle. The CALLER
+ * still applies the existing `coastInDist` override for the
+ * last-mile coast-in (preserved verbatim from aiBrainTick).
+ *
+ * Deadbands are slightly tighter than intercept's because HUNT
+ * has no moving-target urgency:
+ *   - yaw ±0.20 rad (vs intercept's ±0.35)
+ *   - thrust ±0.35 rad (vs intercept's ±0.50)
+ *
+ * @param {{x:number,z:number}} aiPos
+ * @param {number} aiYaw
+ * @param {{x:number,z:number}} aiVel
+ * @param {{x:number,z:number}} targetPos
+ * @returns {{ dist: number, yaw: number, thrust: boolean, diff: number, closingSpeed: number }}
+ */
+export function huntController(aiPos, aiYaw, aiVel, targetPos) {
+  const dx = targetPos.x - aiPos.x;
+  const dz = targetPos.z - aiPos.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist < 0.01) {
+    // On top of (or inside) the target — pickup radius absorbs.
+    return { dist, yaw: 0, thrust: false, diff: 0, closingSpeed: 0 };
+  }
+  const targetAngle = Math.atan2(dz, dx);
+  const diff = wrapAngle(targetAngle - facingAngle(aiYaw));
+  const closingSpeed = (dx * aiVel.x + dz * aiVel.z) / dist;
+  // Yaw deadband ±0.20: tighter than intercept's ±0.35 to encourage
+  // steady alignment on a static target. The v0.12.x intercept's wider
+  // deadband is tuned for moving targets where overcorrecting into a
+  // chase orbit is worse than undercorrecting — irrelevant for HUNT.
+  const yaw = diff > 0.20 ? -1 : diff < -0.20 ? 1 : 0;
+  // Thrust whenever aligned within ±0.35 rad. There's no overshoot
+  // concern with a static target, so the closingSpeed < desiredClosing
+  // gate from intercept doesn't apply here — always close the gap.
+  const thrust = Math.abs(diff) < 0.35;
+  return { dist, yaw, thrust, diff, closingSpeed };
+}
+
+/**
  * Pure: pick the best in-range chase target. Returns `null` when
  * nothing's pressing. The power-up takes priority over an asteroid
  * chase (the player can see the AI chase the bonus instead of
@@ -845,12 +905,18 @@ export function aiBrainTick({
         : interceptLookaheadS;
       targetPos = predictPosition(chase.pos, vel, leadS) || chase.pos;
     }
-    // v0.12.x -- pass aiAngularVelocity for INTERCEPT's spin-brake
-    // sub-phase. Without this the ship oscillates across the steering
-    // deadband after the brain stops commanding yaw (the inertia
-    // carries it past alignment, the brain kites the other direction
-    // on the next tick, etc -- visible as left/right "nervous" wiggles).
-    const ic = intercept(aiPos, aiYaw, aiVel, targetPos, aiAngularVelocity);
+    // v0.19.x -- HUNT/TARGET controller split. The HUNT-mode brain
+    // uses `huntController` (no BRAKE, no Spin-Brake) because the
+    // target is static and the v0.12.x intercept's trailer-of-
+    // sophistication was producing visible wobble. TARGET keeps the
+    // full intercept() controller (BRAKE + closing-speed throttle +
+    // spin-brake) because moving asteroids warrant the heavier
+    // machinery. Both paths share the same return shape so the
+    // fire-path + coast-in logic below is identical regardless of
+    // which controller fired.
+    const ic = chase.mode === 'hunt'
+      ? huntController(aiPos, aiYaw, aiVel, targetPos)
+      : intercept(aiPos, aiYaw, aiVel, targetPos, aiAngularVelocity);
     let fire = false;
     if (chase.mode === 'target') {
       // v0.15.x -- lead-fire: use targetPos (predicted). The ship

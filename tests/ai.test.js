@@ -24,6 +24,7 @@ import assert from 'node:assert/strict';
 import {
   aiBrainTick,
   intercept,
+  huntController,
   findNearestAsteroid,
   isTargetInFront,
   shouldResetAi,
@@ -615,9 +616,24 @@ test('aiBrainTick: hunt mode → APPROACH (steer + thrust) when aligned and need
   assert.equal(result.fire, false); // no asteroid in cone
 });
 
-test('aiBrainTick: hunt mode → BRAKE (turn opposite to velocity) when closing too fast', () => {
-  // Ship at origin, vel (80,0), facing +X. Power-up at (50, 0).
-  // closingSpeed=80 > 15 → BRAKE. brakeDiff=PI → yaw=-1, thrust=false.
+// v0.19.x — HUNT/TARGET controller split. The previous test block
+// asserted HUNT's BRAKE-phase behavior (yaw flips at high closingSpeed,
+// thrust false / true depending on facing). Under the new
+// huntController() (no BRAKE, no Spin-Brake — static target), those
+// assertions are no longer valid. The new tests below pin the split
+// contract directly: HUNT does NOT brake on a static target, TARGET
+// STILL brakes at front-impact speed.
+
+test('aiBrainTick: HUNT mode at high closingSpeed does NOT brake (static target, no overshoot risk)', () => {
+  // Ship at origin facing +X (yaw=-PI/2). Moving at (80, 0). Power-up
+  // at (50, 0) — closingSpeed=80. Under the OLD shared intercept()
+  // controller this would BRAKE (yaw=-1, thrust=false). Under the
+  // new huntController() the BRAKE branch does NOT exist; the ship
+  // closes the gap with sustained thrust because the target is
+  // static and there's no overshoot concern. This is the keystone
+  // test for the v0.19.x split — it would FAIL on the old code and
+  // PASS on the new code (and vice versa for the TARGET-mode
+  // mirror test below).
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -627,23 +643,68 @@ test('aiBrainTick: hunt mode → BRAKE (turn opposite to velocity) when closing 
     powerupPos: { x: 50, z: 0 },
   });
   assert.equal(result.mode, 'hunt');
-  assert.equal(result.yaw, -1);
+  assert.equal(result.yaw, 0, 'HUNT must not flip yaw to brake on a static target');
+  assert.equal(result.thrust, true, 'HUNT must keep thrusting on a static target');
+});
+
+test('aiBrainTick: TARGET mode at high closingSpeed still BRAKEs (split verified)', () => {
+  // Contrast test: TARGET keeps the v0.12.x intercept() controller
+  // (BRAKE + closingSpeed throttle + spin-brake) because MOVING
+  // asteroids warrant the heavier machinery. This pins "TARGET
+  // behavior is unchanged by the v0.19.x split" — a regression
+  // guard against accidentally routing TARGET through the new
+  // huntController() too.
+  //
+  // v0.18.x predictive DODGE would fire BEFORE TARGET for this
+  // scenario (asteroid 50u dead-ahead at head-on course with the
+  // ship moving at 80u/s → predicted closestDist = 0 within the 1s
+  // lookahead window, well under dodgeMarginU=2.5). To isolate
+  // the v0.19.x split contract this test disables BOTH dodge
+  // shells: dodgeDist=0 (legacy shell off) AND dodgeLookaheadS=0
+  // (predictive shell off). With both off, the brain definitely
+  // falls through to TARGET mode.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 80, z: 0 },
+    asteroids: [mockAsteroid(50, 0)],
+    time: 0,
+    dodgeDist: 0,            // legacy dodge shell -- off
+    dodgeLookaheadS: 0,      // v0.18.x predictive dodge -- off
+    targetDist: 90,
+    powerupPos: null,
+  });
+  assert.equal(result.mode, 'target');
+  // intercept() BRAKE: brakeAngle = atan2(-0, -80) = PI. brakeDiff
+  // = wrapAngle(PI - 0) = PI > 0.35 → yaw=-1. |brakeDiff|=PI > 0.5
+  // → thrust=false. The split INTENT: TARGET BRAKES, HUNT DOESN'T.
+  assert.equal(result.yaw, -1, 'TARGET still BRAKEs at front-impact speed (v0.12.x preserved)');
   assert.equal(result.thrust, false);
 });
 
-test('aiBrainTick: hunt mode → BRAKE thrusts when facing into the brake direction', () => {
-  // Ship at origin, vel (80,0), facing -X (yaw=PI/2 → facing=PI).
-  // Power-up at (50,0). BRAKE. brakeAngle=PI. brakeDiff=0 → thrust.
+test('aiBrainTick: HUNT mode with high aiAngularVelocity does NOT spin-brake', () => {
+  // v0.12.x intercept() has a Spin-Brake sub-phase that fires when
+  // |aiAngularVelocity| > 1.0 and |targetDiff| < 0.35, applying
+  // opposite yaw to cancel the rotation. The HUNT-mode controller
+  // doesn't take aiAngularVelocity at all — the spin-brake doesn't
+  // apply because the static target doesn't justify the sub-phase.
+  // The yaw command stays aimed at the target, settling once the
+  // ship's `YAW_INERTIA_TAU=0.2` damps the rotation.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
-    aiYaw: Math.PI / 2,
-    aiVel: { x: 80, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiAngularVelocity: 3.0,        // high spin -- intercept() would spin-brake
+    aiVel: { x: 0, z: 0 },
     asteroids: [],
     time: 0,
-    powerupPos: { x: 50, z: 0 },
+    powerupPos: { x: 60, z: 0 },
   });
   assert.equal(result.mode, 'hunt');
-  assert.equal(result.yaw, 0);
+  // Ship is well-aligned (yaw=-PI/2 → facing=0 → diff=0). Under the
+  // new controller: yaw=0, thrust=true (close the gap on a static
+  // target). Under intercept(): yaw=-1 (opposite spin direction),
+  // thrust=false. The split INTENT: HUNT ignores the spin-brake.
+  assert.equal(result.yaw, 0, 'HUNT does not spin-brake; yaw stays on target');
   assert.equal(result.thrust, true);
 });
 
@@ -738,6 +799,109 @@ test('aiBrainTick: hunt mode takes priority over target asteroid chase', () => {
     powerupPos: { x: 60, z: 0 },
   });
   assert.equal(result.mode, 'hunt');
+});
+
+// ---- v0.19.x huntController pure-function tests ----------------------
+// The new huntController() function is the HUNT-mode brain's pure
+// controller. Same shape as intercept() (4-arg: pos/yaw/vel/target)
+// but with the BRAKE and Spin-Brake sub-phases stripped out because
+// the target is static. These tests pin the contract directly.
+
+test('huntController: dist < 0.01 → no thrust, no yaw (pickup radius absorbs)', () => {
+  const r = huntController({ x: 50, z: 0 }, 0, { x: 0, z: 0 }, { x: 50, z: 0 });
+  assert.equal(r.thrust, false);
+  assert.equal(r.yaw, 0);
+  assert.equal(r.dist, 0);
+  assert.equal(r.closingSpeed, 0);
+});
+
+test('huntController: perfectly aligned → yaw=0, thrust=true', () => {
+  // Ship facing +X (yaw=-PI/2), target directly ahead → diff=0.
+  const r = huntController({ x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 }, { x: 60, z: 0 });
+  assert.equal(r.yaw, 0);
+  assert.equal(r.thrust, true);
+});
+
+test('huntController: closingSpeed does NOT gate thrust (no closingSpeed throttle on static target)', () => {
+  // The keystone contract test for the v0.19.x split. Ship fully
+  // aligned with the target (diff=0), moving at v=(80, 0) toward
+  // target. Under the OLD shared intercept() controller this would
+  // be the BRAKE branch (closingSpeed=80 > desiredClosing=15 → yaw
+  // flips, thrust=false). Under huntController() the BRAKE branch
+  // does NOT exist; thrust=true regardless of closingSpeed because
+  // the static target can't pull away from us and the gap needs to
+  // close. This test would FAIL on the old code.
+  const r = huntController({ x: 0, z: 0 }, -Math.PI / 2, { x: 80, z: 0 }, { x: 50, z: 0 });
+  assert.equal(r.yaw, 0);
+  assert.equal(r.thrust, true,
+    'huntController has no BRAKE branch — static target, no overshoot concern');
+});
+
+test('huntController: targetAngle=atan2(sin(θ)*r, cos(θ)*r) within yaw deadband (±0.20) → yaw=0', () => {
+  // Construct a target at angle 0.10 rad: (60*cos(0.10), 60*sin(0.10)).
+  // Ship facing +X (yaw=-PI/2 → facingAngle=0). diff=0.10. ±0.20
+  // deadband says yaw=0. ±0.35 thrust deadband says thrust=true.
+  const angle = 0.10;
+  const r = huntController(
+    { x: 0, z: 0 },
+    -Math.PI / 2,
+    { x: 0, z: 0 },
+    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
+  );
+  assert.equal(r.yaw, 0);
+  assert.equal(r.thrust, true);
+});
+
+test('huntController: diff=0.30 → yaw=-1, thrust=true (between yaw and thrust deadbands)', () => {
+  // 0.20 < |0.30| < 0.35 → yaw flips but thrust still engaged.
+  // (Under intercept() the wider ±0.35 yaw deadband would have
+  // yaw=0 here — the HUNT-mode controller is tighter, as designed.)
+  const angle = 0.30;
+  const r = huntController(
+    { x: 0, z: 0 },
+    -Math.PI / 2,
+    { x: 0, z: 0 },
+    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
+  );
+  assert.equal(r.yaw, -1);
+  assert.equal(r.thrust, true);
+});
+
+test('huntController: diff beyond thrust deadband (|diff|=0.50) → no thrust', () => {
+  // 0.50 > 0.35 → yaw flips AND thrust drops out. Ship must rotate
+  // into alignment before closing the gap.
+  const angle = 0.50;
+  const r = huntController(
+    { x: 0, z: 0 },
+    -Math.PI / 2,
+    { x: 0, z: 0 },
+    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
+  );
+  assert.equal(r.yaw, -1);
+  assert.equal(r.thrust, false);
+});
+
+test('huntController: negative diff → yaw=+1 (CCW turn for clockwise misalignment)', () => {
+  // The opposite-side mirror of the 0.50 case. Ship facing +X,
+  // target behind-left. diff = -0.50 → yaw=+1 (CCW turn).
+  const angle = -0.50;
+  const r = huntController(
+    { x: 0, z: 0 },
+    -Math.PI / 2,
+    { x: 0, z: 0 },
+    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
+  );
+  assert.equal(r.yaw, 1);
+  assert.equal(r.thrust, false);
+});
+
+test('huntController: returns dist + closingSpeed as observability fields (regression guard for the return shape)', () => {
+  // The aiBrainTick integration consumes .closingSpeed and .dist when
+  // deciding coast-in overrides; if huntController stops returning
+  // them, HUNT's coast-in logic silently degrades.
+  const r = huntController({ x: 0, z: 0 }, -Math.PI / 2, { x: 10, z: 0 }, { x: 60, z: 0 });
+  assert.equal(r.dist, 60);
+  assert.equal(typeof r.closingSpeed, 'number');
 });
 
 // ---- Factory debounce (humanization of virtual key presses) -----------
