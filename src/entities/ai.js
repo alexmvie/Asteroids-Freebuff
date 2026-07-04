@@ -213,6 +213,37 @@ const DEFAULTS = Object.freeze({
    * the fixed `interceptLookaheadS` everywhere (legacy v0.14.x/v0.15.x).
    */
   bulletSpeed: 400,
+  /**
+   * v0.18.x -- predictive-DODGE look-ahead (seconds). For each
+   * asteroid, project the relative motion against the ship; if the
+   * CLOSEST approach within this window is < `dodgeMarginU`, the
+   * brain DODGEs. Without this, DODGE fires only when the asteroid
+   * is already within `dodgeDist` (14u raw), giving the ship < 500ms
+   * to start escaping for fast-drifting rocks. With prediction, the
+   * AI commits to an escape vector 1-2 seconds EARLIER -- the
+   * difference between "reactive panic" and "threading the needle".
+   * Math: pure 2-body kinematics (see `computeClosestApproach`).
+   * Set to 0 to disable predictive DODGE; falls back to the legacy
+   * "current dist < dodgeDist" trigger (v0.12.x).
+   */
+  dodgeLookaheadS: 1.0,
+  /**
+   * v0.18.x -- projected miss-distance threshold (world units) for
+   * triggering DODGE. The threat must be predicted to come within
+   * this radius of the ship (over the lookahead window) before the
+   * brain commits to an escape. Default 2.5u = roughly the largest
+   * asteroid radius (the small chunks are ~1u, the large are 4u);
+   * 2.5u covers the "asteroid will clip my wing" condition broadly
+   * without inflating to safe-distance panic. Higher = more
+   * aggressive DODGE (sooner, tighter margin); lower = more
+   * aggressive flight (let grazing passes if they really graze).
+   * The legacy `dodgeDist` radius (14u) bounds the lookahead's
+   * HORIZON speed: a fast-moving asteroid that won't enter the
+   * inner 14u shell within `dodgeLookaheadS` seconds is NOT a
+   * predictive threat and falls through to whatever else (HUNT
+   * / TARGET / WANDER) is dominant.
+   */
+  dodgeMarginU: 2.5,
 });
 
 /**
@@ -418,6 +449,100 @@ export function lookupAsteroidVel(asteroid) {
 }
 
 /**
+ * Pure: v0.18.x 2-body closest-approach kinematics. Given the
+ * asteroid's position and velocity RELATIVE to the ship (pRel,
+ * vRel) and a lookahead window in seconds, returns the minimum
+ * distance between them over `t in [0, lookaheadS]` and the time
+ * at which that minimum occurs (clamped to the window).
+ *
+ * Math: relative motion `R(t) = pRel + vRel * t` traces a line in
+ * the XZ plane. The squared distance is a parabola in `t`:
+ *
+ *   d^2(t) = |pRel|^2 + 2(pRel . vRel) t + |vRel|^2 t^2
+ *
+ * Its derivative is `2(pRel . vRel + |vRel|^2 t)` -- zero at
+ *
+ *   tStar = -pRel . vRel / |vRel|^2.
+ *
+ * Plugging back: `dStar^2 = |pRel|^2 - (pRel . vRel)^2 / |vRel|^2`.
+ *
+ * Edge cases (handled explicitly so callers don't have to):
+ *   - `|vRel|^2 == 0` (no relative motion): the asteroid hovers
+ *     or moves in perfect lockstep. The closest distance over
+ *     ANY window is `|pRel|`, and `tStar = 0`. Returns
+ *     `{ closestDist: |pRel|, tStar: 0 }` -- treats it as an
+ *     immediate threat (zero relative velocity IS a threat if the
+ *     asteroid is already close).
+ *   - `tStar < 0`: the asteroid is RECEDING (passing through its
+ *     closest point before the start of the window). The min over
+ *     `[0, lookaheadS]` is at `t=0` -- `closestDist = |pRel|`.
+ *   - `tStar > lookaheadS`: the asteroid is still approaching at
+ *     the horizon edge. The min over the window is at `t =
+ *     lookaheadS`. Honors the cognitive cap so the brain never
+ *     commits to dodging based on an event outside its look-ahead.
+ *   - Walking the path for `tStar` after clamping yields the
+ *     WINDOWED minimum, not the closed-form geodesic minimum.
+ *
+ * The brain uses `closestDist` ONLY (not `tStar`) -- if the asteroid
+ * is going to come within `dodgeMarginU` of the ship at any time in
+ * the next `lookaheadS` seconds, the brain DODGEs. `tStar` may be
+ * added to a future visualization HUD ("Threat: t=0.32s, d=0.5u")
+ * but isn't on the critical-path for the steering decision.
+ *
+ * @param {{ pRel: { x: number, z: number }, vRel: { x: number, z: number }, lookaheadS: number }} args
+ * @returns {{ closestDist: number, tStar: number }}
+ */
+export function computeClosestApproach({ pRel, vRel, lookaheadS }) {
+  if (!pRel || typeof pRel.x !== 'number' || typeof pRel.z !== 'number') {
+    return { closestDist: Infinity, tStar: 0 };
+  }
+  // |pRel|^2 -- the CURRENT distance squared (always non-negative).
+  const pRelMagSq = pRel.x * pRel.x + pRel.z * pRel.z;
+  if (!vRel || typeof vRel.x !== 'number' || typeof vRel.z !== 'number') {
+    return { closestDist: Math.sqrt(pRelMagSq), tStar: 0 };
+  }
+  const vRelMagSq = vRel.x * vRel.x + vRel.z * vRel.z;
+  if (vRelMagSq === 0) {
+    // No relative motion -- current distance IS the closest distance.
+    return { closestDist: Math.sqrt(pRelMagSq), tStar: 0 };
+  }
+  // pRel . vRel -- sign tells us whether the closing velocity is
+  // positive (approaching) or negative (receding).
+  const pRelDotVRel = pRel.x * vRel.x + pRel.z * vRel.z;
+  // Time of closest approach (unconstrained). Negative =>
+  // asteroid is at its closest point RIGHT NOW and moving away.
+  const tStarFree = -pRelDotVRel / vRelMagSq;
+  // Clamp tStar to the lookahead window. When tStarFree is OUTSIDE
+  // [0, lookaheadS], the minimum over the window sits at the
+  // boundary (parabola is convex -- strictly monotonic over any
+  // bounded interval). When tStarFree is INSIDE the window, the
+  // geodesic minimum IS the unconstrained minimum (gradient zero).
+  const tStar = Math.max(0, Math.min(lookaheadS, tStarFree));
+  // Walk the relative path forward for `tStar` seconds (clamped) and
+  // measure the distance to origin AT THAT POINT. This computes the
+  // WINDOWED minimum uniformly across all three cases:
+  //   - tStar = tStarFree (in window): distance at the geodesic
+  //     minimum. Mathematically equivalent to the closed-form
+  //     `sqrt(|pRel|^2 - (pRel.vRel)^2 / |vRel|^2)`.
+  //   - tStar = 0   (receding,      tStarFree < 0): distance at
+  //     t=0 -- the asteroid's actual position right now (which IS
+  //     the closest point in our window).
+  //   - tStar = lookaheadS (slow approach, tStarFree > S): distance
+  //     at the horizon edge.
+  // The previous closed-form subtraction returned the UNCONSTRAINED
+  // global minimum -- for a receding asteroid sitting at tStarFree=-0.2s
+  // the formula gives the parabolic minimum at t=-0.2 (before our
+  // window opens), which is meaningless for the lookahead decision.
+  // Boundaries are now handled by walking the path, not by closed
+  // form. No division-by-zero (vRelMagSq=0 is the early-return above).
+  // No floating-point negatives (we sum squares, not subtract).
+  const cx = pRel.x + vRel.x * tStar;
+  const cz = pRel.z + vRel.z * tStar;
+  const closestDist = Math.sqrt(cx * cx + cz * cz);
+  return { closestDist, tStar };
+}
+
+/**
  * Pure: 2-phase intercept controller. Given a target position +
  * the ship's current velocity, return the steering + thrust that
  * approaches the target without overshooting in tight orbits.
@@ -595,6 +720,8 @@ export function aiBrainTick({
   coastInDist = DEFAULTS.coastInDist,
   interceptLookaheadS = DEFAULTS.interceptLookaheadS,
   bulletSpeed = DEFAULTS.bulletSpeed,
+  dodgeLookaheadS = DEFAULTS.dodgeLookaheadS,
+  dodgeMarginU = DEFAULTS.dodgeMarginU,
   rng = Math.random,
 }) {
   if (!aiPos) throw new Error('aiBrainTick: aiPos is required');
@@ -604,7 +731,61 @@ export function aiBrainTick({
   const nearest = findNearestAsteroid(aiPos, asteroids);
 
   // ---- 1. DODGE (highest priority) ------------------------------------
-  if (nearest && nearest.dist < dodgeDist) {
+  // v0.18.x -- predictive DODGE: project each asteroid's relative
+  // motion against the ship; if the projected closest approach
+  // (within `dodgeLookaheadS` seconds) is < `dodgeMarginU`, trigger
+  // the escape. Without this, DODGE fires only when the asteroid
+  // is already within `dodgeDist` (currently 14u), which gives the
+  // ship < 500ms to start escaping for fast-drifting rocks. With
+  // prediction, the AI commits to an escape vector 1-2 seconds
+  // earlier -- the difference between "threading the needle" and
+  // "threading your way past safety pressure".
+  //
+  // `findDodgeAsteroid` returns the asteroid with the LOWEST
+  // projected miss-distance (worst physical hit), with the
+  // `computeClosestApproach({ pRel, vRel, lookaheadS })` helper
+  // handling all the 2-body kinematics. When `dodgeLookaheadS=0`
+  // (predictive disabled) or no projected threat is found within
+  // the lookahead, fall back to the legacy "current dist < dodgeDist"
+  // check. The predictive superset always covers the legacy cases
+  // when lookaheadS > 0, so the legacy fallback fires only when
+  // prediction is off.
+  //
+  // The escape angle is unchanged from v0.12.x: thrust 90° counter-
+  // clockwise from the threat's CURRENT position. Future iterations
+  // could shift to "perpendicular to relative velocity" (which gives
+  // a guaranteed-missing trajectory) but the perpendicular-to-current
+  // heuristic is well-tested and matches the existing semantics.
+  function findDodgeAsteroid() {
+    if (!aiVel) return nearest && nearest.dist < dodgeDist ? { asteroid: nearest.asteroid } : null;
+    if (dodgeLookaheadS > 0) {
+      let worst = null;
+      let worstDist = Infinity;
+      for (const a of asteroids) {
+        if (!a || typeof a.getPosition !== 'function') continue;
+        const aPos = a.getPosition();
+        if (!aPos) continue;
+        const aVel = lookupAsteroidVel(a);
+        const vRel = {
+          x: (aVel?.x ?? 0) - aiVel.x,
+          z: (aVel?.z ?? 0) - aiVel.z,
+        };
+        const pRel = { x: aPos.x - aiPos.x, z: aPos.z - aiPos.z };
+        const { closestDist } = computeClosestApproach({ pRel, vRel, lookaheadS: dodgeLookaheadS });
+        if (closestDist < dodgeMarginU && closestDist < worstDist) {
+          worstDist = closestDist;
+          worst = a;
+        }
+      }
+      if (worst) return { asteroid: worst };
+    }
+    // Fall-through: when predictive is off or no projected threats,
+    // use the legacy "in current dodgeDist" check.
+    if (nearest && nearest.dist < dodgeDist) return { asteroid: nearest.asteroid };
+    return null;
+  }
+  const dodgeTarget = findDodgeAsteroid();
+  if (dodgeTarget) {
     // Steer 90° counter-clockwise from the threat direction (in the
     // (x, z) atan2 frame), so the ship thrusts perpendicular to
     // the threat and escapes out the port (left) side. The diff is
@@ -613,7 +794,8 @@ export function aiBrainTick({
     // to the escape direction. Comparing to `yaw` directly would be
     // off by a 90° offset, because yaw=0 means the ship faces -Z,
     // not 0. See `facingAngle` for the math.
-    const threatAngle = Math.atan2(nearest.dz, nearest.dx);
+    const aPos = dodgeTarget.asteroid.getPosition();
+    const threatAngle = Math.atan2(aPos.z - aiPos.z, aPos.x - aiPos.x);
     const escapeAngle = threatAngle + Math.PI / 2;
     const diff = wrapAngle(escapeAngle - facingAngle(aiYaw));
     return {
@@ -898,6 +1080,8 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       coastInDist: opts.coastInDist,
       interceptLookaheadS: opts.interceptLookaheadS,
       bulletSpeed: opts.bulletSpeed,
+      dodgeLookaheadS: opts.dodgeLookaheadS,
+      dodgeMarginU: opts.dodgeMarginU,
       wanderHeading,
       wanderHeadingExpiresAt,
       rng,
@@ -928,6 +1112,11 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     // v0.16.x: forward interceptLookaheadS + bulletSpeed too so the
     // displayed mode reflects the same dynamic-lead contract the
     // production brain call uses (was missing these two before).
+    // v0.18.x: forward dodgeLookaheadS + dodgeMarginU too so the
+    // dashboard's "current mode" reflects the same predictive-DODGE
+    // contract the production brain call uses -- if predictive
+    // triggers fire here, getMode() will return 'dodge' and the
+    // HUD will agree with the actual ship behavior.
     return {
       aiPos: ship.position,
       aiYaw: ship.rotation.yaw,
@@ -943,6 +1132,8 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       powerupHuntDist: opts.powerupHuntDist,
       interceptLookaheadS: opts.interceptLookaheadS,
       bulletSpeed: opts.bulletSpeed,
+      dodgeLookaheadS: opts.dodgeLookaheadS,
+      dodgeMarginU: opts.dodgeMarginU,
       wanderHeading,
       wanderHeadingExpiresAt,
       rng,

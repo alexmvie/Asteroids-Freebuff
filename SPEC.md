@@ -413,3 +413,34 @@ The four changes are co-dependent:
 - **`yawInertiaTau`** makes the wiggle physically cost time, not just abstract fitness — by the time the brain's yaw command reaches the ship, half a second of "doing nothing useful" has elapsed.
 
 Drop any one of the four and the brain will re-discover a degenerate local minimum that exploits the remaining loophole.
+
+
+## 15. v0.18.0 -- Predictive DODGE (hand-coded demo AI)
+
+The v0.12.x DODGE fired only when an asteroid was already within the 14u `dodgeDist` shell -- often too late for fast-drifting rocks (the AI had < 500ms to start escaping). v0.18.0 projects each asteroid'\''s relative motion against the ship using 2-body kinematics, triggers DODGE 1-2s earlier when the projected CLOSEST approach (within `dodgeLookaheadS` seconds) is < `dodgeMarginU`.
+
+### Math (lives in `computeClosestApproach` in `src/entities/ai.js`)
+
+Relative motion `R(t) = pRel + vRel * t` traces a line in the XZ plane. The squared distance is a convex parabola in `t`. The unconstrained minimum is at `tStar = -pRel.vRel / |vRel|^2`; the closed-form minimum squared distance is `|pRel|^2 - (pRel.vRel)^2 / |vRel|^2`. Two fallacies the closed form hides:
+
+- **Receding asteroid** (`tStarFree < 0`): the unconstrained minimum is at `t < 0` (the asteroid was closest 0.2s ago). The formula returns the parabolic distance at that PAST minimum, often 0. The windowed minimum over `[0, lookaheadS]` is the boundary value `|pRel|`. Closed-form firing on a receding asteroid = false alarm.
+- **Slow approach** (`tStarFree > lookaheadS`): the unconstrained minimum is at `t > lookaheadS` (the asteroid WILL hit in 5s but our window is 1s). The formula returns 0 even though the asteroid is still 100u+ away. Closed-form firing on a slow approach = far-future panic.
+
+The fix: walk `|pRel + vRel * tStar|` AFTER clamping `tStar = [0, lookaheadS]` (clamp the parabolic minimum to the window endpoints). The walked value is the WINDOWED minimum uniformly across all three cases (in-window, receding, slow-approach). Mathematically equivalent to closed-form when tStar is in-window; correctly returns boundary distances when tStar is out-of-window. No division-by-zero (vRelMagSq=0 is the early-return path); no floating-point negatives (we sum squares, not subtract). Validation: `thinker-with-files-gemini` confirmed the math.
+
+### DODGE branch in `aiBrainTick`
+
+Loop ALL asteroids. For each: compute relative position and velocity (with `lookupAsteroidVel()` + defensive null guards), call `computeClosestApproach({pRel, vRel, lookaheadS: dodgeLookaheadS})`. If `closestDist < dodgeMarginU AND closestDist < worstDist_so_far`, this asteroid is the current worst threat. When the loop finds at least one threat, commit to escape: thrust 90° CCW from the threat'\''s CURRENT position (escape direction unchanged from v0.12.x). When no threat is found OR `dodgeLookaheadS=0`, fall through to the legacy `dodgeDist` shell (instant trigger when the asteroid is already inside the 14u raw shell, regardless of velocity).
+
+### Defaults
+
+- `dodgeLookaheadS: 1.0` (seconds) -- the AI'\''s forward-prediction horizon. A pilot won'\''t commit to dodging based on an event > 1s away; aligns with the existing `interceptLookaheadS=0.5` cognitive cap (DODGE gets a wider horizon because survival is immediate). Set to 0 to disable predictive entirely; legacy shell still fires.
+- `dodgeMarginU: 2.5` (world units) -- the projected miss-distance threshold. 2.5u ~= max small-chunk radius; triggering DODGE on rocks that would graze > 2.5u away is wasteful. Higher = more aggressive DODGE (sooner, tighter pass); lower = more aggressive flight (let grazing passes if they really graze).
+
+### Visual impact
+
+Small in MVP because asteroid ambient drift is < 0.5 u/s (no closing speed means closeDist = |pRel|, so predictive only fires when the asteroid is already within `dodgeMarginU` -- same as legacy). The API is forward-compatible with Elite-class velocities (5+ u/s enemy drift); the predictive layer fires 1s BEFORE the legacy shell, the difference between "reactive panic" and "threading the needle".
+
+### Wiring parity
+
+`argsFromObs` (production brain call from `update()`) and `brainArgsFromShip` (getMode() call from the dashboard) BOTH forward `dodgeLookaheadS` + `dodgeMarginU`. The chip/dashboard reading therefore agrees with the actual ship behavior. Without the getMode() parity, the HUD would show `'\''target'\''` while the ship silently dodges -- a passive-aggressive UI bug. 14 regression tests pin the contract.

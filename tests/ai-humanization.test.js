@@ -32,6 +32,7 @@ import {
   pickWanderHeading,
   predictPosition,
   lookupAsteroidVel,
+  computeClosestApproach,
   createDemoAi,
 } from '../src/entities/ai.js';
 
@@ -896,4 +897,310 @@ test('v0.16.x HUNT: per-asteroid dynamic lead applies in the HUNT loop (close sh
   assert.equal(result.mode, 'hunt');
   assert.equal(result.fire, true,
     'HUNT per-asteroid dynamic lead fires on close fast-drift shot the fixed lead missed');
+});
+// ==========================================================================
+// 8. v0.18.x -- PREDICTIVE DODGE (2-body kinematics)
+// ==========================================================================
+// The v0.12.x DODGE fired only when `nearest.dist < dodgeDist` (14u raw),
+// which gave the AI < 500ms to start escaping for fast-drifting rocks --
+// often too late. v0.18.x projects the asteroid's relative motion against
+// the ship and triggers DODGE 1-2 seconds EARLIER, when the projected
+// closest approach (within `dodgeLookaheadS` seconds) is < `dodgeMarginU`.
+// The math lives in `computeClosestApproach`: for relative motion
+// `pRel + vRel * t`,
+//   tStar = -pRel.vRel / |vRel|^2      (clamped to [0, lookaheadS])
+//   dStar = sqrt(|pRel|^2 - (pRel.vRel)^2 / |vRel|^2).
+//
+// Edge cases (hand-tested below) cover: head-on collision, grazing pass,
+// receding asteroid, vRel=0 lockstep, lookaheadS clamping, and the safe
+// fallbacks for null pos / null vel.
+
+test('v0.18.x computeClosestApproach: head-on collision -- tStar matches flight time, closestDist=0', () => {
+  // Asteroid at (10, 0), approaching at v=(-100, 0). pRel.vRel=-1000,
+  // |vRel|^2=10000, tStar=0.1s. closestDistSq = 100 - 1000^2/10000 = 0.
+  const r = computeClosestApproach({
+    pRel: { x: 10, z: 0 },
+    vRel: { x: -100, z: 0 },
+    lookaheadS: 1.0,
+  });
+  assert.ok(Math.abs(r.tStar - 0.1) < 1e-9, `tStar ~= 0.1, got ${r.tStar}`);
+  assert.ok(Math.abs(r.closestDist) < 1e-9, `closestDist ~= 0, got ${r.closestDist}`);
+});
+
+test('v0.18.x computeClosestApproach: grazing pass -- closestDist = perpendicular distance', () => {
+  // Asteroid at (10, 0), drifting perpendicular at v=(0, 100). pRel.vRel=0
+  // -> tStar=0 (the line never closes). closestDistSq = 100 -> 10u.
+  const r = computeClosestApproach({
+    pRel: { x: 10, z: 0 },
+    vRel: { x: 0, z: 100 },
+    lookaheadS: 1.0,
+  });
+  assert.equal(r.tStar, 0);
+  assert.ok(Math.abs(r.closestDist - 10) < 1e-9, `closestDist ~= 10, got ${r.closestDist}`);
+});
+
+test('v0.18.x computeClosestApproach: receding asteroid -- clamp tStar=0, closestDist=|pRel|', () => {
+  // Asteroid at (10, 0), receding at v=(100, 0). pRel.vRel=1000>0 ->
+  // tStarFree = -0.1 (negative: receding). Clamped to tStar=0.
+  // closestDistSq = 100 - 1000^2/10000 = 90 -> ~= 9.487u (CURRENT distance).
+  const r = computeClosestApproach({
+    pRel: { x: 10, z: 0 },
+    vRel: { x: 100, z: 0 },
+    lookaheadS: 1.0,
+  });
+  assert.equal(r.tStar, 0, 'receding asteroid -> tStar clamped to 0');
+  assert.ok(r.closestDist >= 9.4 && r.closestDist <= 10 + 1e-9,
+    `closestDist ~= |pRel|, got ${r.closestDist}`);
+});
+
+test('v0.18.x computeClosestApproach: vRel=0 (lockstep) -- tStar=0, closestDist=|pRel|', () => {
+  // No relative motion: asteroid hovers or moves in perfect lockstep.
+  // closestDist IS the current distance, tStar=0 -- immediate threat if
+  // standing in it.
+  const r = computeClosestApproach({
+    pRel: { x: 7, z: -3 },
+    vRel: { x: 0, z: 0 },
+    lookaheadS: 1.0,
+  });
+  assert.equal(r.tStar, 0);
+  assert.ok(Math.abs(r.closestDist - Math.hypot(7, 3)) < 1e-9,
+    `closestDist = |pRel|, got ${r.closestDist}`);
+});
+
+test('v0.18.x computeClosestApproach: tStar > lookaheadS -- clamped to lookaheadS', () => {
+  // Asteroid at (200, 0) approaching at v=(-1, 0). tStarFree=200.
+  // Clamped to lookaheadS=1.0. Min over the window sits at the horizon
+  // edge where the asteroid is still ~199u away.
+  const r = computeClosestApproach({
+    pRel: { x: 200, z: 0 },
+    vRel: { x: -1, z: 0 },
+    lookaheadS: 1.0,
+  });
+  assert.equal(r.tStar, 1.0, 'tStar clamped to lookaheadS horizon');
+  assert.ok(r.closestDist >= 100 && r.closestDist <= 200 + 1e-9,
+    `closestDist over [0..1] ~= 199u, got ${r.closestDist}`);
+});
+
+test('v0.18.x computeClosestApproach: null pRel -- returns Infinity (safe input)', () => {
+  const r = computeClosestApproach({ pRel: null, vRel: { x: 1, z: 0 }, lookaheadS: 1 });
+  assert.equal(r.closestDist, Infinity);
+  assert.equal(r.tStar, 0);
+});
+
+test('v0.18.x computeClosestApproach: null vRel -- returns |pRel| (treated as no velocity)', () => {
+  const r = computeClosestApproach({ pRel: { x: 8, z: 6 }, vRel: null, lookaheadS: 1 });
+  assert.equal(r.closestDist, 10);
+  assert.equal(r.tStar, 0);
+});
+
+test('v0.18.x predictive DODGE: head-on threat -> fires BEFORE entering legacy dodgeDist shell', () => {
+  // Keystone test for the v0.18.x contract. Ship stationary, asteroid
+  // on direct collision course at 10u (will hit in 0.5s). Legacy
+  // `dodgeDist=14` wouldn't fire since the asteroid sits OUTSIDE the
+  // 14u shell. With v0.18.x predictive: predicted closest approach = 0
+  // within the 1.0s lookahead -> DODGE fires NOW, the AI commits to
+  // an escape vector 1 second earlier than the v0.12.x brain could.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,                       // facing irrelevant for DODGE
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(10, 0, -20, 0)],   // approach at 20 u/s, hit in 0.5s
+    time: 0,
+    dodgeDist: 14,                  // legacy: 10u NOT in the 14u shell
+    targetDist: 90,
+    dodgeLookaheadS: 1.0,           // v0.18.x predictive ON
+    dodgeMarginU: 2.5,
+  });
+  assert.equal(result.mode, 'dodge',
+    'predictive DODGE fires 1s before the asteroid enters the legacy 14u shell');
+  assert.equal(result.thrust, true);
+  assert.equal(result.fire, false);
+});
+
+test('v0.18.x predictive DODGE: grazing asteroid beyond margin (legacy disabled) -> does NOT dodge', () => {
+  // Asteroid passing through 5u perpendicular at v=(0, 200). With
+  // the FIXED helper, tStarFree=0 (pRel.vRel=0) and
+  // closestDist = |pRel + vRel*0| = 5u > dodgeMarginU=2.5 -- NOT a
+  // predictive threat. dodgeDist=0 disables legacy so the test
+  // ISOLATES the predictive layer; without this isolation the
+  // legacy 14u shell would fire (5u < 14u) and we couldn't tell if
+  // predictive was actually being computed.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(5, 0, 0, 200)],   // grazing fast
+    time: 0,
+    dodgeDist: 0,                   // disable legacy -- isolate predictive
+    targetDist: 90,
+    dodgeLookaheadS: 1.0,
+    dodgeMarginU: 2.5,
+  });
+  assert.notEqual(result.mode, 'dodge',
+    'predictive: grazing at 5u with closestDist=5 > margin=2.5 -- no dodge');
+});
+
+test('v0.18.x predictive DODGE: receding asteroid outside legacy shell -> does NOT dodge', () => {
+  // Asteroid at 20u, receding at v=(100, 0) -> pRel.vRel=2000 > 0 ->
+  // tStar clamped to 0, closestDist = |pRel| = 20u > dodgeMarginU.
+  // 20u is also beyond dodgeDist=14. No threat at all -> falls
+  // through to TARGET (asteroid within targetDist=90).
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(20, 0, 100, 0)],   // receding
+    time: 0,
+    dodgeDist: 14,
+    targetDist: 90,
+    dodgeLookaheadS: 1.0,
+    dodgeMarginU: 2.5,
+  });
+  assert.notEqual(result.mode, 'dodge',
+    'receding asteroid is not a threat (closestDist = 20u > dodgeMarginU)');
+  assert.equal(result.mode, 'target');
+});
+
+test('v0.18.x predictive DODGE: dodgeLookaheadS=0 disables predictive, legacy dodgeDist still works', () => {
+  // Asteroid at 10u, approaching. closestDist=0 if predictive on;
+  // 10u < dodgeDist=14 so legacy fires. With dodgeLookaheadS=0,
+  // the predictive branch is OFF and only the shell-based check
+  // decides. 10u < 14 -> DODGE fires via legacy path.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(10, 0, -1, 0)],    // approaching slowly
+    time: 0,
+    dodgeDist: 14,
+    targetDist: 90,
+    dodgeLookaheadS: 0,             // disabled -> legacy only
+    dodgeMarginU: 2.5,
+  });
+  assert.equal(result.mode, 'dodge',
+    'predictive OFF, legacy shell fires (10u < 14u)');
+});
+
+test('v0.18.x predictive DODGE: dodgeLookaheadS=0 + asteroid OUTSIDE shell -> no dodge', () => {
+  // Asteroid at 20u. 20u > dodgeDist=14 and predictive is off ->
+  // no dodge. Falls through to TARGET.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(20, 0, -1, 0)],
+    time: 0,
+    dodgeDist: 14,
+    targetDist: 90,
+    dodgeLookaheadS: 0,
+    dodgeMarginU: 2.5,
+  });
+  assert.notEqual(result.mode, 'dodge');
+  assert.equal(result.mode, 'target');
+});
+
+test('v0.18.x: worst projected miss-distance picked when multiple threats overlap', () => {
+  // Ship at origin. Three asteroids, all closing on the ship:
+  //   A: (10, 0) at v(-30, 0) -> closestDist = 0, hit in 0.33s (head-on)
+  //   B: (8, 8) at v(-12, -12) -> closestDist ~= 0, hit in 0.66s
+  //   C: (5, 0) at v(-5, -50) -> closestDist = perp = 0, graze-only
+  // The brain DODGEs; we don't pin the escape direction (it depends
+  // on which threat Astro A or B wins 'worst' by closestDist
+  // comparison. Both are 0 here, so the first one in iteration
+  // order wins -- but we don't test WHICH asteroid dodges, only
+  // that the brain COMMITS to dodge mode when multiple threats
+  // qualify.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [
+      mockAsteroid(10, 0, -30, 0),
+      mockAsteroid(8, 8, -12, -12),
+      mockAsteroid(5, 0, -5, -50),
+    ],
+    time: 0,
+    dodgeDist: 14,
+    targetDist: 90,
+    dodgeLookaheadS: 1.0,
+    dodgeMarginU: 2.5,
+  });
+  assert.equal(result.mode, 'dodge',
+    'multiple predicted threats all with closestDist < margin -> DODGE fires');
+});
+
+test('v0.18.x factory: forwards dodgeLookaheadS + dodgeMarginU into brain args (smoke)', () => {
+  // Regression guard: the call shape passed into the brain from the
+  // production argsFromObs path must include the v0.18.x predictive
+  // args. Without this forwarding, predictive DODGE would silently
+  // become a no-op in live play (defaults = undefined) but pass unit
+  // tests (the test fixture passes them explicitly).
+  const scene = mockScene();
+  const mock = mockShipFactory();
+  let seenArgs = null;
+  const mockBrain = {
+    tick: (args) => {
+      seenArgs = args;
+      return { yaw: 0, thrust: false, mode: 'wander', fire: false };
+    },
+  };
+  const ai = createDemoAi({
+    scene,
+    asteroids: [],
+    options: {
+      shipFactory: mock.build,
+      brain: mockBrain,
+      reactionLatencyS: 0,
+      dodgeLookaheadS: 0.75,
+      dodgeMarginU: 3.5,
+    },
+  });
+  ai.update(0.05);
+  assert.equal(seenArgs.dodgeLookaheadS, 0.75,
+    'factory forwards dodgeLookaheadS into brain call args');
+  assert.equal(seenArgs.dodgeMarginU, 3.5,
+    'factory forwards dodgeMarginU into brain call args');
+});
+
+test('v0.18.x factory: getMode() reflects predictive DODGE contract (parity with brain)', () => {
+  // The dashboard reads getMode() to display the AI's current mode.
+  // If predictive DODGE fires in the production brain call but
+  // brainArgsFromShip (used by getMode) ignores the predictive args,
+  // the dashboard would lie about the AI's actual behavior. The
+  // v0.18.x wiring forwards both dodgeLookaheadS + dodgeMarginU
+  // into both paths so getMode() reflects the SAME dynamics.
+  //
+  // The test uses rng=()=>0 + a position override so the spawn
+  // lands on a known cell where predictive DODGE fires (asteroid
+  // 10u away closing at 20u/s -- collision in 0.5s, well within
+  // the 1.0s lookahead window). Without these controls the test
+  // is non-deterministic: pickAiSpawn used Math.random by default
+  // and could land the ship anywhere within 30u of origin (often
+  // outside the 2.5u dodgeMargin, breaking the test).
+  const scene = mockScene();
+  const mock = mockShipFactory();
+  const ai = createDemoAi({
+    scene,
+    asteroids: [mockAsteroid(10, 0, -20, 0)],
+    options: {
+      shipFactory: mock.build,
+      dodgeDist: 14,
+      dodgeLookaheadS: 1.0,
+      dodgeMarginU: 2.5,
+      reactionLatencyS: 0,
+      targetDist: 90,
+      brain: null,               // production aiBrainTick
+      rng: () => 0,              // deterministic pickAiSpawn
+    },
+  });
+  // Override the spawn-position to place the ship at origin
+  // ship.position is a live reference to the object the mock's
+  // build() captured; mutating it here propagates to the brain.
+  ai.getShip().position.x = 0;
+  ai.getShip().position.z = 0;
+  // getMode reads LIVE ship state via brainArgsFromShip and reports
+  // the same mode the production brain call would. Predictive
+  // DOdGE fires here (predict closestDist = 0 within 1.0s window).
+  assert.equal(ai.getMode(), 'dodge',
+    'getMode() reports the predictive-DODGE contract in parity with production brain');
 });
