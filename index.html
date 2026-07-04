@@ -16,7 +16,14 @@
         </div>
         <span class="hud__powerup-timer" data-hud="powerupTimer">15.0s</span>
       </div>
-      <div class="hud__lives" data-hud="lives">LIVES: 3</div>
+      <div class="hud__lives hud__energy" data-hud="energy">
+        <span class="hud__energy-label" data-hud="energyLabel">ENERGY</span>
+        <div class="hud__energy-bar">
+          <div class="hud__energy-bar-fill" data-hud="energyBar" style="--energy-progress: 100%"></div>
+        </div>
+        <span class="hud__energy-timer" data-hud="energyTimer">100/100</span>
+      </div>
+      <div class="hud__buffs" data-hud="buffs" aria-label="Active buffs"></div>
     </div>
     <div id="overlay">
       <div class="hud-message" data-hud="message">PRESS ANY KEY TO START</div>

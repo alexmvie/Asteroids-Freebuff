@@ -128,3 +128,54 @@ test('mesh is a Three.js Group', () => {
   assert.ok(pu.mesh instanceof THREE.Group, 'mesh is a THREE.Group');
   pu.dispose();
 });
+
+// ---------------------------------------------------------------------------
+// v0.11.0 SSOT lockstep — the per-type color is read by the HUD chip
+// renderer (src/ui/hud.js addBuffChip) via powerupColorFor(type). If
+// the variant registry's color for any of the 6 v0.11.0 types
+// regresses, both the in-world mesh AND the HUD chip pick up the
+// wrong color. This test pins the canonical values so any unintended
+// change fails loudly.
+// ---------------------------------------------------------------------------
+
+test('v0.11.0 SSOT lockstep: powerupColorFor(type) returns canonical variant colors for all 6 v0.11.0 types', () => {
+  // Import here (not at top) so the file still compiles if the export
+  // were ever removed (the SSOT contract is enforced by the test
+  // rather than by a static import dependency).
+  return import('../src/entities/powerup.js').then(({ powerupColorFor }) => {
+    const expected = {
+      shield:  0x6effa8, // mint green
+      speed:   0xff8844, // orange
+      energy:  0xffe066, // gold-yellow
+      credits: 0xffd166, // gold
+      hull:    0xff5566, // danger red
+      weapon:  0xcc66ff, // purple
+    };
+    for (const [type, want] of Object.entries(expected)) {
+      const got = powerupColorFor(type);
+      assert.equal(got, want,
+        `${type}: powerupColorFor returned 0x${got.toString(16)} but variant registry expects 0x${want.toString(16)}. Both the in-world powerup mesh and the HUD chip would render the wrong color in lockstep.`);
+    }
+  });
+});
+
+test('v0.11.0 SSOT lockstep: powerupLabelFor(type) returns canonical variant labels for all 6 v0.11.0 types', () => {
+  // Companion assertion to the color check (the HUD's chip text is
+  // the type name — if the registry's label drifts, the chip text
+  // drifts). Both label + color are paired in the variant row.
+  return import('../src/entities/powerup.js').then(({ powerupLabelFor }) => {
+    const expected = {
+      shield:  'SHIELD',
+      speed:   'SPEED',
+      energy:  'ENERGY',
+      credits: 'CREDITS',
+      hull:    'HULL',
+      weapon:  'WEAPON',
+    };
+    for (const [type, want] of Object.entries(expected)) {
+      const got = powerupLabelFor(type);
+      assert.equal(got, want,
+        `${type}: powerupLabelFor returned "${got}" but variant registry expects "${want}"`);
+    }
+  });
+});

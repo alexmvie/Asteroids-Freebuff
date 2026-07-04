@@ -8,7 +8,12 @@
  *
  *   <div id="hud">
  *     <div data-hud="score">000000</div>
- *     <div data-hud="lives">LIVES: 3</div>
+ *     <div data-hud="energy" class="hud__lives hud__energy">
+ *       <span data-hud="energyLabel">ENERGY</span>
+ *       <div class="hud__energy-bar"><div data-hud="energyBar"></div></div>
+ *       <span data-hud="energyTimer">100/100</span>
+ *     </div>
+ *     <div data-hud="buffs" class="hud__buffs"></div>
  *   </div>
  *   <div id="overlay">
  *     <div data-hud="message">…</div>
@@ -33,6 +38,14 @@
  *   initialState?: string,
  * }} [opts]
  */
+
+// ===========================================================================
+// SSOT: per-type color tint comes from powerup.js's powerupColorFor —
+// not duplicated here. The HUD's chip border + glow color is a direct
+// read from the entity's variant registry, so any color tweak in
+// POWERUP_TYPE_VARIANTS propagates to both the in-world powerup mesh
+// AND the HUD chip atomically.
+import { powerupColorFor } from '../entities/powerup.js';
 
 // ===========================================================================
 // HUD_MESSAGE_CONFIG
@@ -166,13 +179,99 @@ export function createHud({ bus, initialState = null } = {}) {
     }
   }
 
+  // ---- v0.11.0 Energy + Buff chip rendering --------------------------
+
+  // Active chip refs (type → { el, timerEl }). Removed on
+  // buff:expired (or on dispose/cleanup).
+  const buffChips = new Map();
+
+  function renderEnergy({ value, max }) {
+    const root = els.energy;
+    if (!root) return;
+    const pct = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0;
+    root.classList.toggle('hud__energy--low', pct < 0.2);
+    if (els.energyBar) {
+      els.energyBar.style.setProperty('--energy-progress', `${(pct * 100).toFixed(1)}%`);
+    }
+    if (els.energyTimer) {
+      els.energyTimer.textContent = `${Math.round(value)}/${Math.round(max)}`;
+    }
+  }
+
+  function addBuffChip({ type, duration }) {
+    const root = els.buffs;
+    if (!root || buffChips.has(type)) return;
+    // SSOT: per-type color comes from the entity's variant registry
+    // via powerupColorFor. If anyone changes a color in
+    // POWERUP_TYPE_VARIANTS, both the in-world powerup mesh and
+    // the HUD chip pick up the new color atomically (the per-type
+    // color test in tests/powerup.test.js pins the values).
+    const color = powerupColorFor(type);
+    const colorHex = `#${color.toString(16).padStart(6, '0')}`;
+    const chip = document.createElement('div');
+    chip.className = 'hud__buff';
+    chip.style.setProperty('--chip-color', colorHex);
+    const label = document.createElement('span');
+    label.className = 'hud__buff__label';
+    label.textContent = type;
+    const timerEl = document.createElement('span');
+    timerEl.className = 'hud__buff__timer';
+    timerEl.textContent = `${duration.toFixed(1)}s`;
+    chip.appendChild(label);
+    chip.appendChild(timerEl);
+    root.appendChild(chip);
+    buffChips.set(type, { el: chip, timerEl });
+  }
+
+  function removeBuffChip(type, reason) {
+    const ref = buffChips.get(type);
+    if (!ref) return;
+    if (ref.el && ref.el.parentNode) {
+      if (reason === 'tick') {
+        // Smooth fade-out so the player sees it disappear, not snap-gone.
+        ref.el.style.transition = 'opacity 0.18s ease-out, transform 0.18s ease-out';
+        ref.el.style.opacity = '0';
+        ref.el.style.transform = 'translateY(-4px)';
+        setTimeout(() => ref.el.parentNode && ref.el.parentNode.removeChild(ref.el), 200);
+      } else {
+        ref.el.parentNode.removeChild(ref.el);
+      }
+    }
+    buffChips.delete(type);
+  }
+
+  // Per-frame tick for buff chip countdowns; matches the ship's
+  // per-frame tick. Without this the chip timers would only update
+  // on addBuff — the displayed count would be stale after the first
+  // frame. Render-loop driven (called via `hud.update`).
+  function tickBuffChips() {
+    for (const [, ref] of buffChips) {
+      // The chip's displayed timer is updated by the GAME's
+      // per-frame chip timer (not here, because we don't have the
+      // live remaining value). The `update(state)` path below
+      // overwrites this for any { buffs } passed in.
+    }
+  }
+
   // ---- Event handlers -------------------------------------------------
 
   function onScoreChanged({ score }) {
     setText('score', formatScore(score));
   }
-  function onLivesChanged({ lives }) {
-    setText('lives', `LIVES: ${lives}`);
+  // Backward-compat: the v0.10.x `lives:changed` event is harmless to
+  // keep handling (the DOM slot for `data-hud="lives"` was renamed to
+  // `data-hud="energy"`; this handler still tries to find it, gives up,
+  // and the energy bar is driven by `energy:changed` instead). The
+  // no-op is intentional: lives are gone.
+  function onLivesChanged() { /* v0.11.0: lives removed */ }
+  function onEnergyChanged(payload) {
+    renderEnergy(payload);
+  }
+  function onBuffAdded(payload) {
+    addBuffChip({ type: payload.type, duration: payload.duration ?? 5 });
+  }
+  function onBuffExpired(payload) {
+    removeBuffChip(payload.type, payload.reason ?? 'tick');
   }
   function onStateChanged({ to }) {
     if (to === 'DEMO') {
@@ -197,7 +296,11 @@ export function createHud({ bus, initialState = null } = {}) {
     if (!rootElArg) throw new Error('createHud.mount: rootEl is required');
     rootEl = rootElArg;
     els.score = findEl('score');
-    els.lives = findEl('lives');
+    els.energy = findEl('energy');
+    els.energyLabel = findEl('energyLabel');
+    els.energyBar = findEl('energyBar');
+    els.energyTimer = findEl('energyTimer');
+    els.buffs = findEl('buffs');
     els.message = findEl('message');
     els.powerup = findEl('powerup');
     els.powerupLabel = findEl('powerupLabel');
@@ -205,7 +308,10 @@ export function createHud({ bus, initialState = null } = {}) {
     els.powerupTimer = findEl('powerupTimer');
 
     unsubs.push(bus.on('score:changed', onScoreChanged));
-    unsubs.push(bus.on('lives:changed', onLivesChanged));
+    unsubs.push(bus.on('lives:changed', onLivesChanged)); // no-op backward compat
+    unsubs.push(bus.on('energy:changed', onEnergyChanged));
+    unsubs.push(bus.on('buff:added', onBuffAdded));
+    unsubs.push(bus.on('buff:expired', onBuffExpired));
     unsubs.push(bus.on('state:changed', onStateChanged));
     unsubs.push(bus.on('game:over', onGameOver));
 
@@ -221,9 +327,10 @@ export function createHud({ bus, initialState = null } = {}) {
   }
 
   /**
-   * Per-frame update for the per-tick HUD state (currently just the
-   * power-up bar / timer). Other HUD state (score, lives, message) is
-   * event-driven and handled by the `unsubs` registered in `mount`.
+   * Per-frame update for the per-tick HUD state (power-up bar / timer
+   * + buff chip countdown). Other HUD state (score, energy bar, repo
+   * chip add/remove, message) is event-driven and handled by the
+   * `unsubs` registered in `mount`.
    *
    * @param {{
    *   powerup?: {
@@ -233,6 +340,7 @@ export function createHud({ bus, initialState = null } = {}) {
    *     max: number,
    *     hasPending?: boolean,
    *   },
+   *   buffs?: Array<{ type: string, remaining: number }>,
    * }} [state]
    */
   function update(state = {}) {
@@ -242,6 +350,16 @@ export function createHud({ bus, initialState = null } = {}) {
         remaining: state.powerup.remaining || 0,
         max: state.powerup.max || 1,
       });
+    }
+    if (state.buffs) {
+      // Per-frame countdown overlay: update each chip's timer text
+      // from the live remaining value. Chips that the ship already
+      // expired (between this frame and the next emit) are removed
+      // via buff:expired and not present here.
+      for (const b of state.buffs) {
+        const ref = buffChips.get(b.type);
+        if (ref && ref.timerEl) ref.timerEl.textContent = `${b.remaining.toFixed(1)}s`;
+      }
     }
   }
 

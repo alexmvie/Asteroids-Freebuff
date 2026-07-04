@@ -651,5 +651,21 @@ export function createAsteroidFromSpec({ spec, scene, uvDebugOverlay }) {
     getRadius() { return spec.radius; },
     /** @returns {{x:number,y:number,z:number}} live world position (mutated) */
     getPosition() { return mesh.position; },
+    /**
+     * v0.14.x -- ambient drift velocity (XZ plane only). The AI's
+     * look-ahead prediction uses this to compute where the asteroid
+     * WILL BE in `interceptLookaheadS` seconds, so the ship can
+     * steer toward the future position instead of chasing current.
+     *
+     * Returns a fresh snapshot per call. The asteroid's `spec.velocity`
+     * is constant across its lifetime (the asteroid's `update(dt)`
+     * mutates `mesh.position`, not the spec), so callers can cache
+     * a single snapshot at the top of a tick if they want to avoid
+     * the per-call allocation.
+     *
+     * @returns {{x:number,z:number}} drift velocity (Y is always 0
+     *   because asteroids stay on the play plane).
+     */
+    getVelocity() { return { x: spec.velocity.x, z: spec.velocity.z }; },
   };
 }

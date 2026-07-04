@@ -39,6 +39,11 @@ import {
   ConeGeometry,
   RingGeometry,
   CylinderGeometry,
+  BoxGeometry,
+  IcosahedronGeometry,
+  CapsuleGeometry,
+  TorusGeometry,
+  OctahedronGeometry,
   MeshStandardMaterial,
   MeshBasicMaterial,
   Color,
@@ -46,8 +51,93 @@ import {
   Vector3,
 } from 'three';
 
+// (No duplicate geometry import block — all 7 fallback shapes are
+// resolved via direct named imports above.)
+
 const POWERUP_GLB_URL = '/models/powerup-laser.glb';
 const POWERUP_RADIUS = 1.5;
+
+/**
+ * v0.11.0 powerup type registry — selects the procedural fallback
+ * mesh + halo tint per powerup type. Bump this map when adding a new
+ * type; add to POWERUP_SPAWN_WEIGHTS in src/systems/powerup-system.js and
+ * `src/world/types.js PowerupType`. Each entry provides:
+ *   - shape(): a Three.js Mesh to use as the visual body
+ *   - color(): hex int for the halo ring + beacon
+ *   - label(): short uppercase string for HUD readout
+ *
+ * The 6 entries below mirrors the trainer's POWERUP_TYPE_INDEX
+ * exactly — same keys, same indices. The legacy '/laser' type
+ * string was dropped in v0.11.0: powerup-system.js now emits
+ * `spec.type = 'shield'` (the new first pickup), matching the
+ * trainer's index. No silent fallback — unknown types render as
+ * 'UNKNOWN' via the helper functions below.
+ */
+const POWERUP_TYPE_VARIANTS = {
+  shield: {
+    shape: 'icosahedron',
+    color: 0x6effa8, // mint green
+    label: 'SHIELD',
+  },
+  speed: {
+    shape: 'capsule',
+    color: 0xff8844, // orange
+    label: 'SPEED',
+  },
+  energy: {
+    shape: 'torus',
+    color: 0xffe066, // gold-yellow
+    label: 'ENERGY',
+  },
+  credits: {
+    shape: 'cylinder',
+    color: 0xffd166, // gold
+    label: 'CREDITS',
+  },
+  hull: {
+    shape: 'cube',
+    color: 0xff5566, // danger red
+    label: 'HULL',
+  },
+  weapon: {
+    shape: 'octahedron',
+    color: 0xcc66ff, // purple
+    label: 'WEAPON',
+  },
+};
+
+/**
+ * Build the v0.11.0 procedural fallback body mesh for the given
+ * powerup type. Pure helper — no GLB, no shared state. Each shape
+ * is ~10–20 vertices so cheap to allocate per powerup. Tint via the
+ * specified color so the player can tell at a glance whether to chase
+ * the mint-green shield or the purple weapon.
+ */
+function buildTypeShapeMesh(typeStr) {
+  const variant = POWERUP_TYPE_VARIANTS[typeStr] ?? POWERUP_TYPE_VARIANTS.shield;
+  const { shape, color } = variant;
+  let geom;
+  switch (shape) {
+    case 'icosahedron': geom = new IcosahedronGeometry(0.8, 0); break;
+    case 'capsule':     geom = new CapsuleGeometry(0.5, 1.0, 4, 8); break;
+    case 'torus':       geom = new TorusGeometry(0.7, 0.25, 8, 24); break;
+    case 'cylinder':    geom = new CylinderGeometry(0.6, 0.6, 0.2, 16, 1); break;
+    case 'cube':        geom = new BoxGeometry(1.0, 1.0, 1.0); break;
+    case 'octahedron':  geom = new OctahedronGeometry(0.9, 0); break;
+    case 'cone':
+    default:            geom = new ConeGeometry(0.7, 1.8, 8, 1);
+  }
+  const mat = new MeshStandardMaterial({
+    color,
+    emissive: new Color(color),
+    emissiveIntensity: 0.9,
+    metalness: 0.3,
+    roughness: 0.4,
+  });
+  const mesh = new Mesh(geom, mat);
+  return mesh;
+}
+
 /**
  * Default power-up lifetime in seconds. The power-up despawns if
  * not collected within this window. Exported so the power-up system
@@ -121,18 +211,8 @@ function loadPowerUpGlb() {
  *
  * @returns {Mesh}
  */
-function buildFallbackMesh() {
-  const geom = new ConeGeometry(0.7, 1.8, 8, 1);
-  // Default cone tip is +Y; leave as-is (the power-up is meant to be
-  // viewed from the side, and the engine cone is the same way).
-  const mat = new MeshStandardMaterial({
-    color: FALLBACK_COLOR,
-    emissive: new Color(FALLBACK_COLOR),
-    emissiveIntensity: 0.9,
-    metalness: 0.3,
-    roughness: 0.4,
-  });
-  return new Mesh(geom, mat);
+function buildFallbackMesh(type = 'laser') {
+  return buildTypeShapeMesh(type);
 }
 
 /**
@@ -143,10 +223,11 @@ function buildFallbackMesh() {
  *
  * @returns {Mesh}
  */
-function buildHaloRing() {
+function buildHaloRing(type = 'laser') {
+  const variant = POWERUP_TYPE_VARIANTS[type] ?? POWERUP_TYPE_VARIANTS.shield;
   const geom = new RingGeometry(POWERUP_RADIUS * 1.1, POWERUP_RADIUS * 1.5, 36);
   const mat = new MeshBasicMaterial({
-    color: FALLBACK_COLOR,
+    color: variant.color,
     transparent: true,
     opacity: 0.45,
     side: 2, // DoubleSide
@@ -167,10 +248,11 @@ function buildHaloRing() {
  *
  * @returns {Mesh}
  */
-function buildBeacon() {
+function buildBeacon(type = 'laser') {
+  const variant = POWERUP_TYPE_VARIANTS[type] ?? POWERUP_TYPE_VARIANTS.shield;
   const geom = new CylinderGeometry(0.05, 0.05, 2.6, 6, 1, true);
   const mat = new MeshBasicMaterial({
-    color: FALLBACK_COLOR,
+    color: variant.color,
     transparent: true,
     opacity: 0.6,
     side: 2, // DoubleSide
@@ -180,9 +262,23 @@ function buildBeacon() {
   return new Mesh(geom, mat);
 }
 
+/** Public helper: the short uppercase label for a powerup type (e.g.
+ *  'SHIELD'). Used by the HUD to show what was just picked up. */
+export function powerupLabelFor(type) {
+  const v = POWERUP_TYPE_VARIANTS[type];
+  return v ? v.label : 'PICKUP';
+}
+
+/** Public helper: hex color tint for a powerup type. Used by the
+ *  HUD buff-chip CSS to recolor per type. */
+export function powerupColorFor(type) {
+  const v = POWERUP_TYPE_VARIANTS[type];
+  return v ? v.color : 0x4dabf7;
+}
+
 export function createPowerUp({ scene, spec } = {}) {
   if (!scene) throw new Error('createPowerUp: `scene` is required');
-  if (!spec) throw new Error('createPowerUp: `spec` is required');
+  if (!spec) throw new Error('createPowerUp: `spec.type` is required');
   if (!spec.position || typeof spec.position.x !== 'number') {
     throw new Error('createPowerUp: `spec.position` must have numeric x/y/z');
   }
@@ -194,11 +290,11 @@ export function createPowerUp({ scene, spec } = {}) {
   const group = new Group();
   group.position.set(spec.position.x, spec.position.y, spec.position.z);
 
-  // ---- Initial visual: procedural fallback ---------------------------
-  const fallback = buildFallbackMesh();
+  // ---- Initial visual: procedural fallback (per-type shape + tint) --
+  const fallback = buildFallbackMesh(spec.type);
   group.add(fallback);
-  group.add(buildHaloRing());
-  group.add(buildBeacon());
+  group.add(buildHaloRing(spec.type));
+  group.add(buildBeacon(spec.type));
   group.userData.visual = fallback;
 
   scene.add(group);

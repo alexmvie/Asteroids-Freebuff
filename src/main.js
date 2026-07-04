@@ -24,9 +24,6 @@ import { createStateMachine, State } from './systems/state.js';
 import { createHud } from './ui/hud.js';
 import { createDebugHud } from './ui/debug-hud.js';
 import { createDemoAi } from './entities/ai.js';
-import { createTrainedAiBrain } from './training/ai-brain.js';
-import { TRAINER_DEFAULTS } from './training/defaults.js';
-import { deserializeGenome, genomeSize } from './training/network.js';
 import { createAsteroidField } from './systems/asteroid-field.js';
 import { createAsteroidUvDebugOverlay } from './systems/asteroid-uv-debug-overlay.js';
 import { createUvUnwrapViewer } from './systems/uv-unwrap-viewer.js';
@@ -47,18 +44,29 @@ import { createParticleSystem } from './systems/particles.js';
 // new power-up: with 1.0 every gap does, with 0.5 half do, with
 // 0.0 none do.
 //
+// **Type rotation (v0.11.x):** the type is no longer hardcoded as
+// 'shield' — powerup-system.js draws from
+// `POWERUP_SPAWN_WEIGHTS (in src/systems/powerup-system.js)` on every spawn. With the
+// default equal weights (each type = 1.0) the player sees ~1/6
+// chance per type per drop. The 6 types come from `POWERUP_SPAWN_WEIGHTS` in `src/systems/powerup-system.js`: shield (mint, instant
+// energy refill), speed (orange, thrust ×2), energy (yellow,
+// recharge ×2), credits (gold, score ×2), hull (red, damage
+// ×0.5), weapon (purple, fire rate ×2).
+//
 // **Tuning history:**
-//   - 2026-06-13: bumped to 0.95 (user asked for "almost every
-//     destroy" — 5% chance to miss keeps it from feeling 100%
-//     deterministic, the user can dial this back later for
-//     difficulty).
+//   - 2026-06-16: bumped to 1.0 (user asked for "every destroy
+//     drops a powerup"; trainer has 6 powerup types now so
+//     variety is the goal, not scarcity).
+//   - 2026-06-13: was 0.95 (user asked for "almost every
+//     destroy" — 5% chance to miss kept it from feeling 100%
+//     deterministic).
 //   - 2026-06-12: was 0.10 (10% per kill, "fair spawn rate").
 //   - 2026-06-11: was a literal `Math.random() < 0.10` guard,
 //     no constant.
 //
 // Adjust this single number to retune the drop rate. Range is
 // 0.0–1.0; values > 1.0 are treated as 1.0 (always drop).
-const POWERUP_DROP_CHANCE = 0.95;
+const POWERUP_DROP_CHANCE = 1.0;
 
 // ---- Boot ----------------------------------------------------------------
 const {
@@ -295,7 +303,7 @@ const bus = createEventBus();
 const stateMachine = createStateMachine({ initial: State.DEMO, events: bus });
 
 // ---- Ship ---------------------------------------------------------------
-const ship = createShip({ scene });
+const ship = createShip({ scene, events: bus });
 // (Initial chase target is set after demoAi is created, below.)
 // Async: try to load skyfighter.glb and swap it in. If it fails,
 // the procedural ship stays (loadShipModel never throws; it logs a
@@ -364,50 +372,13 @@ const aiWeapon = {
   },
 };
 
-/**
- * Try to load a trained genome from `/trained-genome.json` (served by
- * Vite from the public/ folder). If found, create a neural-network
- * brain and pass it to the AI. If not found, the AI falls back to
- * the hand-coded rule-based brain.
- */
-// Captured by the brain-swap closure so the HUD can read
-// generation/fitness from the loaded payload.
-let trainedGenomePayload = null;
-
-async function loadTrainedBrain() {
-  try {
-    const res = await fetch('/trained-genome.json');
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (!data || !Array.isArray(data.genome)) return null;
-    trainedGenomePayload = data;
-    const genome = deserializeGenome(data.genome);
-    // Validate input size match: a saved genome from a previous (pre-velocity) training
-    // run will have a different length and throw at networkFromGenome. Skip it cleanly.
-    // Use TRAINER_DEFAULTS (not aiBrain) because aiBrain is the hand-coded closure and
-    // does not expose inputSize/hiddenSize/outputSize as plain properties.
-    const { inputSize, hiddenSize, outputSize } = TRAINER_DEFAULTS;
-    const expected = genomeSize(inputSize, hiddenSize, outputSize);
-    if (genome.length !== expected) {
-      console.warn(
-        `[loadTrainedBrain] Stale genome (length ${genome.length} ≠ expected ${expected} ` +
-        `for inputSize=${inputSize}, hiddenSize=${hiddenSize}, outputSize=${outputSize}). ` +
-        `Skipping — train a new champion.`,
-      );
-      return null;
-    }
-    const brain = createTrainedAiBrain({ genome, inputSize, hiddenSize, outputSize });
-    if (typeof console !== 'undefined') {
-      console.log(`[main] Loaded trained brain (gen ${data.generation}, fitness=${data.fitness.toFixed(1)})`);
-    }
-    return brain;
-  } catch (e) {
-    if (typeof console !== 'undefined') {
-      console.log('[main] No trained genome found — using hand-coded AI');
-    }
-    return null;
-  }
-}
+// ---- Demo AI brain info (debug HUD) -----------------------------------
+// The demo AI is hard-coded (see src/entities/ai.js) — there is no
+// trained-brain path on this branch. The debug HUD shows the kind +
+// placeholder generation/fitness so the row stays meaningful; future
+// AI implementations that want to surface their identity here can
+// swap this object for a richer one.
+const AI_BRAIN_KIND = 'hand-coded';
 
 const demoAi = createDemoAi({
   scene,
@@ -420,61 +391,8 @@ const demoAi = createDemoAi({
     const p = powerupSystem.getPendingSpawn();
     return p ? p.getPosition() : null;
   },
-  // Trained brain is loaded asynchronously and swapped in once ready.
-  // Until then the AI uses the hand-coded rule-based brain.
-  options: {
-    brain: null,
-  },
-});
-
-// AI brain info for the debug HUD. Seeded to the hand-coded brain
-// (the demo's default). When the trained brain loads (async below),
-// `kind` flips to 'trained' and the generation/fitness fields
-// populate from the loaded JSON.
-let aiBrainInfo = { kind: 'hand-coded', generation: null, fitness: null };
-
-// Async: load the trained brain and swap it in when ready.
-loadTrainedBrain().then((brain) => {
-  if (brain) {
-    // The AI's options are immutable after creation, so we recreate
-    // the AI with the trained brain. We must preserve the ship's
-    // current position/yaw so the swap is invisible.
-    const oldShip = demoAi.getShip();
-    const oldPos = { ...oldShip.position };
-    const oldYaw = oldShip.rotation.yaw;
-    demoAi.dispose();
-    // Recreate with the trained brain
-    const newAi = createDemoAi({
-      scene,
-      asteroids: field.getEntities(),
-      weapon: aiWeapon,
-      getPowerupPos: () => {
-        const p = powerupSystem.getPendingSpawn();
-        return p ? p.getPosition() : null;
-      },
-      options: { brain },
-    });
-    newAi.getShip().position = oldPos;
-    newAi.getShip().rotation.yaw = oldYaw;
-    // Swap the reference so the rest of main.js uses the new AI.
-    // We mutate the demoAi object in place because it's captured
-    // by many closures above (aiWeapon, powerupSystem, etc.).
-    Object.assign(demoAi, newAi);
-    // Update the HUD info. `trainedGenomePayload` is closed over from
-    // the loadTrainedBrain fetch — we read generation/fitness from it.
-    if (trainedGenomePayload) {
-      aiBrainInfo = {
-        kind: 'trained',
-        generation: trainedGenomePayload.generation ?? null,
-        fitness: trainedGenomePayload.fitness ?? null,
-      };
-    } else {
-      aiBrainInfo = { kind: 'trained', generation: null, fitness: null };
-    }
-    if (typeof console !== 'undefined') {
-      console.log('[main] Trained brain swapped in — AI now uses neural network');
-    }
-  }
+  // No `options` override needed — the factory uses the hand-coded
+  // rule-based brain by default (see createDemoAi in src/entities/ai.js).
 });
 
 // Same GLB swap for the AI demo ship, so the player and the NPC match.
@@ -547,18 +465,22 @@ const powerupSystem = createPowerUpSystem({
   },
 });
 
-// ---- Game state (score + lives) -----------------------------------------
-// Owned by main.js; the upcoming HUD layer will subscribe to 'score:changed'
-// and 'lives:changed' on the bus.
+// ---- Game state (score + energy) ---------------------------------------
+// Owned by main.js. The HUD subscribes to 'score:changed' on the bus and
+// to the ship's own 'energy:changed' events (the ship is created with
+// `events: bus` above). The v0.10.x `let lives = 3` mechanic is fully
+// removed: the player dies when `ship.energy <= 0` (a `takeDamage` that
+// drains the last point triggers GAME_OVER via the check in
+// processCollisions). The energies counter (lives in spirit) lives
+// entirely on the ship now and is reflected in the HUD via the events
+// bus — no player-side state mirror needed.
 let score = 0;
-let lives = 3;
 function resetRunState() {
   // Clear both bullet pools so no shots from the previous run linger.
   playerBullets.forEachActive((b, i) => playerBullets.despawn(i));
   aiBullets.forEachActive((b, i) => aiBullets.despawn(i));
   score = 0;
-  lives = 3;
-  ship.reset({ x: 0, y: 0, z: 0 });
+  ship.reset({ x: 0, y: 0, z: 0 }); // also clears energy + buffs + emits energy:changed
   // Wipe the world + entities. The next render-loop tick will
   // re-populate the bubble around the ship's reset position.
   field.clearAll();
@@ -568,7 +490,6 @@ function resetRunState() {
   // Clear lingering explosion particles from the previous run.
   particles.clear();
   bus.emit('score:changed', { score });
-  bus.emit('lives:changed', { lives });
 }
 
 // ---- Player weapon ------------------------------------------------------
@@ -695,24 +616,33 @@ function processCollisions() {
     }
   }
 
-  // ---- Ship ↔ asteroid (PLAYING only) --------------------------------
-  // The player is the only entity that can die (lives system). The
-  // AI has infinite lives and the laser/bullet pool handles its own
-  // cooldown — the AI is never a collision target. We also gate
-  // this on PLAYING because the state transition to GAME_OVER only
-  // makes sense when the player is the one being hit.
+  // ---- Ship ↔ asteroid (PLAYING only) --------------------------------    // v0.11.0: replaces the v0.10.x `lives -= 1` mechanic with
+    // energy-based damage. The hit cost is 25 energy points (the
+    // `ENERGY_DAMAGE` literal — defined inline here as the SINGLE
+    // source of truth on the `refine-coded-ai` branch; no trainer
+    // to lockstep with). The hull buff halves incoming damage
+    // via ship.getDamageMultiplier().
   if (state !== State.PLAYING) return;
   const shipHitIdx = findShipHit({ ship, asteroids });
   if (shipHitIdx >= 0) {
     const a = asteroids[shipHitIdx];
     a.dispose();
     asteroids.splice(shipHitIdx, 1);
-    lives -= 1;
-    bus.emit('lives:changed', { lives });
-    if (lives <= 0) {
+    // Apply ship damage using the player's current damage multiplier
+    // (hull-buff active → 0.5x). The ship emits `energy:changed` on
+    // the bus itself; the HUD's energy bar updates from that event.
+    const dmg = 25 * ship.getDamageMultiplier();
+    const remaining = ship.takeDamage(dmg);
+    if (ship.isDead() || remaining <= 0) {
       stateMachine.transition(State.GAME_OVER, { finalScore: score });
       bus.emit('game:over', { finalScore: score });
+      // Reset the ship so the GAME_OVER overlay shows the player at
+      // a sensible position (the camera continues to follow the
+      // ship; a dead ship at the impact point would render free-fall).
+      ship.reset({ x: 0, y: 0, z: 0 });
     } else {
+      // Survived with energy left — pulse the player back to spawn.
+      // (v0.10.x behavior preserved.)
       ship.reset({ x: 0, y: 0, z: 0 });
     }
   }
@@ -775,17 +705,18 @@ stateMachine.onEnter(State.DEMO, () => setCameraForState(State.DEMO));
 // onEnter only fires on transitions — seed the initial state manually.
 setCameraForState(stateMachine.getState());
 
-// ---- Reset score + lives on DEMO → PLAYING transition ----------------
+// ---- Reset score on DEMO → PLAYING transition -----------------------
 // The AI's demo bullets go to aiBullets (not shared), so there's no
-// pool to clear. But the demo score (accumulated from AI kills in the
-// attract screen) still lives in the `score` variable, so we reset it
-// here for a clean start.
+// pool to clear. The demo score (accumulated from AI kills in the
+// attract screen) lives in the `score` variable, so we reset it
+// here for a clean start. Energy is reset by the same transition via
+// `ship.reset` from input's `onStart` → `resetRunState`. The bus
+// emits `score:changed` for the HUD; the ship's own
+// `energy:changed` event covers the energy HUD update.
 stateMachine.onExit(State.DEMO, () => {
   if (stateMachine.getState() === State.PLAYING) {
     score = 0;
-    lives = 3;
     bus.emit('score:changed', { score });
-    bus.emit('lives:changed', { lives });
   }
 });
 
@@ -990,7 +921,6 @@ function tick(dt) {
   debugHud.update({
     state: stateMachine.getState(),
     score,
-    lives,
     asteroidCount: field.getEntities().length,
     // `getActiveChunks` is the public read-helper for the streaming
     // layer's live-chunk count. We use its length (rather than
@@ -1005,14 +935,14 @@ function tick(dt) {
     // `ship` slot now means "subject" — the entity the camera follows.
     // See the comment above.
     ship: { x: subject.position.x, y: subject.position.y, z: subject.position.z },
-    // AI brain info + the mode the brain actually decided on this
+    // AI brain kind + the mode the brain actually decided on this
     // frame. `getLastMode()` is a closure read (cheap); it returns
     // the cached mode from the AI's most recent update(). When the
     // AI is disabled (outside DEMO) it returns the seed 'wander'
     // from the closure initial value.
-    aiBrain: aiBrainInfo.kind,
-    aiGen: aiBrainInfo.generation,
-    aiFitness: aiBrainInfo.fitness,
+    aiBrain: AI_BRAIN_KIND,
+    aiGen: null,
+    aiFitness: null,
     aiMode: demoAi && typeof demoAi.getLastMode === 'function'
       ? demoAi.getLastMode()
       : null,
@@ -1033,4 +963,4 @@ console.log(
   'color:#97a3c4;',
 );
 console.log('Ship online. WASD/arrows to fly, Space to fire, any key to start.');
-console.log(`State: ${stateMachine.getState()}   Lives: ${lives}   Score: ${score}`);
+console.log(`State: ${stateMachine.getState()}   Energy: ${ship.getEnergy()}   Score: ${score}`);

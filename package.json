@@ -10,9 +10,7 @@
     "preview": "vite preview",
     "test": "node --test tests/",
     "dump:field": "node scripts/dump-field.js",
-    "dump:field:svg": "node scripts/dump-field-svg.js",
-    "train": "node scripts/train-ai.js",
-    "train:server": "node scripts/train-server.js"
+    "dump:field:svg": "node scripts/dump-field-svg.js"
   },
   "dependencies": {
     "three": "^0.160.0"

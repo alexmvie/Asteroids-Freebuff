@@ -346,3 +346,70 @@ World tunables were previously consolidated in `src/world/constants.js`. They ar
 `PLAY_PLANE_Y` is owned by the world data-model layer (`src/world/chunk-constants.js`) — the play plane is a world concept, not a ship concept. The ship imports it from the world layer (cross-layer import, one-way: entities → world, no cycle).
 
 `src/scene/index.js` is a barrel re-export for the scene subdirectory (currently just the camera tunables). Other directory barrels follow the same pattern: `src/geometry/index.js`, `src/systems/index.js`, `src/entities/index.js`, `src/ui/index.js`, `src/world/index.js`.
+
+## 14. AI Training (neuroevolution, v0.8.0)
+
+The AI ship is trained via neuroevolution: a population of small feed-forward neural networks (genomes = flat weight arrays) is evaluated per generation on the same `createTrainingEnvironment` headless physics used by the game, scored by a fitness function, and bred via tournament selection + Gaussian mutation + uniform crossover. See `src/training/` for the 12 modules. The single source of truth for trainer tunables is `src/training/defaults.js` (`TRAINER_DEFAULTS`, frozen).
+
+### Architecture (fixed, baked into every saved genome)
+
+- **Inputs**: 13 (speed, yaw sin/cos, nearest asteroid dx/dz/dist/radius, nearest power-up dx/dz/dist, laser active, velocity vx/vz). The velocity inputs (added v0.7.0) are the key invariant: without them the brain can't distinguish "flying right" from "spinning right" and converges to the "spin in place and shoot" local minimum.
+- **Hidden**: 12 (small but capable; `hiddenSize` is one of the 4–64 the trainer can sweep).
+- **Outputs**: 3 (yaw, thrust, fire), each in `[-1, +1]`, discretized to `{-1, 0, +1}` for yaw and `{true, false}` for thrust/fire. Thresholds: yaw `±0.33` matches the hand-coded AI's discretization.
+
+### Fitness formula (v0.8.0)
+
+```
+fitness = score
+        + survival * survivalReward         (was hardcoded 10 in v0.7.x)
+        + powerups * 100
+        + distance * movementReward
+        - rotation * rotationPenalty        (NEW v0.8.0)
+        + stableFrames * headingStabilityBonus  (NEW v0.8.0)
+```
+
+| Term | Default | Sign | Purpose |
+|---|---|---|---|
+| `score` | (sum) | + | +20/+50/+100 per large/medium/small asteroid destroyed |
+| `survival * survivalReward` | `survivalReward: 3.0` | + | +3.0 per second alive. Was 10 in v0.7.x — lowered so sitting still isn't almost as good as playing |
+| `powerups * 100` | (sum) | + | +100 per laser power-up collected |
+| `distance * movementReward` | `movementReward: 1.0` | + | +1.0 per world unit traveled. Punishes "just spin in place" |
+| `rotation * rotationPenalty` | `rotationPenalty: 2.0` | − | −2.0 per radian of total angular distance. **Breaks the "wiggle and shoot" local minimum** |
+| `stableFrames * headingStabilityBonus` | `headingStabilityBonus: 0.1` | + | +0.1 per frame the brain asks for `yaw=0`. Rewards commit-to-heading |
+
+The rotation penalty math: 60s episode × 2 rad/s sustained wiggle ≈ 120 rad × 2.0 = 240 fitness cost. The stability bonus math: 60s × 60fps × 0.1 = 360 max fitness for perfect straight flight. The two terms are paired — one penalizes rotation, the other rewards not-rotating — so the brain learns ship-like maneuvers (commit to a heading, then thrust; turn deliberately; commit again).
+
+### Ship physics (v0.8.0: yaw inertia)
+
+The legacy trainer (`yawInertiaTau: 0`) set the heading directly: `state.rotation.yaw += yawInput * YAW_SPEED * dt`. The brain could exploit this by oscillating its yaw output near the discretization threshold (output 0.32 → 0 → 0.34 → 1 → 0.32 → ...) for "free" rotation. v0.8.0 adds angular momentum: `state.angularVelocity` is a state variable that ramps toward `yawInput * YAW_SPEED` with a first-order time constant, and the heading is the integral of `angularVelocity`. With `yawInertiaTau: 0.2` the ship takes ~0.2s to start/stop rotating — matching the feel of a real spaceship and making the wiggle strategy useless (the rotation now costs time).
+
+| Param | Default | Effect |
+|---|---|---|
+| `YAW_SPEED` | 4.0 rad/s (from `src/entities/ship-constants.js`) | Target angular velocity when `yawInput` is ±1 |
+| `yawInertiaTau` | 0.2 s | Time constant for the angular-velocity ramp. 0 = legacy snap-to-target, 0.2 = real-ship |
+| `ROLL_DAMP` | 8.0 (from `src/entities/ship-constants.js`) | Visual bank tracks the *command* (not the smoothed velocity) so the ship leans into the turn the moment the brain requests it, even though the heading change lags slightly |
+
+Roll tracks the command (not the smoothed velocity) on purpose — the brain sees its visual bank match its intent, not the lagging physics. The brain still gets penalized for the actual rotation via the `angularAccumulator`.
+
+### Per-episode state (new in v0.8.0)
+
+- `state.angularVelocity` (rad/s) — closure var on the ship, reset every episode. The integral of this is the heading.
+- `angularAccumulator` (radians) — sum of `|dYaw|` per step. Read by the trainer's `rotationPenalty`.
+- `stableFrames` (count) — frames where the brain asked for `yaw=0` (counts the command, not the smoothed velocity). Read by the trainer's `headingStabilityBonus`.
+
+Exposed via `env.getAngularAccumulator()` and `env.getStableFrames()`. All three reset on every `env.reset()` call.
+
+### Migration from a v0.7.x brain
+
+Any genome trained under the v0.7.x formula (survival × 10, no rotation penalty, no stability bonus, no yaw inertia) is **incompatible** with v0.8.0 — the input architecture hasn't changed (so the genome size is still `13*hidden + hidden + hidden*3 + 3`), but the trained weights are optimized for the old fitness landscape and will score poorly under the new one. **Restart from zero is required** when upgrading. The current champion (gen 6872, fitness 32783) was confirmed to be in this state — it collected the power-up but rotated constantly, the classic "wiggle and shoot" local minimum the new params are designed to break.
+
+### Why the changes ship together
+
+The four changes are co-dependent:
+
+- **`survivalReward` lowered** (3.0) makes the "free" passive-reward component of the old formula less dominant.
+- **`rotationPenalty`** directly penalizes the wiggle pattern that was the local minimum under the old formula.
+- **`headingStabilityBonus`** rewards the alternative (commit-to-heading) so the brain has a clear gradient to escape the wiggle.
+- **`yawInertiaTau`** makes the wiggle physically cost time, not just abstract fitness — by the time the brain's yaw command reaches the ship, half a second of "doing nothing useful" has elapsed.
+
+Drop any one of the four and the brain will re-discover a degenerate local minimum that exploits the remaining loophole.

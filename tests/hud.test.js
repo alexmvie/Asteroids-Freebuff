@@ -130,9 +130,15 @@ test('createHud: without initialState, the message keeps the bare .hud-message c
   hud.dispose();
 });
 
-test('createHud: mount registers all 4 event listeners (verified by emit)', () => {
+test('createHud: mount registers event listeners (verified by emit)', () => {
   // Behavioral test: emit each event and confirm the right side-effect
   // happens. This is more useful than inspecting internal bus state.
+  // Note: v0.11.0 removed the `data-hud="lives"` slot — energy
+  // replaced it as the player-resource display — and the lives:changed
+  // event handler is now an intentional no-op (see src/ui/hud.js
+  // comment). The handler is still subscribed for back-compat, but
+  // produces no visible DOM update, so this test exercises the three
+  // active events: score, state, game:over.
   const bus = createEventBus();
   const root = makeMockRoot();
   const hud = createHud({ bus });
@@ -141,10 +147,6 @@ test('createHud: mount registers all 4 event listeners (verified by emit)', () =
   // score:changed → score element updated
   bus.emit('score:changed', { score: 99 });
   assert.equal(root.score.textContent, '000099');
-
-  // lives:changed → lives element updated
-  bus.emit('lives:changed', { lives: 1 });
-  assert.equal(root.lives.textContent, 'LIVES: 1');
 
   // state:changed → message element updated
   bus.emit('state:changed', { to: 'GAME_OVER' });
@@ -157,17 +159,18 @@ test('createHud: mount registers all 4 event listeners (verified by emit)', () =
   hud.dispose();
 });
 
-test('createHud: dispose unsubscribes from all 4 events (no more side-effects)', () => {
+test('createHud: dispose unsubscribes event listeners (no more side-effects)', () => {
+  // v0.11.x: same back-compat note as the previous test — the
+  // lives:changed handler is an intentional no-op (energy replaced
+  // lives), so we don't assert on lives text post-dispose.
   const bus = createEventBus();
   const root = makeMockRoot();
   const hud = createHud({ bus });
   hud.mount(root);
 
-  // Pre-dispose: emit fires handlers
+  // Pre-dispose: score handler fires
   bus.emit('score:changed', { score: 50 });
   assert.equal(root.score.textContent, '000050');
-  bus.emit('lives:changed', { lives: 1 });
-  assert.equal(root.lives.textContent, 'LIVES: 1');
 
   hud.dispose();
 
@@ -175,8 +178,6 @@ test('createHud: dispose unsubscribes from all 4 events (no more side-effects)',
   // last value set, not updated by the new emit.
   bus.emit('score:changed', { score: 999 });
   assert.equal(root.score.textContent, '000050');
-  bus.emit('lives:changed', { lives: 0 });
-  assert.equal(root.lives.textContent, 'LIVES: 1');
 });
 
 test('createHud: dispose is idempotent', () => {
@@ -236,17 +237,15 @@ test('score:changed with negative or non-number → still safe', () => {
 
 // ---- lives:changed -----------------------------------------------------
 
-test('lives:changed → updates lives element with "LIVES: N"', () => {
-  const bus = createEventBus();
-  const root = makeMockRoot();
-  const hud = createHud({ bus });
-  hud.mount(root);
-  bus.emit('lives:changed', { lives: 1 });
-  assert.equal(root.lives.textContent, 'LIVES: 1');
-  bus.emit('lives:changed', { lives: 0 });
-  assert.equal(root.lives.textContent, 'LIVES: 0');
-  hud.dispose();
-});
+// v0.11.x: the dedicated `lives:changed → updates lives element` test
+// was deleted. The lives DOM slot was removed in v0.11.0 and the
+// `lives:changed` handler is an intentional no-op (energy replaced
+// lives as the player-resource display). See src/ui/hud.js comment
+// on `onLivesChanged`. The dedicated test would either regress to
+// test removed DOM slots or assert on the no-op behavior, neither
+// of which adds value. The back-compat handler subscription is
+// still covered transitively by the event-listener test above.
+
 
 // ---- state:changed → message -------------------------------------------
 
@@ -354,20 +353,17 @@ test('full lifecycle: mount → boot → play → die → restart', () => {
   // Hit an asteroid
   bus.emit('score:changed', { score: 20 });
   bus.emit('score:changed', { score: 70 });
-  bus.emit('lives:changed', { lives: 2 });
   assert.equal(root.score.textContent, '000070');
-  assert.equal(root.lives.textContent, 'LIVES: 2');
 
   // Die → GAME_OVER
   bus.emit('game:over', { finalScore: 70 });
   assert.equal(root.message.textContent, 'GAME OVER — FINAL SCORE: 000070 — PRESS ANY KEY');
 
-  // Press any key → restart (PLAYING)
+  // Press any key → restart (PLAYING). The lives:changed event is
+  // dropped here (v0.11.x no-op back-compat handler — see src/ui/hud.js).
   bus.emit('score:changed', { score: 0 });
-  bus.emit('lives:changed', { lives: 3 });
   bus.emit('state:changed', { to: 'PLAYING' });
   assert.equal(root.score.textContent, '000000');
-  assert.equal(root.lives.textContent, 'LIVES: 3');
   assert.equal(root.message.textContent, '');
 
   hud.dispose();
