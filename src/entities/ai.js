@@ -45,6 +45,7 @@
  */
 
 import { createShip } from './ship.js';
+import { YAW_INERTIA_TAU } from './ship-constants.js';
 
 const DEFAULTS = Object.freeze({
   /** Reset the AI ship if it drifts beyond this radius from origin. */
@@ -202,10 +203,21 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
 
 /**
  * Pure: the chase controller. v0.21.x adds a BRAKE branch for true
- * "bremsen, drehen, linear aufsammeln" piloting. The user observed
- * the bot flying in circles around powerups because the v0.20.x
- * engageController had no closing-speed throttle — the ship's
- * forward momentum carried it past the target in wide arcs.
+ * "bremsen, drehen, linear aufsammeln" piloting. v0.22.x adds spin-
+ * brake PREDICTION: the yaw command gates against `predictedDiff =
+ * wrapAngle(targetDiff + aiAngularVel * YAW_INERTIA_TAU)` instead of
+ * `targetDiff` directly. This eliminates the visible wobble that
+ * v0.21.x still produced at the ±0.15 yaw deadband — the ship has
+ * angular momentum (YAW_INERTIA_TAU=0.2s), and raw-diff gating
+ * commands yaw=0 the moment the ship "crosses alignment", but the
+ * residual angular velocity carries it past into the opposite
+ * overshoot, forcing a corrective yaw=±1 on the next tick. By
+ * gating against the predicted diff (where the ship WILL BE if
+ * we stop commanding yaw now), we fire the counter-yaw BEFORE
+ * the ship overshoots — a single decisive turn that settles
+ * dead-center on the target. Math: angular displacement over
+ * infinite horizon = aiAngularVel * YAW_INERTIA_TAU (the integral
+ * of `angVel * exp(-t/τ)` from 0 to ∞).
  *
  * Three branches:
  *
@@ -214,20 +226,18 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
  *   2. BRAKE   — ship has notable XZ speed (>4) AND the projected
  *                closing speed exceeds the desired approach speed.
  *                Rotate to the opposite-of-velocity direction and
- *                thrust backward to shed speed. The thrust deadband
- *                is LOOSE (±0.50) so the dump can fire during the
- *                rotation itself — without this, the ~0.785s yaw
- *                flip at YAW_SPEED=4 would be wasted (no deceleration).
- *                Enabled when `speed > 4` AND `closingSpeed >
- *                desiredClosing`. The speed>4 floor prevents
- *                micro-oscillation at low idle speed.
+ *                thrust backward to shed speed. v0.22.x — yaw gated
+ *                against predictedBrakeDiff (per §above). Thrust
+ *                still raw-diff gated (because thrust direction
+ *                depends on FORWARD-facing vs BRAKE-facing, not on
+ *                overshoot-correction). The speed>4 floor
+ *                prevents micro-oscillation at low idle speed.
  *
- *   3. APPROACH — align with target and thrust. Thrust is gated on
- *                alignment (|targetDiff| < 0.30) AND closing speed
- *                not yet at the desired rate (closingSpeed <
- *                desiredClosing). The combined gate prevents the
- *                "turn AND thrust simultaneously sideways" pattern
- *                — you must commit to a heading before accelerating.
+ *   3. APPROACH — align with target and thrust. v0.22.x — yaw gated
+ *                against predictedDiff (per §above). Thrust kept
+ *                on raw-diff (because thrust is a state, not a
+ *                correction — we want to know CURRENT alignment
+ *                before accelerating forward).
  *
  * The BRAKE → APPROACH transition creates an "emergent coasting"
  * phase: when BRAKE stops firing (closing speed dropped), the ship
@@ -235,26 +245,22 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
  * yaw=±1 with thrust=false (|targetDiff| > 0.30), giving a clean
  * drift-turn with LINEAR_DRAG shedding the remaining speed. Once
  * ±0.30 of the target, thrust engages and the ship closes in
- * linearly. This is exactly the user's "zu bremsen und einfach zu
- * drehen und dann linear aufzusammeln" intent, achieved with no
- * explicit state machine — just deadband physics + the lack of
- * v0.12.x anti-feathering layers that turned this into a wobble.
- *
- * Why no Spin-Brake sub-phase: v0.12.x's spin-brake was added to
- * dampen |aiAngularVelocity|>1.0 oscillations during approach.
- * In v0.21.x the residual overshoot at ±0.15 yaw deadband is well
- * within the YAW_INERTIA_TAU=0.2 angular time-constant (overshoot
- * ≈0.05 rad). The simpler two-branch controller is calmer than the
- * v0.12.x three-branch version once the predictive-DODGE /
- * mode-hysteresis / debouncer confounding layers are gone.
+ * linearly. The v0.22.x spin-brake prediction closes the residual
+ * wobble during this transition — the ship now lands dead-center
+ * after the 180° flip instead of oscillating ±2–3° at the cone
+ * edge.
  *
  * @param {{x:number,z:number}} aiPos
  * @param {number} aiYaw
  * @param {{x:number,z:number}} targetPos
  * @param {{x:number,z:number}} aiVel  ship's current XZ velocity
+ * @param {number} [aiAngularVel=0]  ship's current angular velocity (rad/s).
+ *   Defaults to 0 so 4-arg callsites from earlier v0.21.x tests/usage
+ *   stay back-compat-safe. When 0, predictedDiff == rawDiff and the
+ *   behavior is identical to v0.21.x.
  * @returns {{ dist: number, yaw: number, thrust: boolean, diff: number, closingSpeed: number, branch: 'pickup'|'brake'|'approach' }}
  */
-export function engageController(aiPos, aiYaw, targetPos, aiVel) {
+export function engageController(aiPos, aiYaw, targetPos, aiVel, aiAngularVel = 0) {
   const dx = targetPos.x - aiPos.x;
   const dz = targetPos.z - aiPos.z;
   const dist = Math.hypot(dx, dz);
@@ -286,6 +292,16 @@ export function engageController(aiPos, aiYaw, targetPos, aiVel) {
   // pickup at the cruise cap (no overshoot), applies delta-v exactly.
   const desiredClosing = Math.max(8, Math.min(40, dist));
 
+  // Spin-brake math note: predicting the asymptotic free-drift yaw
+  // change (∫₀^∞ angVel·exp(-t/τ) dt = angVel·τ) OVER-estimates the
+  // actual finite-horizon displacement by ~37% (only ~63% of the
+  // asymptotic drift has occurred after one τ). For the wobble-fix
+  // this is conservative — counter-yaw fires slightly earlier than
+  // strictly needed, which is the correct direction (slight
+  // over-correction is preferable to under-correction; the latter
+  // is the wobble we're eliminating). Don't "fix" the apparent
+  // overshoot by halving the multiplier — that's a different
+  // (worse) heuristic.
   // ---- BRAKE branch: high speed + closing too fast ----
   // Trim-speed before overshooting. Rotate to opposite-velocity
   // direction; thrust backward when facing into the brake
@@ -301,11 +317,26 @@ export function engageController(aiPos, aiYaw, targetPos, aiVel) {
     // faces within 162° of the brake direction, thrust fires; when
     // it's facing within 18° of the TARGET direction, thrust is off
     // (would accelerate forward, opposite of brake).
+    //
+    // v0.22.x — spin-brake prediction. Predict the future angular
+    // position over YAW_INERTIA_TAU (= total displacement if we let
+    // the angular velocity decay naturally with no further input).
+    // Gate yaw command against predictedBrakeDiff, not raw brakeDiff,
+    // so the counter-yaw fires BEFORE the ship overshoots the brake
+    // direction. The result is a single decisive landing on the
+    // brake direction, not an oscillation across it.
+    const predictedBrakeDiff = wrapAngle(brakeDiff + aiAngularVel * YAW_INERTIA_TAU);
     return {
       dist,
-      yaw: brakeDiff > YAW_DEADBAND ? -1 : brakeDiff < -YAW_DEADBAND ? 1 : 0,
+      yaw: predictedBrakeDiff > YAW_DEADBAND ? -1 : predictedBrakeDiff < -YAW_DEADBAND ? 1 : 0,
+      // Thrust uses raw brakeDiff because it gates thrust ON when
+      // facing the brake direction (forward thrust = brake in this
+      // branch). The thrust gate is a STATE check, not a steering
+      // correction — it can't benefit from the spin-brake prediction
+      // because the desired state is "ship is rotated to brake
+      // direction RIGHT NOW", which is the raw diff.
       thrust: Math.abs(brakeDiff) < BRAKE_THRUST_GATE,
-      diff: brakeDiff,
+      diff: brakeDiff, // raw diff for observability + tests
       closingSpeed,
       branch: 'brake',
     };
@@ -314,14 +345,21 @@ export function engageController(aiPos, aiYaw, targetPos, aiVel) {
   // ---- APPROACH branch: align + thrust when in range ----
   const targetAngle = Math.atan2(dz, dx);
   const targetDiff = wrapAngle(targetAngle - facingAngle(aiYaw));
+  // v0.22.x — spin-brake prediction. Same math as BRAKE branch
+  // (see above): predict the future angular position over
+  // YAW_INERTIA_TAU so counter-yaw fires BEFORE the ship overshoots
+  // alignment, settling in a single decisive turn.
+  const predictedDiff = wrapAngle(targetDiff + aiAngularVel * YAW_INERTIA_TAU);
   return {
     dist,
-    yaw: targetDiff > YAW_DEADBAND ? -1 : targetDiff < -YAW_DEADBAND ? 1 : 0,
-    // Thrust only when aligned (within deadband) AND not already
-    // at desired closing speed. The combined gate prevents the
-    // "thrust-sideways-while-turning" pattern that produces slides.
+    yaw: predictedDiff > YAW_DEADBAND ? -1 : predictedDiff < -YAW_DEADBAND ? 1 : 0,
+    // Thrust uses raw targetDiff: thrust forward is a state, not a
+    // steering correction. We thrust when we're CURRENTLY close to
+    // alignment AND closing speed hasn't yet hit desired. The spin-
+    // brake prediction only affects steering; thrust timing stays
+    // coupled to current alignment so we don't thrust-then-overshoot.
     thrust: Math.abs(targetDiff) < APPROACH_THRUST_GATE && closingSpeed < desiredClosing,
-    diff: targetDiff,
+    diff: targetDiff, // raw diff for observability + tests
     closingSpeed,
     branch: 'approach',
   };
@@ -389,6 +427,7 @@ function pickTarget({ aiPos, asteroids, powerupPos, targetDist, powerupBiasU }) 
  * @param {{
  *   aiPos: { x: number, z: number },
  *   aiYaw: number,
+ *   aiAngularVel?: number,
  *   asteroids: Array<{ getPosition: () => any }>,
  *   time: number,
  *   powerupPos?: { x: number, z: number } | null,
@@ -402,6 +441,7 @@ export function aiBrainTick({
   aiPos,
   aiYaw,
   aiVel = { x: 0, z: 0 }, // v0.21.x — required for engageController's BRAKE branch (defaults to zero when omitted).
+  aiAngularVel = 0, // v0.22.x — required for engageController's spin-brake prediction (defaults to zero when omitted = v0.21.x behavior).
   asteroids,
   time, // kept for API parity with prior versions; not used internally anymore
   powerupPos = null,
@@ -447,7 +487,11 @@ export function aiBrainTick({
     powerupBiasU,
   });
   if (target) {
-    const ec = engageController(aiPos, aiYaw, target.pos, aiVel);
+    // v0.22.x — pass aiAngularVel so engageController's spin-brake
+    // prediction can compute the future angular position over
+    // YAW_INERTIA_TAU. Without this, the brain falls back to raw-diff
+    // yaw gating and produces visible wobble at the ±0.15 deadband.
+    const ec = engageController(aiPos, aiYaw, target.pos, aiVel, aiAngularVel);
     let fire = false;
     for (const a of asteroids) {
       if (!a || typeof a.getPosition !== 'function') continue;
@@ -551,6 +595,12 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       // intentional: ship.js' `velocity` includes a 0 Y component
       // and the brain only needs the XZ plane.
       aiVel: { x: ship.velocity.x, z: ship.velocity.z },
+      // v0.22.x — forward the ship's current angular velocity so
+      // the engageController's spin-brake prediction can compute
+      // the future angular position over YAW_INERTIA_TAU. Read
+      // ship.angularVelocity as a getter (ship.js exposes a getter
+      // for live state). Required for the wobble fix in Step 1.
+      aiAngularVel: ship.angularVelocity,
       asteroids,
       powerupPos: getPowerupPos ? getPowerupPos() : null,
       targetDist: opts.targetDist,

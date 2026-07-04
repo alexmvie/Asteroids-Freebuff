@@ -57,6 +57,10 @@ function mockShipFactory() {
     position: { x: 0, y: 0, z: 0 },
     velocity: { x: 0, y: 0, z: 0 },
     rotation: { yaw: 0, pitch: 0, roll: 0 },
+    // v0.22.x — added so the brain's spin-brake prediction can be
+    // tested through createDemoAi. factory.brainArgsFromShip reads
+    // ship.angularVelocity (= state.angularVelocity in the mock).
+    angularVelocity: 0,
   };
   const calls = { setYaw: [], setThrust: [], update: [], reset: [] };
   let scene = null;
@@ -79,8 +83,18 @@ function mockShipFactory() {
           calls.reset.push(p);
           state.position = { ...p };
           state.velocity = { x: 0, z: 0 };
+          state.angularVelocity = 0; // v0.22.x — also clear angular momentum on reset
         },
         rotation: state.rotation,
+        // v0.22.x — expose angularVelocity as a LIVE GETTER (not a
+        // snapshot) so mutations to mock.state.angularVelocity after
+        // build() propagate to createDemoAi's brainArgsFromShip.
+        // Mirrors the live ship.js export which is also a getter:
+        //   get angularVelocity() { return state.angularVelocity; }
+        // A primitive snapshot would silently stay at 0 (the build-
+        // time value) and the factory-wiring test would pass without
+        // actually proving the brain sees angular velocity.
+        get angularVelocity() { return state.angularVelocity; },
       };
     },
     getScene: () => scene,
@@ -710,6 +724,66 @@ test('engageController: BRAKE does not fire at near-zero speed (the speed>4 floo
     'zero/low-speed regime → APPROACH thrust closes the gap');
 });
 
+// ------------------------------------------------------------------
+// v0.22.x — spin-brake PREDICTION (3 regression tests for the
+// wobble-fix). The yaw command gates against `predictedDiff =
+// wrapAngle(targetDiff + aiAngularVel * YAW_INERTIA_TAU)` instead
+// of raw targetDiff. Without this, raw-diff gating causes
+// overshoot + correction oscillation at the ±0.15 deadband (the
+// visible "wobble"). Predicted-diff gating fires the counter-yaw
+// BEFORE the ship overshoots, settling in a single decisive turn.
+// ------------------------------------------------------------------
+
+test('engageController: omitting aiAngularVel → back-compat (v0.21.x behavior)', () => {
+  // Spin-brake is v0.22.x — without an explicit aiAngularVel
+  // argument the engageController should default to 0, producing
+  // the v0.21.x yaw/thrust output verbatim. Two identical calls
+  // (one with aiAngularVel omitted, one with explicit 0) must
+  // produce identical control outputs.
+  const rOmitted = engageController(
+    { x: 0, z: 0 }, -Math.PI / 2, { x: 60, z: 0 }, ZERO_VEL,
+  );
+  const rExplicit = engageController(
+    { x: 0, z: 0 }, -Math.PI / 2, { x: 60, z: 0 }, ZERO_VEL, 0,
+  );
+  assert.equal(rOmitted.yaw, rExplicit.yaw);
+  assert.equal(rOmitted.thrust, rExplicit.thrust);
+  assert.equal(rOmitted.branch, rExplicit.branch);
+});
+
+test('engageController: spin-brake fires COUNTER-yaw at perfect alignment (negative angVel)', () => {
+  // Ship facing east (yaw=-π/2, facingAngle=0), target at east
+  // (targetAngle=0). Raw targetDiff = 0 → raw yaw gate = 0 (within
+  // ±0.15 deadband). But ship has residual angular velocity from a
+  // recent yaw=-1 streak: angVel=-4 (negative = bow rotating into
+  // overshoot). The spin-brake prediction: ship WILL be at
+  // predictedDiff = wrapAngle(0 + (-4)*0.2) = -0.8 in τ seconds
+  // (overshooting). Yaw gate: -0.8 < -0.15 → yaw = +1 (counter-brake
+  // direction). Without spin-brake, the raw yaw=0 would let the
+  // ship drift through alignment and overshoot.
+  const r = engageController(
+    { x: 0, z: 0 }, -Math.PI / 2, { x: 60, z: 0 }, ZERO_VEL, -4,
+  );
+  assert.notEqual(r.yaw, 0,
+    'spin-brake must fire a non-zero yaw even at perfect alignment when angVel is high');
+  assert.equal(r.yaw, 1,
+    'negative angVel at perfect alignment → counter clockwise (yaw=+1) to stop overshoot');
+});
+
+test('engageController: spin-brake fires COUNTER-yaw at perfect alignment (positive angVel)', () => {
+  // Mirror of the test above. Ship facing east (yaw=-π/2, facingAngle=0).
+  // Positive angVel = +4 (yaw rising = bow rotating RIGHT from pilot,
+  // would overshoot south side). predictedDiff = wrapAngle(0 + 4*0.2)
+  // = +0.8 → yaw gate: +0.8 > +0.15 → yaw = -1 (counter-brake).
+  const r = engageController(
+    { x: 0, z: 0 }, -Math.PI / 2, { x: 60, z: 0 }, ZERO_VEL, +4,
+  );
+  assert.notEqual(r.yaw, 0,
+    'spin-brake must fire a non-zero yaw at perfect alignment when angVel is high (other direction)');
+  assert.equal(r.yaw, -1,
+    'positive angVel at perfect alignment → counter clockwise (yaw=-1) to stop overshoot');
+});
+
 // --------------------------------------------------------------------------
 // v0.21.0+ — multi-tick stability: BRAKE → APPROACH transition is clean,
 //              no flicker at boundary, BRAKE fires persistently while
@@ -1022,6 +1096,70 @@ test('createDemoAi: factory threads aiVel (ship.velocity) into brain args', () =
   ai.update(0.1);
   assert.equal(seenAiVel.x, 100, 'factory threads velocity.x into brain.args.aiVel.x');
   assert.equal(seenAiVel.z, 0, 'factory threads velocity.z into brain.args.aiVel.z');
+});
+
+test('createDemoAi: factory threads aiAngularVel (ship.angularVelocity) into brain args', () => {
+  // v0.22.x — spin-brake regression guard. Verify the factory
+  // passes ship.angularVelocity (mocked as a getter) into
+  // brain.args.aiAngularVel. Catches the regression where the mock
+  // would silently snapshot the primitive at build time (=0) and
+  // the spin-brake would never fire in production wiring tests.
+  // The mock now exposes angularVelocity as a getter (mirror of
+  // ship.js export).
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(40, 0)];
+  const mock = mockShipFactory();
+  let seenAiAngularVel = null;
+  const mockBrain = {
+    tick: (args) => {
+      seenAiAngularVel = args.aiAngularVel;
+      return { yaw: 0, thrust: false, mode: 'asteroid', fire: false };
+    },
+  };
+  const ai = createDemoAi({
+    scene,
+    asteroids,
+    options: { shipFactory: mock.build, brain: mockBrain },
+  });
+  // Set mock angularVelocity BEFORE update — factory must read it
+  // through the live getter. If the mock were still a snapshot,
+  // this test would fail (seenAiAngularVel === 0).
+  mock.state.angularVelocity = -3.5;
+  ai.update(0.1);
+  assert.equal(seenAiAngularVel, -3.5,
+    'factory threads ship.angularVelocity (live getter) into brain.args.aiAngularVel');
+});
+
+test('createDemoAi: getMode() also reads ship.angularVelocity live (not snapshot)', () => {
+  // v0.22.x — regression guard for the getMode() path. Both
+  // update() and getMode() call brainArgsFromShip internally to
+  // build the brain's args. Both must read the live ship.angularVelocity
+  // through the getter, otherwise the HUD debug chip would lie about
+  // the brain's spin-brake. Catches a future snapshot regression
+  // that might be introduced independently of the update() path.
+  const scene = mockScene();
+  const mock = mockShipFactory();
+  let seenAiAngularVelViaGetMode = null;
+  const mockBrain = {
+    tick: (args) => {
+      // Capture from getMode() path only — distinguish by also
+      // returning a fake mode so update() can return its own value
+      // unaffected.
+      seenAiAngularVelViaGetMode = args.aiAngularVel;
+      return { yaw: 0, thrust: false, mode: 'idle', fire: false };
+    },
+  };
+  const ai = createDemoAi({
+    scene,
+    asteroids: [mockAsteroid(40, 0)],
+    options: { shipFactory: mock.build, brain: mockBrain },
+  });
+  // Set mock angularVelocity, then call getMode() — must read it.
+  mock.state.angularVelocity = +2.7;
+  seenAiAngularVelViaGetMode = 'not-set'; // reset for getMode() capture
+  ai.getMode();
+  assert.equal(seenAiAngularVelViaGetMode, +2.7,
+    'getMode() reads ship.angularVelocity through the live getter (not a snapshot)');
 });
 
 test('createDemoAi: getMode() in panicDist returns dodge', () => {
