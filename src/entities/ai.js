@@ -108,6 +108,36 @@ const DEFAULTS = Object.freeze({
   fireConeHalfAngle: 0.35,
 
   /**
+   * v0.22.x (Distance-aware Fire) — minimum distance (world units)
+   * at which the ship fires a bullet at an asteroid. Asteroids
+   * below this distance are skipped to avoid (a) close-range
+   * overspraying on bypass passes, (b) wasted shots when the ship
+   * is already in impact range. Combined with `fireMaxDist` this
+   * gives a calm-and-disciplined fire pattern:
+   *   - ship closes inside fireMinDist → no bullet (already in
+   *     impact range, want to maneuver not waste ammo)
+   *   - ship beyond fireMaxDist → no bullet (wide-cone shots miss,
+   *     ammo conservation)
+   * The default 25u is the "sweet spot": not too close, not too
+   * far. The user-reported complaint was "wild ballern" in
+   * approaching targets — v0.21.x fired at any close asteroid
+   * regardless of distance, creating spray arcs on bypass passes.
+   */
+  fireMinDist: 25,
+
+  /**
+   * v0.22.x (Distance-aware Fire) — maximum distance (world units)
+   * at which the ship fires a bullet at an asteroid. Asteroids
+   * beyond this distance are skipped (the wide fire cone at long
+   * range produces mostly-missed shots; better to close in first).
+   * Combined with `fireMinDist` this brackets the bullet's
+   * effective fire window. The default 55u is well within bullet
+   * speed (400 u/s) × reaction time (≈0.5s) so even distant
+   * asteroids give the AI a few frames to close in before firing.
+   */
+  fireMaxDist: 55,
+
+  /**
    * Lookahead horizon (seconds) for predictive collision avoidance.
    * v0.22.x — fires when ANY asteroid projects within
    * `lookaheadMinRadius` of the ship within this window. Default
@@ -555,6 +585,8 @@ export function aiBrainTick({
   powerupBiasU = DEFAULTS.powerupBiasU,
   panicDist = DEFAULTS.panicDist,
   fireConeHalfAngle = DEFAULTS.fireConeHalfAngle,
+  fireMinDist = DEFAULTS.fireMinDist, // v0.22.x — close-range skip for fire check
+  fireMaxDist = DEFAULTS.fireMaxDist, // v0.22.x — far-range skip for fire check
   lookaheadTime = DEFAULTS.lookaheadTime, // v0.22.x — lookahead horizon for predictive dodge
   lookaheadMinRadius = DEFAULTS.lookaheadMinRadius, // v0.22.x — projDist threshold for lookahead dodge
 }) {
@@ -667,6 +699,14 @@ export function aiBrainTick({
       if (!a || typeof a.getPosition !== 'function') continue;
       const p = a.getPosition();
       if (!p) continue;
+      // v0.22.x — distance-gated fire. Skip asteroids outside the
+      // [fireMinDist, fireMaxDist] window to avoid (a) close-range
+      // overspraying on bypass passes AND (b) far-range scattered
+      // wide-cone shots that miss. The "wild ballern" symptom is
+      // gone: the AI fires only at asteroids it can realistically
+      // hit with the current cone alignment.
+      const dist = Math.hypot(p.x - aiPos.x, p.z - aiPos.z);
+      if (dist < fireMinDist || dist > fireMaxDist) continue;
       if (isTargetInFront(aiPos, aiYaw, p, fireConeHalfAngle)) {
         fire = true;
         break;
@@ -777,6 +817,14 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       powerupBiasU: opts.powerupBiasU,
       panicDist: opts.panicDist,
       fireConeHalfAngle: opts.fireConeHalfAngle,
+      // v0.22.x — forward the distance-gated fire opts so aiBrainTick's
+      // bullet-mode fire loop skips asteroids outside [fireMinDist,
+      // fireMaxDist]. Without these the brain falls back to v0.21.x
+      // "wild ballern" behavior (spray at any in-cone asteroid
+      // regardless of distance). The bullet fire is gated; the
+      // chase itself remains unbounded (see Step 3 chained nudge).
+      fireMinDist: opts.fireMinDist,
+      fireMaxDist: opts.fireMaxDist,
       // v0.22.x — forward the lookahead opts so aiBrainTick's
       // LOOKAHEAD-DODGE branch can project the flight path against
       // the asteroid field and break off BEFORE a swarm gets in

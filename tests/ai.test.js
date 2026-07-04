@@ -412,6 +412,118 @@ test('aiBrainTick: no asteroid in cone → fire=false', () => {
   assert.equal(result.fire, false);
 });
 
+// ------------------------------------------------------------------
+// v0.22.x — Distance-aware Fire: bullet-mode fire check is gated on
+// [fireMinDist, fireMaxDist]. Default range [25, 55] gives a calm-
+// and-disciplined fire pattern: no close-range overspraying on
+// bypass passes, no far-range scattered wide-cone shots. Solves the
+// user-reported "wild ballern" symptom.
+// ------------------------------------------------------------------
+
+test('aiBrainTick: distance-aware fire — close range (<fireMinDist) → no fire', () => {
+  // Ship facing -Z, asteroid at 20u straight ahead (in cone). With
+  // default fireMinDist=25, dist=20 is below the close-range skip
+  // → no fire, even though the cone says "yes".
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0, // facing -Z (matches `mockAsteroid(0, -N)` direction)
+    aiVel: ZERO_VEL,
+    asteroids: [mockAsteroid(0, -20)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'asteroid',
+    '20u < targetDist=Infinity → still ENGAGE mode');
+  assert.equal(result.fire, false,
+    '20u < default fireMinDist=25 → close-range skip → no fire');
+});
+
+test('aiBrainTick: distance-aware fire — far range (>fireMaxDist) → no fire', () => {
+  // Ship facing -Z, asteroid at 80u straight ahead. dist=80 >
+  // default fireMaxDist=55 → no fire, even though in cone.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    aiVel: ZERO_VEL,
+    asteroids: [mockAsteroid(0, -80)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.fire, false,
+    '80u > default fireMaxDist=55 → far-range skip → no fire');
+});
+
+test('aiBrainTick: distance-aware fire — sweet spot → fire', () => {
+  // Ship facing -Z, asteroid at 40u straight ahead. 40 ∈ [25, 55]
+  // → fires. The 40u distance is the canonical sweet spot.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    aiVel: ZERO_VEL,
+    asteroids: [mockAsteroid(0, -40)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.fire, true,
+    '40u ∈ [25,55] → in range + in cone → fire=true');
+});
+
+test('aiBrainTick: distance-aware fire — default range pin (regression guard for v0.22.x)', () => {
+  // Behavioral pin for fireMinDist=25 + fireMaxDist=55 defaults.
+  // Any future re-tuning of these DEFAULTS breaks this test, which
+  // is intended — the user explicitly approved the [25, 55] range
+  // and we'd rather flag a deliberate change than silently ship a
+  // different range.
+  //   - 24u (just below fireMinDist): MUST NOT fire.
+  //   - 56u (just above fireMaxDist): MUST NOT fire.
+  //   - 25u exactly (=fireMinDist): MUST fire (the check is
+  //     `dist < fireMinDist`, not `<=`).
+  //   - 55u exactly (=fireMaxDist): MUST fire (the check is
+  //     `dist > fireMaxDist`, not `>=`).
+  const make = (z) => aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    aiVel: ZERO_VEL,
+    asteroids: [mockAsteroid(0, -z)],
+    time: 0,
+  });
+  assert.equal(make(24).fire, false,
+    '24u just below fireMinDist=25 → no fire');
+  assert.equal(make(25).fire, true,
+    '25u == fireMinDist boundary → fires (dist < check, not <=)');
+  assert.equal(make(40).fire, true,
+    '40u in sweet spot → fires');
+  assert.equal(make(55).fire, true,
+    '55u == fireMaxDist boundary → fires (dist > check, not >=)');
+  assert.equal(make(56).fire, false,
+    '56u just above fireMaxDist=55 → no fire');
+});
+
+test('aiBrainTick: chase continues past fireMaxDist (fire is gated, chase is not)', () => {
+  // v0.22.x — chase-vs-fire distinction. The bot ENGAGES asteroids
+  // far outside the fire range and continues closing the gap; only
+  // the FIRE decision is gated by [fireMinDist, fireMaxDist].
+  // Asteroid at 200u straight ahead — way beyond fireMaxDist=55.
+  // Expected: mode='asteroid' (chase continues), thrust drives
+  // ship forward, but fire=false (distance gate trips).
+  // Without the chase-vs-fire pin, a future "optimization" that
+  // conflates chase-target and fire-target could lazily drop
+  // long-range asteroids, silently degrading the bot's intercept
+  // accuracy.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0, // facing -Z (toward asteroid)
+    aiVel: ZERO_VEL,
+    asteroids: [mockAsteroid(0, -200)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'asteroid',
+    '200u < targetDist=Infinity → still ENGAGE (chase continues)');
+  assert.equal(result.thrust, true,
+    'aligned with target → thrust engaged (closing the gap)');
+  assert.equal(result.fire, false,
+    '200u > fireMaxDist=55 → fire-gate skips (distance-aware fire)');
+});
+
 test('aiBrainTick: panicDist default pins at 6u (regression: 5u → dodge, 7u → engage)', () => {
   // Pin the default value of panicDist behaviorally, so an accidental
   // flip in ai.js (e.g. panicDist: 6 → 10) is caught here. Without
@@ -1413,6 +1525,41 @@ test('createDemoAi: does NOT fire weapon in IDLE mode', () => {
   });
   ai.update(0.1);
   assert.equal(weaponCalls.length, 0);
+});
+
+test('createDemoAi: factory threads fireMinDist + fireMaxDist into brain args', () => {
+  // v0.22.x — Step 3 wiring. Verify the factory passes the
+  // distance-gate opts from `options` into brain args. Without this
+  // thread, the production brain would silently use DEFAULTS
+  // [25, 55] regardless of the trainer's or test's request, and
+  // the close/far-range skips would be unchangeable.
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(0, -40)];
+  const mock = mockShipFactory();
+  let seenFireMinDist = null;
+  let seenFireMaxDist = null;
+  const mockBrain = {
+    tick: (args) => {
+      seenFireMinDist = args.fireMinDist;
+      seenFireMaxDist = args.fireMaxDist;
+      return { yaw: 0, thrust: false, mode: 'asteroid', fire: false };
+    },
+  };
+  const ai = createDemoAi({
+    scene,
+    asteroids,
+    options: {
+      shipFactory: mock.build,
+      brain: mockBrain,
+      fireMinDist: 12,
+      fireMaxDist: 80,
+    },
+  });
+  ai.update(0.1);
+  assert.equal(seenFireMinDist, 12,
+    'factory threads options.fireMinDist into brain.args.fireMinDist');
+  assert.equal(seenFireMaxDist, 80,
+    'factory threads options.fireMaxDist into brain.args.fireMaxDist');
 });
 
 test('createDemoAi: factory threads lookaheadTime + lookaheadMinRadius into brain args', () => {
