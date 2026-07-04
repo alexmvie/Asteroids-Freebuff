@@ -200,6 +200,19 @@ const DEFAULTS = Object.freeze({
    * matters. Set to 0 to disable; uses current position only.
    */
   interceptLookaheadS: 0.5,
+  /**
+   * v0.16.x -- nominal bullet speed (units/sec) for dynamic bullet-flight-time
+   * lead. The TARGET and HUNT lead-fire loops compute
+   * `fireLeadS = Math.min(dist / bulletSpeed, interceptLookaheadS)` per-target
+   * so the predicted point matches the bullet's actual flight time, NOT a
+   * fixed human-reaction lag. With the production `BULLET_SPEED = 400 u/s`,
+   * the flight time collapses to ~0.1s for 40u targets, ~0.225s for 90u
+   * targets, etc. The fixed `interceptLookaheadS` remains as the cognitive
+   * cap (a pilot won't project farther than ~0.5s of intent regardless of
+   * physics). Set to 0 to disable dynamic lead -- the brain falls back to
+   * the fixed `interceptLookaheadS` everywhere (legacy v0.14.x/v0.15.x).
+   */
+  bulletSpeed: 400,
 });
 
 /**
@@ -581,6 +594,7 @@ export function aiBrainTick({
   gapAwareDist = DEFAULTS.gapAwareDist,
   coastInDist = DEFAULTS.coastInDist,
   interceptLookaheadS = DEFAULTS.interceptLookaheadS,
+  bulletSpeed = DEFAULTS.bulletSpeed,
   rng = Math.random,
 }) {
   if (!aiPos) throw new Error('aiBrainTick: aiPos is required');
@@ -633,7 +647,21 @@ export function aiBrainTick({
     let targetPos = chase.pos;
     if (chase.mode === 'target') {
       const vel = lookupAsteroidVel(nearest && nearest.asteroid);
-      targetPos = predictPosition(chase.pos, vel, interceptLookaheadS) || chase.pos;
+      // v0.16.x -- dynamic bullet-flight-time lead. We aim at where
+      // the asteroid WILL BE when the bullet arrives, not at where
+      // it will be in `interceptLookaheadS` seconds. Bullet flight
+      // time for the current gap = dist / bulletSpeed (e.g. 90u TARGET
+      // range = 0.225s, 14u DODGE range = 0.035s). The cap on
+      // `interceptLookaheadS` remains so that very long chases don't
+      // project farther than the brain's comfort zone.
+      const distToTarget = Math.hypot(
+        chase.pos.x - aiPos.x,
+        chase.pos.z - aiPos.z,
+      );
+      const leadS = bulletSpeed > 0
+        ? Math.min(distToTarget / bulletSpeed, interceptLookaheadS)
+        : interceptLookaheadS;
+      targetPos = predictPosition(chase.pos, vel, leadS) || chase.pos;
     }
     // v0.12.x -- pass aiAngularVelocity for INTERCEPT's spin-brake
     // sub-phase. Without this the ship oscillates across the steering
@@ -657,12 +685,29 @@ export function aiBrainTick({
       // steering toward. The contract becomes "lead when the lead
       // aligns": both steer and fire converge on the future point.
       // Walks the asteroid list and breaks on first match — O(n) cheap.
+      //
+      // v0.16.x -- per-asteroid BULLET-FLIGHT-TIME lead. Instead of
+      // a uniform `interceptLookaheadS` (= 0.5s default), each
+      // asteroid's prediction is scaled to ITS distance:
+      // `flightTime = dist / bulletSpeed`, capped at
+      // `interceptLookaheadS` for cognitive comfort. Close rocks
+      // (5u away, 400 u/s bullet) get ~12ms of lead; far ones
+      // (90u away) get ~225ms. Without this, the uniform 0.5s lead
+      // overshoots close targets (bullets arrive in ~12ms, not 500ms)
+      // and undershoots distant ones (bullets arrive in 225ms+, fired
+      // as if the lead needs 500ms). The cap is still the cognitive
+      // comfort ceiling — the pilot won't commit to a lead beyond
+      // their forward-prediction horizon regardless of physics.
       for (const a of asteroids) {
         if (!a || typeof a.getPosition !== 'function') continue;
         const p = a.getPosition();
         if (!p) continue;
         const aVel = lookupAsteroidVel(a);
-        const aPredicted = predictPosition(p, aVel, interceptLookaheadS) || p;
+        const aDist = Math.hypot(p.x - aiPos.x, p.z - aiPos.z);
+        const aLeadS = bulletSpeed > 0
+          ? Math.min(aDist / bulletSpeed, interceptLookaheadS)
+          : interceptLookaheadS;
+        const aPredicted = predictPosition(p, aVel, aLeadS) || p;
         if (isTargetInFront(aiPos, aiYaw, aPredicted, fireConeHalfAngle)) {
           fire = true;
           break;
@@ -852,6 +897,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       gapAwareDist: opts.gapAwareDist,
       coastInDist: opts.coastInDist,
       interceptLookaheadS: opts.interceptLookaheadS,
+      bulletSpeed: opts.bulletSpeed,
       wanderHeading,
       wanderHeadingExpiresAt,
       rng,
@@ -879,6 +925,9 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
 
   /** Used by getMode() -- returns the LIVE brain args (not delayed). */
   function brainArgsFromShip() {
+    // v0.16.x: forward interceptLookaheadS + bulletSpeed too so the
+    // displayed mode reflects the same dynamic-lead contract the
+    // production brain call uses (was missing these two before).
     return {
       aiPos: ship.position,
       aiYaw: ship.rotation.yaw,
@@ -892,6 +941,8 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       wanderTurnPeriod: opts.wanderTurnPeriod,
       fireConeHalfAngle: opts.fireConeHalfAngle,
       powerupHuntDist: opts.powerupHuntDist,
+      interceptLookaheadS: opts.interceptLookaheadS,
+      bulletSpeed: opts.bulletSpeed,
       wanderHeading,
       wanderHeadingExpiresAt,
       rng,

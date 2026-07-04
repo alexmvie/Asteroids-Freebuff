@@ -640,16 +640,24 @@ test('lead-fire TARGET: predicted point in cone → fire=true (lead matches stee
 
 test('lead-fire TARGET: predicted point OUT of cone → fire=false (current-only check would fire)', () => {
   // Ship at origin facing +X. Asteroid at (40, 0) drifting strongly
-  // perpendicular to facing (+Z). Current atan2(0, 40) = 0 (in cone),
-  // but predicted (40, 0 + 100*0.5) = (40, 50) at angle atan2(50, 40)
-  // ≈ 0.896 rad ≈ 51° — OUT of cone (half-angle 0.35). Lead-fire
-  // contract says fire=false (predicted out of cone); the previous
-  // current-only check would have fired true.
+  // perpendicular to facing (+Z) at v=(0, 200).
+  //
+  // v0.15.x contract: predicted for uniform lookahead=0.5s =
+  // (40, 100) at angle atan2(100, 40) ≈ 1.19 rad ≈ 68° — OUT of cone.
+  //
+  // v0.16.x contract: bullet-flight-time lead = 40 / 400 = 0.1s →
+  // predicted (40, 20) at angle atan2(20, 40) ≈ 0.46 rad ≈ 26°
+  // (still OUT of cone, half-angle 0.35 ~ 20°). The test fixture's
+  // velocity was raised v0.15.x(0, 100) → v0.16.x(0, 200) so the
+  // asteroid's drift over the dynamic lead window still exceeds
+  // the cone half-angle. Without the bump, the new dynamic lead
+  // would put the predicted point IN cone (pred (40,10), ~14°)
+  // and fire would flip to true.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
     aiVel: { x: 0, z: 0 },
-    asteroids: [mockAsteroid(40, 0, 0, 100)],
+    asteroids: [mockAsteroid(40, 0, 0, 200)],
     time: 0,
     dodgeDist: 0,
     targetDist: 90,
@@ -739,7 +747,7 @@ test('brain: asteroid without getVelocity() falls through to current position (n
   assert.equal(typeof result.yaw, 'number');
 });
 
-test('factory: passes interceptLookaheadS from opts into brain args (smoke)', () => {
+test('factory: passes interceptLookaheadS + bulletSpeed from opts into brain args (smoke)', () => {
   const scene = mockScene();
   const mock = mockShipFactory();
   let seenArgs = null;
@@ -756,10 +764,136 @@ test('factory: passes interceptLookaheadS from opts into brain args (smoke)', ()
       shipFactory: mock.build,
       brain: mockBrain,
       reactionLatencyS: 0,  // disable latency for deterministic args
-      interceptLookaheadS: 0.75,  // custom value, ~median between 0 and 1
+      interceptLookaheadS: 0.75,  // custom cap, ~median between 0 and 1
+      bulletSpeed: 250,            // custom speed for dynamic-lead math
     },
   });
   ai.update(0.05); // small tick to keep observation buffer minimal
   assert.equal(seenArgs.interceptLookaheadS, 0.75,
     'factory forwards interceptLookaheadS into brain call args');
+  assert.equal(seenArgs.bulletSpeed, 250,
+    'factory forwards bulletSpeed into brain call args (v0.16.x contract)');
+});
+
+// ==========================================================================
+// 7. v0.16.x -- DYNAMIC BULLET-FLIGHT-TIME LEAD
+// ==========================================================================
+// The v0.14.x/v0.15.x lead used a uniform `interceptLookaheadS` = 0.5s for
+// ALL asteroids regardless of distance. Close rocks were over-shot (the
+// bullet arrived in ~12ms but the brain aimed at where it'd be in 500ms);
+// far ones were under-shot (the bullet needed 225ms+ but was fired as if
+// 500ms were enough lead). v0.16.x applies per-target bullet flight time:
+// `leadS = Math.min(dist / bulletSpeed, interceptLookaheadS)`. The cap
+// remains as the cognitive ceiling (a pilot won't commit beyond ~0.5s of
+// forward-prediction horizon regardless of physics).
+
+test('v0.16.x TARGET: close fast-drifting rock -- dynamic lead puts it in cone where fixed lead would miss', () => {
+  // Ship at origin facing +X (yaw=-PI/2 → facingAngle=0). Asteroid at
+  // (20, 0) drifting strongly perpendicular at v=(0, 80). Without the
+  // dynamic lead (i.e. the v0.14.x/15.x fixed cap=0.5s), predicted
+  // point = (20, 80*0.5) = (20, 40) at angle atan2(40, 20) ≈ 63° OUT
+  // of the 20° cone (0.35 rad) → fire=false. With v0.16.x dynamic
+  // lead = bulletSpeed=400 u/s × flightTime = 20/400 = 0.05s:
+  // predicted = (20, 4) at angle atan2(4, 20) ≈ 11° IN cone → fire=true.
+  //
+  // This pins the direction-of-improvement: the brain now FIRES on a
+  // close fast-drifting target it would have missed under the old
+  // uniform-cap contract. Eye-visible in live play on the production
+  // 5u/s asteroid drift at close range, and forward-compatible with
+  // Elite-class 5+u/s enemy drift.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(20, 0, 0, 80)],
+    time: 0,
+    dodgeDist: 0,  // disable DODGE so TARGET fires
+    targetDist: 90,
+    fireConeHalfAngle: 0.35,
+    // bulletSpeed + interceptLookaheadS use DEFAULTS (400, 0.5).
+  });
+  assert.equal(result.mode, 'target');
+  assert.equal(result.fire, true,
+    'dynamic lead recovers the close fast-drift shot the fixed cap missed');
+});
+
+test('v0.16.x TARGET: long-range target with flightTime == cap -- cap and physics agree', () => {
+  // Edge-case: an asteroid whose flightTime equals the cap (200u away
+  // at 400 u/s = 0.5s, exactly the default cap). The bullet and the
+  // cognitive cap give the SAME lead, so the brain shouldn't over- or
+  // under-aim compared to the fixed-lookahead branch at the same
+  // distance. Asteroid at (200, 0) drifting at v=(0, 100). Predicted =
+  // (200, 50) at angle atan2(50, 200) ≈ 14° IN cone (0.35) → fire=true.
+  // Regression guard against the min() branch going the wrong direction.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(200, 0, 0, 100)],
+    time: 0,
+    dodgeDist: 0,
+    targetDist: 250,                      // override to include 200u
+    fireConeHalfAngle: 0.35,
+  });
+  assert.equal(result.mode, 'target');
+  assert.equal(result.fire, true,
+    'long-range shot at cap == flightTime: dynamic + fixed give same lead');
+});
+
+test('v0.16.x: bulletSpeed=0 disables dynamic lead, falls back to fixed interceptLookaheadS', () => {
+  // Same close-asteroid fixture as the first test but bulletSpeed=0.
+  // The dynamic branch is short-circuited (false because bulletSpeed
+  // is not > 0), so we fall through to fixed interceptLookaheadS=0.5.
+  // With velocity (0, 1000) the fixed cap puts predicted = (20, 500)
+  // at angle ~88° -- OUT of the 0.35 cone → fire=false. This pins:
+  // (1) the bulletSpeed>0 guard is honored, and (2) disabling the
+  // dynamic lead produces the v0.14.x/15.x-same fixed-cap contract
+  // (a "legacy mode" for tests / debugging / Elite expansions where
+  // bullet speed stops being meaningful, e.g. hitscan weapons).
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(20, 0, 0, 1000)],
+    time: 0,
+    dodgeDist: 0,
+    targetDist: 90,
+    fireConeHalfAngle: 0.35,
+    bulletSpeed: 0,                       // disabled
+    interceptLookaheadS: 0.5,
+  });
+  assert.equal(result.mode, 'target');
+  assert.equal(result.fire, false,
+    'bulletSpeed=0 disables dynamic lead; fixed cap predicts out-of-cone');
+});
+
+test('v0.16.x HUNT: per-asteroid dynamic lead applies in the HUNT loop (close shot recovered)', () => {
+  // HUNT-mode lead-fire is per-asteroid, NOT just for the chased
+  // power-up. v0.16.x extends the per-asteroid branch with the same
+  // dynamic lead as TARGET. Setup: powerup at (60, 0), ship at origin
+  // facing +X (yaw=-PI/2 → facingAngle=0). Asteroid at (20, 0) drifting
+  // strongly perpendicular at v=(0, 80).
+  //
+  // Without dynamic lead (fixed cap=0.5s): predicted = (20, 40) at
+  // angle ~63° OUT of cone. The OLD v0.15.x HUNT loop would reject
+  // this asteroid (fire=false). With v0.16.x dynamic lead (0.05s):
+  // predicted = (20, 4) at angle ~11° IN cone. The NEW loop fires.
+  //
+  // Pins: the HUNT branch is no worse (in fact, better) than the
+  // TARGET branch on the same distant asteroid; the brain fires on
+  // close fast-drifting rocks during a power-up chase too.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(20, 0, 0, 80)],
+    time: 0,
+    dodgeDist: 14,
+    targetDist: 90,
+    fireConeHalfAngle: 0.35,
+    powerupPos: { x: 60, z: 0 },           // powerup closer = HUNT mode
+  });
+  assert.equal(result.mode, 'hunt');
+  assert.equal(result.fire, true,
+    'HUNT per-asteroid dynamic lead fires on close fast-drift shot the fixed lead missed');
 });
