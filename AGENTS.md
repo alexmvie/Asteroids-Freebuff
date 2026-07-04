@@ -40,7 +40,7 @@ These rules are set by the project owner and are **standing** — they apply to 
 
 ### Rule 6: Don't surprise the user
 - Do not modify files the user did not implicitly ask you to modify.
-- On the `refine-coded-ai` branch, effectful shell commands (commit, push, install local tools) are sanctioned WITHOUT explicit approval. **Push is automated** -- `.githooks/post-commit` runs `git push` after every commit, so the user never has to type `git push` manually. (Standing rule updated 2026-07-04 at the user's explicit request: unattended pushes on `refine-coded-ai` are sanctioned.)
+- On the `refine-coded-ai` branch, **unattended `git push` IS SANCTIONED** -- `.githooks/post-commit` runs `git push` after every commit, so you never have to type `git push` manually. Other commands (commit, `npm install`, `pip install --user`, `./scripts/install-hooks.sh`) are also fine without explicit approval. (Standing rule updated 2026-07-04 at the user's explicit request: push is auto on `refine-coded-ai`.)
 - If you need to make a significant change beyond the user's clear ask, **ask first**.
 
 ---

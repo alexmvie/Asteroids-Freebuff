@@ -2,7 +2,10 @@
 """Auto-push on commit. Standing rule: sanctioned on refine-coded-ai (AGENTS.md Rule 6).
 
 Skip detached HEAD -- `git push` would fail opaquely with no upstream tracking.
+Skip during `git rebase` -- replayed commits are non-FF against origin after
+the first push lands; user runs a single `git push --force-with-lease` at rebase end.
 """
+import os
 import subprocess
 import sys
 
@@ -12,6 +15,13 @@ if subprocess.run(
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,
 ).returncode:
+    sys.exit(0)
+
+# Bail during rebase (interactive or otherwise) -- each replayed commit fires
+# this hook, and after the first push lands on origin the subsequent replays
+# are non-fast-forward and `git push` would reject. The user instead runs a
+# single `git push --force-with-lease` after `git rebase` completes.
+if os.environ.get('GIT_REBASE_REFLOG_ACTION'):
     sys.exit(0)
 
 try:
