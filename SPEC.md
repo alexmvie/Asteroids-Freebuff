@@ -497,7 +497,7 @@ Standing rule updated 2026-07-04 (after §16's Vite `define` shipped) at the use
 
 ### Mechanics
 
-- **`.githooks/post-commit`** (Python3, ~30 lines incl. comments): single responsibility -- `git push`. Additive operation (pushes any upstream-missing commits + the current HEAD; idempotent on the receiving side). Zero recursion risk because `git push` to a remote never re-fires the source-side post-commit hook -- only the receiving-side hooks fire, and there are none on origin. **No marker file required.**
+- **`.githooks/post-commit`** (Python3, ~15 lines incl. docstring + comments): single responsibility -- `git push`. Additive operation (pushes any upstream-missing commits + the current HEAD; idempotent on the receiving side). Zero recursion risk because `git push` to a remote never re-fires the source-side post-commit hook -- only the receiving-side hooks fire, and there are none on origin. **No marker file required.**
 - **Not involved in build identity**: VERSION/BRANCH/COMMIT resolution is Vite `define`'s job at config-load (§16). The hook's only concern is the `git push` step.
 - **Install** (one-time per fresh clone): `git config core.hooksPath .githooks` (project-local). Convenience wrapper: `./scripts/install-hooks.sh`.
 
