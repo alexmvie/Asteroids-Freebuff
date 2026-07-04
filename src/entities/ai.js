@@ -106,6 +106,33 @@ const DEFAULTS = Object.freeze({
    * default from v0.11.x.
    */
   fireConeHalfAngle: 0.35,
+
+  /**
+   * Lookahead horizon (seconds) for predictive collision avoidance.
+   * v0.22.x — fires when ANY asteroid projects within
+   * `lookaheadMinRadius` of the ship within this window. Default
+   * 3.5s gives the bot a ~3.5s warning before entering a cluster —
+   * enough to thrust-perpendicular and step off the flight path.
+   *
+   * User-feedback rationale: at v0.21.x the bot would fly
+   * straight INTO asteroid swarms and get torn apart by the
+   * split pieces. PANIC-DODGE only triggers at 6u (already too
+   * late — ship is inside the cluster). Lookahead gives the bot
+   * the STRATEGIC decision to break off BEFORE the cluster is
+   * in panic range.
+   */
+  lookaheadTime: 3.5,
+
+  /**
+   * Lookahead miss-distance threshold (world units). The lookahead-
+   * dodge branch fires when an asteroid projects within this radius
+   * of the ship within `lookaheadTime` seconds. Default 6.0u gives
+   * a generous clearing margin — ship will thrust-perpendicular to
+   * avoid having a planet-size rock drift past its wing. Should be
+   * larger than `panicDist` (the reflexive inner shell) so the two
+   * shells don't overlap (avoidance-then-panic-touch).
+   */
+  lookaheadMinRadius: 6.0,
 });
 
 // --------------------------------------------------------------------------
@@ -178,6 +205,85 @@ export function findNearestAsteroid(pos, asteroids) {
     }
   }
   return best;
+}
+
+/**
+ * Pure kinematic helper: compute the time and distance at which the
+ * ship at `aiPos` moving with velocity `aiVel` would be CLOSEST to a
+ * static point at `targetPos` (XZ-plane). For the v0.22.x LOOKAHEAD-
+ * DODGE branch: asteroids in this codebase have <0.5u/s ambient drift
+ * (per MAX_ASTEROID_DRIFT in src/world/chunk-constants.js), so
+ * treating them as static is a good approximation at MVP scale.
+ *
+ * Returns `{ tStar, projDist, valid }`:
+ *   - `tStar`     — seconds. Positive = future closest approach.
+ *                   Negative = target already past (currently moving
+ *                   away from ship, no future threat).
+ *                   Infinity = no relative motion (ship is stationary;
+ *                   the closest distance is the current distance, no
+ *                   time component).
+ *   - `projDist`  — world units. Closest projected distance at t*;
+ *                   falls back to current distance when tStar is
+ *                   negative or infinite.
+ *   - `valid`     — false when any input was malformed.
+ *
+ * Math (target static → relative velocity = -aiVel):
+ *   relPos0  = targetPos - aiPos      (vector from ship to target, t=0)
+ *   relVel   = -aiVel                 (target stays put; ship moves)
+ *   tStar    = -(relPos0 · relVel) / ||relVel||²
+ *            = (relPos0 · aiVel) / ||aiVel||²
+ *   projDist² = ||relPos0||² - (relPos0 · relVel)² / ||relVel||²
+ *
+ * Edge cases:
+ *   - aiVel is zero (stationary ship): tStar returns Infinity,
+ *     projDist returns current distance. The LOOKAHEAD-DODGE branch
+ *     treats this as "no trajectory threat, fall through to PANIC".
+ *   - tStar < 0: target is already receding relative to ship motion;
+ *     return tStar unchanged + current distance. Brain treats this
+ *     as "safe, no threat".
+ *
+ * Used by the v0.22.x aiBrainTick LOOKAHEAD-DODGE branch to project
+ * "if I keep flying this heading, will any asteroid pass within
+ * lookaheadMinRadius of me inside lookaheadTime?" — if yes, thrust
+ * perpendicular to escape the trajectory. Solves the v0.21.x
+ * "flies straight into asteroid swarms" complaint.
+ *
+ * @param {{x:number,z:number}} aiPos
+ * @param {{x:number,z:number}} aiVel
+ * @param {{x:number,z:number}} targetPos
+ * @returns {{ tStar: number, projDist: number, valid: boolean }}
+ */
+export function computeClosestApproachTime(aiPos, aiVel, targetPos) {
+  if (!aiPos || typeof aiPos.x !== 'number') {
+    return { tStar: Infinity, projDist: Infinity, valid: false };
+  }
+  if (!targetPos || typeof targetPos.x !== 'number') {
+    return { tStar: Infinity, projDist: Infinity, valid: false };
+  }
+  if (!aiVel || typeof aiVel.x !== 'number') {
+    return { tStar: Infinity, projDist: Infinity, valid: false };
+  }
+  const rx = targetPos.x - aiPos.x;
+  const rz = targetPos.z - aiPos.z;
+  const vx = -aiVel.x;
+  const vz = -aiVel.z;
+  const vMagSq = vx * vx + vz * vz;
+  // No relative motion: ship is stationary. Closest distance is
+  // current distance; tStar is meaningless (Infinity).
+  if (vMagSq < 1e-6) {
+    return { tStar: Infinity, projDist: Math.hypot(rx, rz), valid: true };
+  }
+  const tStar = -(rx * vx + rz * vz) / vMagSq;
+  // Target currently moving away → no future trajectory threat.
+  if (tStar < 0) {
+    return { tStar, projDist: Math.hypot(rx, rz), valid: true };
+  }
+  // projDist² = ||relPos||² - (relPos · relVel)² / ||relVel||²
+  const rMagSq = rx * rx + rz * rz;
+  const rDotV = rx * vx + rz * vz;
+  const projDistSq = rMagSq - (rDotV * rDotV) / vMagSq;
+  const projDist = Math.sqrt(Math.max(0, projDistSq));
+  return { tStar, projDist, valid: true };
 }
 
 /**
@@ -449,6 +555,8 @@ export function aiBrainTick({
   powerupBiasU = DEFAULTS.powerupBiasU,
   panicDist = DEFAULTS.panicDist,
   fireConeHalfAngle = DEFAULTS.fireConeHalfAngle,
+  lookaheadTime = DEFAULTS.lookaheadTime, // v0.22.x — lookahead horizon for predictive dodge
+  lookaheadMinRadius = DEFAULTS.lookaheadMinRadius, // v0.22.x — projDist threshold for lookahead dodge
 }) {
   if (!aiPos) throw new Error('aiBrainTick: aiPos is required');
   if (typeof aiYaw !== 'number') throw new Error('aiBrainTick: aiYaw must be a number');
@@ -473,6 +581,68 @@ export function aiBrainTick({
       mode: 'dodge',
       fire: false,
     };
+  }
+
+  // ---- 1b. LOOKAHEAD-DODGE (predictive, v0.22.x) ----------------------
+  // STRATEGIC break off the flight path BEFORE the swarm is in panic
+  // range. Iterates every asteroid, projects the ship's current
+  // trajectory against each via computeClosestApproachTime, and
+  // triggers a perpendicular escape when ANY asteroid projects
+  // within `lookaheadMinRadius` inside `lookaheadTime`. Sits between
+  // PANIC-DODGE and ENGAGE — far-horizon avoidance → close-horizon
+  // reflex → chase. The escape direction is perpendicular to the
+  // ship's CURRENT XZ velocity (not the threat position), so the
+  // bot steps off its own flight path rather than weaving around a
+  // single asteroid.
+  //
+  // Edge cases handled (each fails-open to other branches):
+  //   - asteroids.length === 0          → fall through to ENGAGE / IDLE
+  //   - lookaheadTime <= 0              → skip the branch entirely
+  //     (e.g., tests disabling predictive avoidance)
+  //   - ship velocity ≈ 0               → escape perpendicular to the
+  //     THREAT position (same math as PANIC but at lookahead horizon)
+  //   - tStar < 0 (target receding)     → safe, no threat from this
+  //     asteroid, continue iteration
+  //   - projDist > lookaheadMinRadius   → comfortable miss, continue
+  if (asteroids.length > 0 && lookaheadTime > 0) {
+    for (const a of asteroids) {
+      if (!a || typeof a.getPosition !== 'function') continue;
+      const p = a.getPosition();
+      if (!p) continue;
+      const ca = computeClosestApproachTime(aiPos, aiVel, p);
+      if (!ca.valid) continue;
+      // v0.22.x patch: skip if the asteroid is currently RECEDING
+      // (tStar < 0). The math says the past closest-approach was
+      // close, but past-closest-approach is meaningless for threat
+      // detection — only future closest approach matters. Without
+      // this guard the bot wasted thrust dodging asteroids it was
+      // already moving away from.
+      if (ca.tStar < 0) continue;
+      if (ca.tStar > lookaheadTime) continue;
+      if (ca.projDist > lookaheadMinRadius) continue;
+      // Threat confirmed: this asteroid is on the ship's flight path
+      // within lookaheadMinRadius during lookaheadTime.
+      let escapeAngle;
+      const speedSq = aiVel.x * aiVel.x + aiVel.z * aiVel.z;
+      if (speedSq < 1e-4) {
+        // Stationary ship: escape perpendicular to the threat,
+        // same off-axis math as the panic-dodge but at lookahead.
+        const threatAngle = Math.atan2(p.z - aiPos.z, p.x - aiPos.x);
+        escapeAngle = threatAngle + Math.PI / 2;
+      } else {
+        // Moving ship: escape perpendicular to the SHIP's velocity
+        // (step off the flight path, not weave around the threat).
+        const velAngle = Math.atan2(aiVel.z, aiVel.x);
+        escapeAngle = velAngle + Math.PI / 2;
+      }
+      const diff = wrapAngle(escapeAngle - facingAngle(aiYaw));
+      return {
+        yaw: diff > 0.1 ? -1 : diff < -0.1 ? 1 : 0,
+        thrust: true,
+        mode: 'dodge',
+        fire: false,
+      };
+    }
   }
 
   // ---- 2. ENGAGE (single-mode chase + fire) ---------------------------
@@ -607,6 +777,13 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       powerupBiasU: opts.powerupBiasU,
       panicDist: opts.panicDist,
       fireConeHalfAngle: opts.fireConeHalfAngle,
+      // v0.22.x — forward the lookahead opts so aiBrainTick's
+      // LOOKAHEAD-DODGE branch can project the flight path against
+      // the asteroid field and break off BEFORE a swarm gets in
+      // panic range. Without these the brain falls back to v0.21.x
+      // "flies-into-swarms" behavior.
+      lookaheadTime: opts.lookaheadTime,
+      lookaheadMinRadius: opts.lookaheadMinRadius,
       time,
     };
   }

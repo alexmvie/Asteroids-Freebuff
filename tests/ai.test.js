@@ -33,6 +33,7 @@ import assert from 'node:assert/strict';
 
 import {
   aiBrainTick,
+  computeClosestApproachTime,
   engageController,
   findNearestAsteroid,
   isTargetInFront,
@@ -221,13 +222,23 @@ test('aiBrainTick: ENGAGE picks the NEAREST asteroid', () => {
   assert.equal(result.thrust, true);
 });
 
-test('aiBrainTick: BRAKE branch fires when ship has high closing speed toward target', () => {
-  // v0.21.x — explicit aiVel parameter. Ship at origin facing +X,
-  // moving at +X 200 u/s (terminal speed), with asteroid ahead at
-  // (40, 0). closingSpeed=200, desiredClosing=Math.max(10, 48)=48.
-  // closingSpeed > desiredClosing → BRAKE branch fires. The engage
-  // controller rotates the ship to opposite-velocity (-X), thrust
-  // false initially because the rotation hasn't completed yet.
+test('aiBrainTick: LOOKAHEAD-DODGE wins over BRAKE on head-on collision course (v0.22.x priority)', () => {
+  // v0.22.x — the priority order is now
+  //   PANIC → LOOKAHEAD → ENGAGE(BRAKE) → IDLE.
+  // On a head-on collision course (asteroid directly on flight
+  // path, high closing speed), the brain must TURN AWAY (LOOKAHEAD)
+  // BEFORE applying BRAKE. Previous v0.21.x behavior was BRAKE on
+  // the same input — but BRAKE only rotates the ship to opposite-
+  // velocity (still pointing AT the oncoming asteroid), which
+  // doesn't actually dodge the collision. LOOKAHEAD-DODGE rotates
+  // perpendicular to velocity (stepping OFF the flight path).
+  //
+  // Setup mirrors the v0.21.x BRAKE test: ship at origin facing +X
+  // (yaw=-π/2 → facingAngle=0), moving at +X 200 u/s, asteroid at
+  // (40, 0) — directly on flight path.
+  //   r=(40,0), v=(-200,0), tStar=+0.2 (within lookaheadTime=3.5),
+  //   projDist=0 (on flight path).
+  //   → Both LOOKAHEAD triggers fire → LOOKAHEAD-DODGE branch wins.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -235,16 +246,14 @@ test('aiBrainTick: BRAKE branch fires when ship has high closing speed toward ta
     asteroids: [mockAsteroid(40, 0)],
     time: 0,
   });
-  assert.equal(result.mode, 'asteroid',
-    'high closing speed → still in engage mode (not dodge/idle)');
-  // At first tick, ship is still facing +X (just inherited facing).
-  // BRAKE branch fires for brakeAngle=PI, brakeDiff=PI. abs(PI)>0.50
-  // → thrust=false. The yaw command flips to -1 (rotate CCW toward
-  // -X = the opposite-velocity direction).
-  assert.equal(result.yaw, -1,
-    'BRAKE branch steers toward opposite-of-velocity');
-  assert.equal(result.thrust, false,
-    'BRAKE branch thrust gated on |brakeDiff|<0.50 — at first tick rotation incomplete → no thrust');
+  assert.equal(result.mode, 'dodge',
+    'head-on collision course → LOOKAHEAD-DODGE wins over BRAKE (v0.22.x priority)');
+  assert.equal(result.thrust, true,
+    'LOOKAHEAD-DODGE thrusts perpendicular to ship velocity (stepping off flight path)');
+  assert.equal(result.fire, false,
+    'LOOKAHEAD-DODGE never fires (would shoot through the swarm)');
+  assert.ok(result.yaw === -1 || result.yaw === 1,
+    'LOOKAHEAD-DODGE must command a non-zero yaw for perpendicular escape');
 });
 
 test('aiBrainTick: BRAKE branch falls back to APPROACH once speed drops', () => {
@@ -458,6 +467,172 @@ test('aiBrainTick: idle mode → no fire', () => {
   });
   assert.equal(result.mode, 'idle');
   assert.equal(result.fire, false);
+});
+
+// --------------------------------------------------------------------------
+// v0.22.x — LOOKAHEAD-DODGE: predictive collision kinematics
+// --------------------------------------------------------------------------
+//
+// The brain projects its current flight path against every nearby
+// asteroid and triggers a perpendicular escape when ANY asteroid
+// would pass within `lookaheadMinRadius` of the ship inside
+// `lookaheadTime` (default 3.5s, 6.0u). Solves the v0.21.x
+// "flies-into-swarms" symptom that PANIC-DODGE (6u reflexive)
+// couldn't catch in time — at 6u the ship is already deep inside
+// the cluster. The lookahead gives the bot a STRATEGIC break off
+// the flight path BEFORE the panic range.
+
+test('computeClosestApproachTime: head-on intercept → tStar positive, projDist ≈ 0', () => {
+  // Ship at origin moving +X at 30 u/s. Target at (90, 0). Velocity
+  // is collinear with r. tStar = (r·v)/|v|² = (90*30 + 0*0)/900 = 3.0s.
+  // projDist² = |r|² - (r·v)²/|v|² = 8100 - 8100 = 0 (target is
+  // directly on the flight path).
+  const r = computeClosestApproachTime(
+    { x: 0, z: 0 },
+    { x: 30, z: 0 },
+    { x: 90, z: 0 },
+  );
+  assert.equal(r.valid, true);
+  assert.ok(Math.abs(r.tStar - 3.0) < 0.01,
+    `expected tStar ≈ 3.0 for head-on intercept; got ${r.tStar}`);
+  assert.ok(r.projDist < 1e-6,
+    `head-on → projDist should be 0 (on the flight path); got ${r.projDist}`);
+});
+
+test('computeClosestApproachTime: perpendicular pass → tStar ≈ 0, projDist = current distance', () => {
+  // Ship at origin moving +X at 30 u/s. Target at (0, 90). r ⊥ v.
+  // tStar = (0 + 0) / |v|² = 0 (already at closest approach).
+  // projDist = |r| = 90. Brain treats this as "no immediate threat,
+  // ship passes perpendicular, miss distance = 90".
+  const r = computeClosestApproachTime(
+    { x: 0, z: 0 },
+    { x: 30, z: 0 },
+    { x: 0, z: 90 },
+  );
+  assert.equal(r.valid, true);
+  assert.ok(Math.abs(r.tStar) < 0.01,
+    `perpendicular pass → tStar ≈ 0; got ${r.tStar}`);
+  assert.ok(Math.abs(r.projDist - 90) < 0.01,
+    `projDist should equal current distance (90u); got ${r.projDist}`);
+});
+
+test('computeClosestApproachTime: stationary ship → tStar=Infinity, projDist=current', () => {
+  // Ship not moving. No time-to-approach math is meaningful — the
+  // brain uses current distance for everything. tStar=Infinity so
+  // LOOKAHEAD-DODGE never fires from this asteroid (no trajectory);
+  // PANIC-DODGE still handles very-close cases.
+  const r = computeClosestApproachTime(
+    { x: 0, z: 0 },
+    { x: 0, z: 0 },
+    { x: 50, z: 0 },
+  );
+  assert.equal(r.valid, true);
+  assert.equal(r.tStar, Infinity,
+    'stationary ship → tStar=Infinity');
+  assert.ok(Math.abs(r.projDist - 50) < 0.01,
+    `projDist falls back to current distance; got ${r.projDist}`);
+});
+
+test('computeClosestApproachTime: target receding → tStar<0, no future threat', () => {
+  // Ship at origin moving -X at 30 u/s. Target at (90, 0) +X. Ship is
+  // moving AWAY from target. tStar = (90 * -30) / 900 = -3.0 (closest
+  // approach is in the past; the trajectory is diverging).
+  const r = computeClosestApproachTime(
+    { x: 0, z: 0 },
+    { x: -30, z: 0 },
+    { x: 90, z: 0 },
+  );
+  assert.equal(r.valid, true);
+  assert.ok(r.tStar < 0,
+    `target receding → tStar<0; got ${r.tStar}`);
+});
+
+test('computeClosestApproachTime: malformed input → valid=false (fail open)', () => {
+  // Defensive: malformed inputs must return valid=false so the
+  // LOOKAHEAD-DODGE branch uses `continue` and skips the asteroid
+  // instead of crashing the brain.
+  assert.equal(computeClosestApproachTime(null, { x: 0, z: 0 }, { x: 0, z: 0 }).valid, false);
+  assert.equal(computeClosestApproachTime({ x: 0, z: 0 }, null, { x: 0, z: 0 }).valid, false);
+  assert.equal(computeClosestApproachTime({ x: 0, z: 0 }, { x: 0, z: 0 }, null).valid, false);
+});
+
+test('aiBrainTick: LOOKAHEAD-DODGE fires when asteroid is on flight path inside horizon', () => {
+  // Ship at origin velocity (200, 0) heading +X. Target at (90, 0) — on
+  // flight path. tStar = 90/200 = 0.45s (within lookaheadTime=3.5).
+  // projDist = 0 (on flight path, < minRadius=6). Both triggers
+  // fire → LOOKAHEAD-DODGE branch wins over ENGAGE.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2, // facing +X (in the velocity direction)
+    aiVel: { x: 200, z: 0 },
+    asteroids: [mockAsteroid(90, 0)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'dodge',
+    `asteroid on flight path inside lookahead horizon must dodge; got mode=${result.mode}`);
+  assert.equal(result.thrust, true);
+  assert.equal(result.fire, false,
+    'LOOKAHEAD-DODGE never fires (would shoot through the swarm)');
+  assert.ok(result.yaw === -1 || result.yaw === 1,
+    'dodge must command a non-zero yaw for perpendicular escape');
+});
+
+test('aiBrainTick: LOOKAHEAD-DODGE falls through when projDist > lookaheadMinRadius (comfortable miss)', () => {
+  // Ship at origin velocity (200, 0) heading +X. Target at (0, 90).
+  // Velocity perpendicular to target direction. projDist = 90 (ship's
+  // path passes target 90u away — comfortable miss). projDist >
+  // minRadius=6 → no threat → fall through to ENGAGE.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 200, z: 0 },
+    asteroids: [mockAsteroid(0, 90)],
+    time: 0,
+  });
+  assert.notEqual(result.mode, 'dodge',
+    'comfortable perpendicular miss (>minRadius) must NOT trigger LOOKAHEAD-DODGE');
+  assert.equal(result.mode, 'asteroid',
+    'falls through to ENGAGE');
+});
+
+test('aiBrainTick: LOOKAHEAD-DODGE bypassed entirely when lookaheadTime=0 (config disable)', () => {
+  // Same setup that would normally trigger LOOKAHEAD-DODGE, but
+  // lookaheadTime=0 disables the entire branch (test fixture /
+  // scratch trainer wanting v0.21.x behavior). Should fall through
+  // to ENGAGE without dodging.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 200, z: 0 },
+    asteroids: [mockAsteroid(90, 0)],
+    time: 0,
+    lookaheadTime: 0, // disable predictive avoidance
+  });
+  assert.equal(result.mode, 'asteroid',
+    'lookaheadTime=0 → LOOKAHEAD-DODGE branch disabled → fall through to ENGAGE');
+});
+
+test('aiBrainTick: LOOKAHEAD-DODGE SKIPS receding asteroid (ship moving AWAY from target)', () => {
+  // v0.22.x patch — regression guard for the `tStar < 0` filter.
+  // Without the filter, the brain would fire LOOKAHEAD-DODGE on
+  // receding asteroids (where the past closest-approach distance
+  // is mathematically small, but irrelevant for future threat
+  // detection). Wasted thrust + visible wobble. Ship at origin
+  // moving -X (away from target at +90). The math: r=(90,0),
+  // relVel=(+30, 0), tStar = -(r·v)/|v|² = -(90*30)/900 = -3.0
+  // (past). The brain must skip and fall through to ENGAGE.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: Math.PI / 2, // facing -X (in the velocity direction)
+    aiVel: { x: -30, z: 0 },
+    asteroids: [mockAsteroid(90, 0)],
+    time: 0,
+  });
+  assert.notEqual(result.mode, 'dodge',
+    `receding asteroid (ship moving -X away from +90 target) must NOT trigger LOOKAHEAD-DODGE; got mode=${result.mode}`);
+  // Falls through to ENGAGE (asteroid at 90u is in targetDist=Infinity).
+  assert.equal(result.mode, 'asteroid',
+    'falls through to ENGAGE');
 });
 
 // --------------------------------------------------------------------------
@@ -1238,6 +1413,42 @@ test('createDemoAi: does NOT fire weapon in IDLE mode', () => {
   });
   ai.update(0.1);
   assert.equal(weaponCalls.length, 0);
+});
+
+test('createDemoAi: factory threads lookaheadTime + lookaheadMinRadius into brain args', () => {
+  // v0.22.x — Step 2 lookahead wiring. Verify the factory passes
+  // the lookahead opts from `options` into brain args. Without
+  // this thread, the production brain would silently use DEFAULTS
+  // (3.5/6.0) regardless of the trainer's or test's request, and
+  // the LOOKAHEAD-DODGE branch would always fire with the same
+  // fixed horizon.
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(90, 0)];
+  const mock = mockShipFactory();
+  let seenLookaheadTime = null;
+  let seenLookaheadMinRadius = null;
+  const mockBrain = {
+    tick: (args) => {
+      seenLookaheadTime = args.lookaheadTime;
+      seenLookaheadMinRadius = args.lookaheadMinRadius;
+      return { yaw: 0, thrust: false, mode: 'asteroid', fire: false };
+    },
+  };
+  const ai = createDemoAi({
+    scene,
+    asteroids,
+    options: {
+      shipFactory: mock.build,
+      brain: mockBrain,
+      lookaheadTime: 7.0,
+      lookaheadMinRadius: 12.0,
+    },
+  });
+  ai.update(0.1);
+  assert.equal(seenLookaheadTime, 7.0,
+    'factory threads options.lookaheadTime into brain.args.lookaheadTime');
+  assert.equal(seenLookaheadMinRadius, 12.0,
+    'factory threads options.lookaheadMinRadius into brain.args.lookaheadMinRadius');
 });
 
 test('createDemoAi: works without weapon option (no firing at all)', () => {
