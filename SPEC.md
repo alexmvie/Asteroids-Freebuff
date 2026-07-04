@@ -417,7 +417,7 @@ Drop any one of the four and the brain will re-discover a degenerate local minim
 
 ## 15. v0.18.0 -- Predictive DODGE (hand-coded demo AI)
 
-The v0.12.x DODGE fired only when an asteroid was already within the 14u `dodgeDist` shell -- often too late for fast-drifting rocks (the AI had < 500ms to start escaping). v0.18.0 projects each asteroid'\''s relative motion against the ship using 2-body kinematics, triggers DODGE 1-2s earlier when the projected CLOSEST approach (within `dodgeLookaheadS` seconds) is < `dodgeMarginU`.
+The v0.12.x DODGE fired only when an asteroid was already within the 14u `dodgeDist` shell -- often too late for fast-drifting rocks (the AI had < 500ms to start escaping). v0.18.0 projects each asteroid's relative motion against the ship using 2-body kinematics, triggers DODGE 1-2s earlier when the projected CLOSEST approach (within `dodgeLookaheadS` seconds) is < `dodgeMarginU`.
 
 ### Math (lives in `computeClosestApproach` in `src/entities/ai.js`)
 
@@ -430,11 +430,11 @@ The fix: walk `|pRel + vRel * tStar|` AFTER clamping `tStar = [0, lookaheadS]` (
 
 ### DODGE branch in `aiBrainTick`
 
-Loop ALL asteroids. For each: compute relative position and velocity (with `lookupAsteroidVel()` + defensive null guards), call `computeClosestApproach({pRel, vRel, lookaheadS: dodgeLookaheadS})`. If `closestDist < dodgeMarginU AND closestDist < worstDist_so_far`, this asteroid is the current worst threat. When the loop finds at least one threat, commit to escape: thrust 90° CCW from the threat'\''s CURRENT position (escape direction unchanged from v0.12.x). When no threat is found OR `dodgeLookaheadS=0`, fall through to the legacy `dodgeDist` shell (instant trigger when the asteroid is already inside the 14u raw shell, regardless of velocity).
+Loop ALL asteroids. For each: compute relative position and velocity (with `lookupAsteroidVel()` + defensive null guards), call `computeClosestApproach({pRel, vRel, lookaheadS: dodgeLookaheadS})`. If `closestDist < dodgeMarginU AND closestDist < worstDist_so_far`, this asteroid is the current worst threat. When the loop finds at least one threat, commit to escape: thrust 90° CCW from the threat's CURRENT position (escape direction unchanged from v0.12.x). When no threat is found OR `dodgeLookaheadS=0`, fall through to the legacy `dodgeDist` shell (instant trigger when the asteroid is already inside the 14u raw shell, regardless of velocity).
 
 ### Defaults
 
-- `dodgeLookaheadS: 1.0` (seconds) -- the AI'\''s forward-prediction horizon. A pilot won'\''t commit to dodging based on an event > 1s away; aligns with the existing `interceptLookaheadS=0.5` cognitive cap (DODGE gets a wider horizon because survival is immediate). Set to 0 to disable predictive entirely; legacy shell still fires.
+- `dodgeLookaheadS: 1.0` (seconds) -- the AI's forward-prediction horizon. A pilot won't commit to dodging based on an event > 1s away; aligns with the existing `interceptLookaheadS=0.5` cognitive cap (DODGE gets a wider horizon because survival is immediate). Set to 0 to disable predictive entirely; legacy shell still fires.
 - `dodgeMarginU: 2.5` (world units) -- the projected miss-distance threshold. 2.5u ~= max small-chunk radius; triggering DODGE on rocks that would graze > 2.5u away is wasteful. Higher = more aggressive DODGE (sooner, tighter pass); lower = more aggressive flight (let grazing passes if they really graze).
 
 ### Visual impact
@@ -443,43 +443,50 @@ Small in MVP because asteroid ambient drift is < 0.5 u/s (no closing speed means
 
 ### Wiring parity
 
-`argsFromObs` (production brain call from `update()`) and `brainArgsFromShip` (getMode() call from the dashboard) BOTH forward `dodgeLookaheadS` + `dodgeMarginU`. The chip/dashboard reading therefore agrees with the actual ship behavior. Without the getMode() parity, the HUD would show `'\''target'\''` while the ship silently dodges -- a passive-aggressive UI bug. 14 regression tests pin the contract.
+`argsFromObs` (production brain call from `update()`) and `brainArgsFromShip` (getMode() call from the dashboard) BOTH forward `dodgeLookaheadS` + `dodgeMarginU`. The chip/dashboard reading therefore agrees with the actual ship behavior. Without the getMode() parity, the HUD would show `'target'` while the ship silently dodges -- a passive-aggressive UI bug. 14 regression tests pin the contract.
 
 
-## 16. Post-commit hook for game-version auto-bump (v0.18.0)
+## 16. Build identity via Vite `define` globals (v0.18.0)
 
-To keep the bottom-right version chip + dev-console banner honest about which commit the user is watching, `.githooks/post-commit` is a Python hook that runs after each `git commit` and updates `COMMIT` in `src/version-constants.js` to the actual short SHA. The chip stays in lockstep with HEAD; the user can confirm they're watching the up-to-date build at a glance.
+The bottom-right HUD chip + dev-console banner read three values: **BRANCH** (from `git rev-parse --abbrev-ref HEAD`), **VERSION** (manual SSOT, semantic), and **COMMIT** (from `git rev-parse --short HEAD`). The two auto values are resolved at Vite config-load time and substituted globally into the source; the manual one is human-curated.
 
-### Hook mechanics
+### Architecture (why a `define`?)
 
-- **Trigger:** runs unconditionally after every `git commit` (post-commit), fired by `git` itself.
-- **Reading SHA:** `git rev-parse --short HEAD` after the commit lands.
-- **In-place edit:** pure Python (`Path.read_text` + `re.sub`); replaces the existing `const COMMIT = '…';` line, falls back to inserting one before `export { … }` if missing.
-- **Staging + amend:** `git add src/version-constants.js && git commit --amend --no-edit --no-verify`. The amend replaces the just-created commit's tree with the new content so the file's COMMIT line == its own hash on disk.
-- **Anti-recursion:** `--no-verify` skips both the pre-commit AND post-commit hooks for the amend. Without it the hook would amend → fire post-commit → amend → infinite loop.
-- **Idempotency:** if the COMMIT line already equals the current short SHA, the hook exits without amending. Avoids reflog churn on commits where the file is already in sync (e.g. when the user commits a change WITH the file showing the right SHA).
-- **Portability:** `#!/usr/bin/env python3` shebang; works on macOS + Linux + WSL without modification. No GNU-vs-BSD sed dependency.
+A naive approach is to bake all three into a committed `src/version-constants.js` and have the chip import them. But baking the SHA into a committed file is a chicken-and-egg: the amend that bakes the SHA changes the commit's content, which changes the SHA, which means the file is always one SHA behind HEAD. Marker-based anti-recursion guards prevent infinite amend chains but don't fix the off-by-one.
 
-### Install (project-local)
+The shipped solution sidesteps this entirely: Vite's `define` plugin in `vite.config.js` resolves the two auto values at config-load time (once per `npm run dev` / `npm run build`) via `execSync('git ...')` and substitutes them as global identifiers (`__BRANCH__`, `__COMMIT__`) into the source. The SHA never appears in any committed file's content, so no amend cycle is needed and the chip renders the actual committed SHA at boot.
 
-The hook is in `.githooks/` (tracked) rather than `.git/hooks/` (gitignored). To wire it up on a fresh clone:
+### Mechanics
 
-```
-git config core.hooksPath .githooks
-```
+- `vite.config.js` reads `git rev-parse --abbrev-ref HEAD` + `git rev-parse --short HEAD` once via `execSync('utf-8')`, `JSON.stringify`s each (required for Vite's literal source substitution), and passes them to Vite via `define: { __BRANCH__: "...", __COMMIT__: "..." }`.
+- `src/main.js` reads `__BRANCH__` + `__COMMIT__` as plain identifiers + imports `VERSION` from `src/version-constants.js`. No special marker syntax for the chip.
+- `src/version-constants.js` exports just `VERSION` (the only manual SSOT). The file is precisely what the human controls.
+- `safeExec(cmd)` defensive wrapper falls back to `'unknown'` if `git` is unavailable or the working copy is not a git repo (e.g. building from a tarball in CI without the `.git` folder, or running on a tag-less detached HEAD where `git rev-parse --abbrev-ref HEAD` returns `'HEAD'` literally — still useful, will not hard-crash the dev server).
 
-`core.hooksPath` is a project-local setting (lives in `.git/config`, not the user's global `~/.gitconfig`), so the user must opt-in once per clone. The convention keeps the hook tracked while still being locally configurable.
+### Tested invariants
 
-### Behavior contract
+- All 475 unit tests pass (pure-Node `node --test` runs do not import `src/main.js`, so `__COMMIT__` / `__BRANCH__` are not defined in test context — no false-failure risk).
+- `npm run build` succeeds; `grep -E '"<short_sha>"|"<branch_name>"' dist/assets/*.js` confirms both values were substituted into the production bundle at build time.
 
-After every commit, by virtue of the hook self-amending, the committed file's `COMMIT` line equals the file's own short SHA. This invariant is what the chip relies on for honesty -- if the chip ever shows an SHA that isn't HEAD, the user knows the repo is in an unusual state (e.g. the hook wasn't installed when the commit was made, or someone amended the file without re-running the hook manually).
+### Caveats / accepted limitations
 
-Bootstrap placeholder: `''<unset>'` is the literal text in `src/version-constants.js` when the file is freshly created and the hook has not yet fired. The chip reads this literal string until the first hook run populates COMMIT. After the first commit, every subsequent commit's COMMIT line matches its own SHA.
+- **HMR staleness**: `__BRANCH__` and `__COMMIT__` are baked at Vite config-load. They do not refresh across HMR updates. Branch / SHA changes are infrequent enough that a server restart is acceptable (`npm run dev` cold-starts in < 2 s).
+- **`'unknown'` fallback is visible**: a clone without `.git/` would render `? @ unknown` in the chip. Better than crashing the dev server; the user knows the working copy is in an unusual state.
 
-### VERSION vs COMMIT update policy
+### Update policy (split between manual + auto)
 
-- `VERSION` (manual): semantic version label, bumped by the human per project policy. Distinct from commit count -- a feature branch's commits don't auto-inflate it.
-- `BRANCH` (manual): branch name in lowercase. Distinct from each branch -- the chip visually distinguishes branches without code changes elsewhere.
-- `COMMIT` (auto): build identity (short SHA), updated by the hook after every commit. Distinct from VERSION -- the chip visually distinguishes between "we're bumping" vs "we just bumped".
+- `VERSION` (manual SSOT in `src/version-constants.js`): semantic version label, bumped by the human per project policy. Distinct from commit count — a feature branch's commits do not auto-inflate it.
+- `BRANCH` (auto-resolved via Vite `define`): the lowercase branch name; reflects current `git rev-parse --abbrev-ref HEAD`.
+- `COMMIT` (auto-resolved via Vite `define`): build identity (short SHA); reflects current `git rev-parse --short HEAD`.
 
-The three-update split mirrors the three concerns a build has: semantic intent (VERSION), source location (BRANCH), and build identity (COMMIT).
+The three-update split mirrors the three concerns a build has: semantic intent (manual VERSION), source location (auto BRANCH), and build identity (auto COMMIT).
+
+### History (superseded approaches in the same wave)
+
+The v0.18.0 wave shipped three intermediate attempts before settling on Vite `define`:
+
+1. **Committed SSOT file**: bake BRANCH + COMMIT into `src/version-constants.js` + import in `src/main.js`. Worked for VERSION but introduced the chicken-and-egg for COMMIT — file's COMMIT line always lagged HEAD by one amend.
+2. **Post-commit hook + amend cycle**: `.githooks/post-commit` rewrites the COMMIT line on each commit + `git commit --amend --no-verify`. Required a marker-file anti-recursion guard + try/except marker cleanup (the amend's post-commit fires recursively because `--no-verify` only skips pre-commit / commit-msg, not post-commit). Terminated correctly but the file's `COMMIT` line was always the PRE-amend value, so the chip rendered yesterday's SHA.
+3. **`scripts/install-hooks.sh` convenience one-liner**: bandaid for approach #2 — made installing the broken hook faster, did not fix the design flaw.
+
+The Vite `define` approach obsoletes all three: zero file amends, zero hooks, zero markers, zero scripts. Chip reads actual HEAD at config-load, forever. The `.githooks/` directory and `scripts/install-hooks.sh` are deleted; `git config core.hooksPath` reverts to default `.git/hooks`.

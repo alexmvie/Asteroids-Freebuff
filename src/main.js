@@ -23,7 +23,11 @@ import { createEventBus } from './systems/events.js';
 import { createStateMachine, State } from './systems/state.js';
 import { createHud } from './ui/hud.js';
 import { createDebugHud } from './ui/debug-hud.js';
-import { VERSION, BRANCH, COMMIT } from './version-constants.js';
+import { VERSION } from './version-constants.js';
+// __BRANCH__ + __COMMIT__ are Vite-define globals, populated from git at
+// config-load time in vite.config.js. See that file for the rationale
+// (chicken-and-egg-free alternative to baking the SHA into a committed
+// file).
 import { createDemoAi } from './entities/ai.js';
 import { createAsteroidField } from './systems/asteroid-field.js';
 import { createAsteroidUvDebugOverlay } from './systems/asteroid-uv-debug-overlay.js';
@@ -967,13 +971,16 @@ console.log('Ship online. WASD/arrows to fly, Space to fire, any key to start.')
 console.log(`State: ${stateMachine.getState()}   Energy: ${ship.getEnergy()}   Score: ${score}`);
 
 // escapeHtml -- defense-in-depth against accidental HTML injection when
-// the chip constants become dynamic in a future iteration (a post-commit
-// hook reading `git rev-parse --short HEAD`, or `process.env.GITHUB_REF`).
-// Today the values are build-time constants (alphanumeric + hyphen +
-// dot) so this helper is a no-op, but the moment any of them becomes
-// user-influenced the helper treats accidental HTML injection as an
-// invalid-character sequence rather than an XSS bug. Comments drift;
-// defense-in-depth doesn't.
+// the chip constants become user-influenced. Today the values are
+// `__BRANCH__` + `VERSION` + `__COMMIT__` injected by Vite's `define`
+// substitution at config-load time (see vite.config.js) -- BRANCH is
+// a `git rev-parse --abbrev-ref HEAD` ref name (alphanumeric + slash +
+// hyphen), VERSION is semantic-version-shaped (alphanumeric + dot),
+// COMMIT is a short SHA hex string. All three are safe by construction
+// today. If any of them ever becomes user-controlled (e.g. an
+// HTTP-served config), the helper treats accidental HTML injection as
+// an invalid-character sequence rather than an XSS bug. Comments
+// drift; defense-in-depth doesn't.
 function escapeHtml(s) {
   return String(s).replace(/[<>&"]/g, (c) => ({
     '<': '&lt;',
@@ -986,31 +993,35 @@ function escapeHtml(s) {
 {
   const v = document.getElementById('game-version');
   if (v) {
-    // Three-span chip (branch + version + commit). The commit span is
-    // populated by `.githooks/post-commit` after every `git commit`,
-    // which writes the just-created SHA into `COMMIT` in
-    // src/version-constants.js and amends the current commit. So the
-    // committed file's content always reflects its own SHA -- the
-    // chip stays in lockstep with HEAD. Before the hook fires (e.g.
-    // a fresh clone whose first commit was created without the
-    // hook installed) the span reads the literal `<unset>` placeholder.
+    // Three-span chip (branch + version + commit). All three values
+    // come from Vite's `define` globals + the manual SSOT:
+    //   - __BRANCH__ / __COMMIT__ : resolved in vite.config.js by
+    //     `execSync('git ...')` at config-load time and substituted
+    //     globally into the source. Fresh by construction (as honest
+    //     as a `git status` taken right before the dev server boots).
+    //   - VERSION : manual SSOT in src/version-constants.js.
     //
-    // The escapeHtml helper is defense-in-depth: the SHA is
-    // alphanumeric so it's safe today, but if COMMIT ever becomes
-    // user-influenced (e.g. extended to read a CI variable), the
-    // helper treats accidental HTML injection as an invalid-character
-    // sequence rather than an XSS bug.
+    // Compared to a post-commit-hook approach (bake the SHA into a
+    // committed file + amend), this architecture has no chicken-and-egg:
+    // the SHA never needs to appear in any committed file's content,
+    // so no amend cycle is required to keep the chip in sync.
+    //
+    // The escapeHtml helper is defense-in-depth: branch + commit are
+    // alphanumeric or `git-ref` shaped today (no HTML-unsafe chars),
+    // but if a future iteration wires the values from HTTP-served
+    // config, the helper treats accidental HTML injection as an
+    // invalid-character sequence rather than an XSS bug.
     v.innerHTML =
-      `<span class="game-version__branch">${escapeHtml(BRANCH)}</span>` +
+      `<span class="game-version__branch">${escapeHtml(__BRANCH__)}</span>` +
       `<span class="game-version__ver">${escapeHtml(VERSION)}</span>` +
-      `<span class="game-version__commit">${escapeHtml(COMMIT)}</span>`;
+      `<span class="game-version__commit">${escapeHtml(__COMMIT__)}</span>`;
   }
 }
 
 // One extra console.log stamping version + branch + commit (matches
 // the chip so DevTools and the corner chip agree). ONE log, not two:
 console.log(
-  `%c${VERSION}%c on %c${BRANCH}%c @ ${COMMIT}`,
+  `%c${VERSION}%c on %c${__BRANCH__}%c @ ${__COMMIT__}`,
   'background:#48dbfb;color:#05060c;padding:2px 6px;border-radius:2px;font-weight:bold;',
   'color:#97a3c4;',
   'color:#48dbfb;',

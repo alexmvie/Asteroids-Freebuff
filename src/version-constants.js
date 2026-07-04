@@ -1,64 +1,36 @@
 /**
- * src/version-constants.js — single source of truth for the game's version +
- * branch + commit metadata.
+ * src/version-constants.js — single source of truth for the game's
+ * MANUAL version constant. Only the SEMANTIC version lives here; the
+ * other two build-identity values (BRANCH + COMMIT) are auto-resolved.
  *
  * Why this file exists (SSOT)
  * ---------------------------
- * The rest of the codebase follows a "constants split" pattern: tunable
- * literals live in dedicated `<topic>-constants.js` files alongside
- * their consumers (e.g. `src/entities/ship-constants.js` owns ship
- * physics, `src/scene/camera-constants.js` owns camera behavior,
- * `src/training/defaults.js` owns training tunables). The game
- * metadata (version label + branch name + commit SHA) is the same kind
- * of tunable — it's a build-time constant that the bottom-right HUD
- * chip + dev-console banner read — and therefore belongs in its own
- * constants module rather than being inlined in `src/main.js`.
+ * The bottom-right HUD chip + dev-console banner read three
+ * build-identity values: BRANCH + VERSION + COMMIT. Only VERSION is
+ * manual; the others are read directly from git at Vite config-load
+ * time (see `vite.config.js`) and exposed via Vite's `define` plugin
+ * as `__BRANCH__` + `__COMMIT__` global identifiers. They are not
+ * committed here because doing so would create a chicken-and-egg:
+ * baking the SHA into the committed file changes the commit's
+ * content, which changes its SHA, which means the file is always
+ * off-by-one from the SHA it displays.
  *
  * Consumers
  * ---------
- *   1. `src/main.js` renders the bottom-right version chip
- *      (`#game-version`) using `BRANCH` + `VERSION` + `COMMIT` here.
- *   2. `src/main.js` prints the dev-console banner stamping the
- *      same three values so DevTools and the corner chip agree.
+ *   - `src/main.js` reads VERSION from this module + reads
+ *     `__BRANCH__` + `__COMMIT__` from Vite's define substitution.
+ *   - The dev-console banner in `src/main.js` stamps all three
+ *     values so DevTools and the corner chip agree.
  *
  * Update procedure
  * ----------------
- * - VERSION: increment per the project's semver-ish convention
+ * - VERSION: bump per the project's semver-ish convention
  *   (v0.MM.PP, with M bumped for behavior changes and P bumped for
- *   hotfixes on the same release). Manual edits only — never
- *   auto-bumped because VERSION reflects SEMANTIC version, not
- *   commit count.
- * - BRANCH: lowercased branch name ("refine-coded-ai",
- *   "power-up-system", etc.). Manual edits only — distinguishes
- *   branches visually without code changes elsewhere.
- * - COMMIT: populated automatically by `.githooks/post-commit`
- *   after each `git commit`. The hook reads `git rev-parse --short
- *   HEAD` and writes it back into this file, then `git commit
- *   --amend --no-verify`s so the file's content reflects its own
- *   SHA. The chip stays in sync with HEAD because every commit
- *   captures a version-constants.js whose COMMIT line == its own
- *   hash. The bootstrap placeholder `'\'<unset>\'` (this string)
- *   is replaced on the FIRST commit that fires the hook; until
- *   then the chip's commit span reads literally `'<unset>'`.
- *
- * Install the hook (one-time, project-local):
- *
- *     git config core.hooksPath .githooks
- *
- * The hook is plain Python (`#!/usr/bin/env python3`); works on
- * macOS + Linux + WSL out of the box. It is idempotent: commits
- * whose COMMIT line already equals HEAD SHA exit without
- * amending. It uses `--no-verify` on the amend so neither the
- * pre-commit nor post-commit hook re-fires for the amend commit
- * (no infinite amend cycle).
+ *   hotfixes on the same release). Manual edits only — VERSION
+ *   is SEMANTIC, not derived.
+ * - BRANCH + COMMIT: auto-resolved from git at Vite config-load.
+ *   No edits needed; no amend-chain, no off-by-one.
  */
-
 const VERSION = 'v0.18.0';
-const BRANCH = 'refine-coded-ai';
-// Populated automatically by .githooks/post-commit after each commit.
-// The string `'\'<unset>\'` is the bootstrap placeholder shown when
-// the hook has not yet fired for this working copy (e.g. fresh
-// clone whose first commit was created WITHOUT the hook installed).
-const COMMIT = "ce011e8";
 
-export { VERSION, BRANCH, COMMIT };
+export { VERSION };
