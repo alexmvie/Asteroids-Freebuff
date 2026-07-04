@@ -444,3 +444,42 @@ Small in MVP because asteroid ambient drift is < 0.5 u/s (no closing speed means
 ### Wiring parity
 
 `argsFromObs` (production brain call from `update()`) and `brainArgsFromShip` (getMode() call from the dashboard) BOTH forward `dodgeLookaheadS` + `dodgeMarginU`. The chip/dashboard reading therefore agrees with the actual ship behavior. Without the getMode() parity, the HUD would show `'\''target'\''` while the ship silently dodges -- a passive-aggressive UI bug. 14 regression tests pin the contract.
+
+
+## 16. Post-commit hook for game-version auto-bump (v0.18.0)
+
+To keep the bottom-right version chip + dev-console banner honest about which commit the user is watching, `.githooks/post-commit` is a Python hook that runs after each `git commit` and updates `COMMIT` in `src/version-constants.js` to the actual short SHA. The chip stays in lockstep with HEAD; the user can confirm they're watching the up-to-date build at a glance.
+
+### Hook mechanics
+
+- **Trigger:** runs unconditionally after every `git commit` (post-commit), fired by `git` itself.
+- **Reading SHA:** `git rev-parse --short HEAD` after the commit lands.
+- **In-place edit:** pure Python (`Path.read_text` + `re.sub`); replaces the existing `const COMMIT = '…';` line, falls back to inserting one before `export { … }` if missing.
+- **Staging + amend:** `git add src/version-constants.js && git commit --amend --no-edit --no-verify`. The amend replaces the just-created commit's tree with the new content so the file's COMMIT line == its own hash on disk.
+- **Anti-recursion:** `--no-verify` skips both the pre-commit AND post-commit hooks for the amend. Without it the hook would amend → fire post-commit → amend → infinite loop.
+- **Idempotency:** if the COMMIT line already equals the current short SHA, the hook exits without amending. Avoids reflog churn on commits where the file is already in sync (e.g. when the user commits a change WITH the file showing the right SHA).
+- **Portability:** `#!/usr/bin/env python3` shebang; works on macOS + Linux + WSL without modification. No GNU-vs-BSD sed dependency.
+
+### Install (project-local)
+
+The hook is in `.githooks/` (tracked) rather than `.git/hooks/` (gitignored). To wire it up on a fresh clone:
+
+```
+git config core.hooksPath .githooks
+```
+
+`core.hooksPath` is a project-local setting (lives in `.git/config`, not the user's global `~/.gitconfig`), so the user must opt-in once per clone. The convention keeps the hook tracked while still being locally configurable.
+
+### Behavior contract
+
+After every commit, by virtue of the hook self-amending, the committed file's `COMMIT` line equals the file's own short SHA. This invariant is what the chip relies on for honesty -- if the chip ever shows an SHA that isn't HEAD, the user knows the repo is in an unusual state (e.g. the hook wasn't installed when the commit was made, or someone amended the file without re-running the hook manually).
+
+Bootstrap placeholder: `''<unset>'` is the literal text in `src/version-constants.js` when the file is freshly created and the hook has not yet fired. The chip reads this literal string until the first hook run populates COMMIT. After the first commit, every subsequent commit's COMMIT line matches its own SHA.
+
+### VERSION vs COMMIT update policy
+
+- `VERSION` (manual): semantic version label, bumped by the human per project policy. Distinct from commit count -- a feature branch's commits don't auto-inflate it.
+- `BRANCH` (manual): branch name in lowercase. Distinct from each branch -- the chip visually distinguishes branches without code changes elsewhere.
+- `COMMIT` (auto): build identity (short SHA), updated by the hook after every commit. Distinct from VERSION -- the chip visually distinguishes between "we're bumping" vs "we just bumped".
+
+The three-update split mirrors the three concerns a build has: semantic intent (VERSION), source location (BRANCH), and build identity (COMMIT).

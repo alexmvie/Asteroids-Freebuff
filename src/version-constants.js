@@ -59,6 +59,6 @@ const BRANCH = 'refine-coded-ai';
 // The string `'\'<unset>\'` is the bootstrap placeholder shown when
 // the hook has not yet fired for this working copy (e.g. fresh
 // clone whose first commit was created WITHOUT the hook installed).
-const COMMIT = "c235baf";
+const COMMIT = "b3e304b";
 
 export { VERSION, BRANCH, COMMIT };
