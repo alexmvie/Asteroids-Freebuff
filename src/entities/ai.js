@@ -59,8 +59,18 @@ const DEFAULTS = Object.freeze({
   /**
    * Maximum chase range (world units) for any target. Asteroids and
    * powerups beyond this fall through to IDLE.
+   *
+   * v0.21.x — `Infinity` (was 300 in v0.21.0). The user reported
+   * "egal wie weit Asteroiden entfernt sind, der nächstgelegene
+   * ist zu attackieren". With Infinity, the only IDLE condition
+   * is `asteroids === []` (an empty streaming buffer, e.g., at
+   * session-start before the first chunk loads). At any time the
+   * bubble contains ≥1 asteroid, the bot engages it — no range cap.
+   * For tests, finite targetDist values still work (the predicate
+   * is `nearest.dist < targetDist`, so smaller overrides reduce
+   * the chase range as expected).
    */
-  targetDist: 100,
+  targetDist: Infinity,
 
   /**
    * Powerup detour bias (world units). Powerup wins over the
@@ -77,10 +87,14 @@ const DEFAULTS = Object.freeze({
   /**
    * Panic-dodge distance (world units). When the nearest asteroid
    * is closer than this, the AI thrusts 90° perpendicular — pure
-   * reflex, no predictive kinematics. Default 6u = roughly the
-   * ship's own radius (the smallest meaningful "I'm about to die"
-   * window). Reduce for tighter panic-window; raise for more
-   * aggressive flight through denser fields.
+   * reflex, no predictive kinematics. Default 6u.
+   *
+   * The trigger condition is `nearest.dist < panicDist`, so a
+   * SMALLER panicDist yields FEWER dodge triggers (more committed
+   * chase), a LARGER panicDist yields MORE triggers (more reactive).
+   * 6u is the sweet spot: tight enough that 3–5u grazing-passes
+   * don't trigger spurious dodge bursts, wide enough that head-on
+   * collisions (≤4u) still get a panic-reflex.
    */
   panicDist: 6,
 
@@ -110,6 +124,14 @@ function wrapAngle(a) {
   else if (r <= -Math.PI) r += TAU;
   return r;
 }
+
+// engageController deadband constants. Lifted to module scope so the
+// BRAKE and APPROACH branches use the same steering tolerance and the
+// thrust-on rules are namespaced — future tuning changes happen in
+// one place rather than across two branches.
+const YAW_DEADBAND = 0.15;             // both branches: yaw=±1 outside; yaw=0 inside
+const APPROACH_THRUST_GATE = 0.30;     // APPROACH: thrust on when |targetDiff| < this AND closing slower than desired
+const BRAKE_THRUST_GATE = Math.PI - 0.30;  // BRAKE: thrust on when facing ≤162° away from brake direction (avoid thrust-forward)
 
 // --------------------------------------------------------------------------
 // Exported pure helpers
@@ -179,38 +201,130 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
 }
 
 /**
- * Pure: the single-mode chase controller. Turn toward target, thrust
- * when aligned. No BRAKE branch (no closing-speed throttle), no
- * Spin-Brake sub-phase (no inertia-opposing yaw). The ship's
- * `YAW_INERTIA_TAU=0.2` does the natural settling via angular
- * momentum — the brain stays out of the loop's way.
+ * Pure: the chase controller. v0.21.x adds a BRAKE branch for true
+ * "bremsen, drehen, linear aufsammeln" piloting. The user observed
+ * the bot flying in circles around powerups because the v0.20.x
+ * engageController had no closing-speed throttle — the ship's
+ * forward momentum carried it past the target in wide arcs.
  *
- * Deadbands are small (±0.15 yaw, ±0.30 thrust) so the ship commits
- * to a heading and stays there. With no algorithmic correction of
- * inertia, a tight deadband would chatter across the alignment edge
- * (the legacy SPIN-BRAKE was designed to fix exactly this); without
- * a BRAKE branch, the ship just rolls past alignment under inertia
- * and the brain settles it on the next frame. The deadband is sized
- * to absorb the natural overshoot and not stutter.
+ * Three branches:
+ *
+ *   1. PICKUP  — at the target itself, no thrust, no yaw.
+ *
+ *   2. BRAKE   — ship has notable XZ speed (>4) AND the projected
+ *                closing speed exceeds the desired approach speed.
+ *                Rotate to the opposite-of-velocity direction and
+ *                thrust backward to shed speed. The thrust deadband
+ *                is LOOSE (±0.50) so the dump can fire during the
+ *                rotation itself — without this, the ~0.785s yaw
+ *                flip at YAW_SPEED=4 would be wasted (no deceleration).
+ *                Enabled when `speed > 4` AND `closingSpeed >
+ *                desiredClosing`. The speed>4 floor prevents
+ *                micro-oscillation at low idle speed.
+ *
+ *   3. APPROACH — align with target and thrust. Thrust is gated on
+ *                alignment (|targetDiff| < 0.30) AND closing speed
+ *                not yet at the desired rate (closingSpeed <
+ *                desiredClosing). The combined gate prevents the
+ *                "turn AND thrust simultaneously sideways" pattern
+ *                — you must commit to a heading before accelerating.
+ *
+ * The BRAKE → APPROACH transition creates an "emergent coasting"
+ * phase: when BRAKE stops firing (closing speed dropped), the ship
+ * is still rotated ~180° away from the target. APPROACH then fires
+ * yaw=±1 with thrust=false (|targetDiff| > 0.30), giving a clean
+ * drift-turn with LINEAR_DRAG shedding the remaining speed. Once
+ * ±0.30 of the target, thrust engages and the ship closes in
+ * linearly. This is exactly the user's "zu bremsen und einfach zu
+ * drehen und dann linear aufzusammeln" intent, achieved with no
+ * explicit state machine — just deadband physics + the lack of
+ * v0.12.x anti-feathering layers that turned this into a wobble.
+ *
+ * Why no Spin-Brake sub-phase: v0.12.x's spin-brake was added to
+ * dampen |aiAngularVelocity|>1.0 oscillations during approach.
+ * In v0.21.x the residual overshoot at ±0.15 yaw deadband is well
+ * within the YAW_INERTIA_TAU=0.2 angular time-constant (overshoot
+ * ≈0.05 rad). The simpler two-branch controller is calmer than the
+ * v0.12.x three-branch version once the predictive-DODGE /
+ * mode-hysteresis / debouncer confounding layers are gone.
  *
  * @param {{x:number,z:number}} aiPos
  * @param {number} aiYaw
  * @param {{x:number,z:number}} targetPos
- * @returns {{ dist: number, yaw: number, thrust: boolean, diff: number }}
+ * @param {{x:number,z:number}} aiVel  ship's current XZ velocity
+ * @returns {{ dist: number, yaw: number, thrust: boolean, diff: number, closingSpeed: number, branch: 'pickup'|'brake'|'approach' }}
  */
-export function engageController(aiPos, aiYaw, targetPos) {
+export function engageController(aiPos, aiYaw, targetPos, aiVel) {
   const dx = targetPos.x - aiPos.x;
   const dz = targetPos.z - aiPos.z;
   const dist = Math.hypot(dx, dz);
   if (dist < 0.01) {
     // On top of (or inside) the target — pickup radius absorbs.
-    return { dist: 0, yaw: 0, thrust: false, diff: 0 };
+    return { dist: 0, yaw: 0, thrust: false, diff: 0, closingSpeed: 0, branch: 'pickup' };
   }
+  const speed = Math.hypot(aiVel.x, aiVel.z);
+  // Project velocity onto the line-of-sight to the target. Positive
+  // closing speed = approaching; negative = receding. dy/dt per
+  // tick, signed for direction.
+  const closingSpeed = (dx * aiVel.x + dz * aiVel.z) / dist;
+  // desiredClosing = Math.max(8, Math.min(40, dist))
+  //
+  // Three-zone approach-speed profile that fixes the v0.12.x-era
+  // "circling powerups" symptom while keeping long-range intercepts
+  // visibly engaged (not perpetually braked, as `Math.min(15, dist)`
+  // produced at v0.21.x):
+  //   * dist ≤ 8   → cap at 8 u/s — tight coast-in regardless of
+  //                  how close the pickup. Ship cannot overshoot a
+  //                  5u pickup when cruise is 8 u/s.
+  //   * 8 < dist ≤ 40 → cruise at dist/2 (linear scale). 12u → 6;
+  //                  32u → 16. Cruise speed feels deliberate.
+  //   * dist > 40  → cap at 40 u/s. The bot still closes 200u
+  //                  targets at 40 u/s (visible motion), not 15 u/s
+  //                  (paralyzed cruise). BRAKE fires only when
+  //                  closing is materially above 40.
+  // Result: BRAKE→APPROACH→linear coast-in. Ship arrives at the
+  // pickup at the cruise cap (no overshoot), applies delta-v exactly.
+  const desiredClosing = Math.max(8, Math.min(40, dist));
+
+  // ---- BRAKE branch: high speed + closing too fast ----
+  // Trim-speed before overshooting. Rotate to opposite-velocity
+  // direction; thrust backward when facing into the brake
+  // direction. The speed>4 floor prevents an idle-velocity
+  // BRAKE/APPROACH oscillation (the very-low-speed regime is
+  // handled cleanly by APPROACH).
+  if (speed > 4 && closingSpeed > desiredClosing) {
+    const velAngle = Math.atan2(aiVel.z, aiVel.x);
+    const brakeAngle = wrapAngle(velAngle + Math.PI);
+    const brakeDiff = wrapAngle(brakeAngle - facingAngle(aiYaw));
+    // See module-scope constants for the math behind each gate. The
+    // gate choice here is `BRAKE_THRUST_GATE ≈ 162°`: when the ship
+    // faces within 162° of the brake direction, thrust fires; when
+    // it's facing within 18° of the TARGET direction, thrust is off
+    // (would accelerate forward, opposite of brake).
+    return {
+      dist,
+      yaw: brakeDiff > YAW_DEADBAND ? -1 : brakeDiff < -YAW_DEADBAND ? 1 : 0,
+      thrust: Math.abs(brakeDiff) < BRAKE_THRUST_GATE,
+      diff: brakeDiff,
+      closingSpeed,
+      branch: 'brake',
+    };
+  }
+
+  // ---- APPROACH branch: align + thrust when in range ----
   const targetAngle = Math.atan2(dz, dx);
-  const diff = wrapAngle(targetAngle - facingAngle(aiYaw));
-  const yaw = diff > 0.15 ? -1 : diff < -0.15 ? 1 : 0;
-  const thrust = Math.abs(diff) < 0.30;
-  return { dist, yaw, thrust, diff };
+  const targetDiff = wrapAngle(targetAngle - facingAngle(aiYaw));
+  return {
+    dist,
+    yaw: targetDiff > YAW_DEADBAND ? -1 : targetDiff < -YAW_DEADBAND ? 1 : 0,
+    // Thrust only when aligned (within deadband) AND not already
+    // at desired closing speed. The combined gate prevents the
+    // "thrust-sideways-while-turning" pattern that produces slides.
+    thrust: Math.abs(targetDiff) < APPROACH_THRUST_GATE && closingSpeed < desiredClosing,
+    diff: targetDiff,
+    closingSpeed,
+    branch: 'approach',
+  };
 }
 
 /**
@@ -287,6 +401,7 @@ function pickTarget({ aiPos, asteroids, powerupPos, targetDist, powerupBiasU }) 
 export function aiBrainTick({
   aiPos,
   aiYaw,
+  aiVel = { x: 0, z: 0 }, // v0.21.x — required for engageController's BRAKE branch (defaults to zero when omitted).
   asteroids,
   time, // kept for API parity with prior versions; not used internally anymore
   powerupPos = null,
@@ -332,7 +447,7 @@ export function aiBrainTick({
     powerupBiasU,
   });
   if (target) {
-    const ec = engageController(aiPos, aiYaw, target.pos);
+    const ec = engageController(aiPos, aiYaw, target.pos, aiVel);
     let fire = false;
     for (const a of asteroids) {
       if (!a || typeof a.getPosition !== 'function') continue;
@@ -431,6 +546,11 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     return {
       aiPos: ship.position,
       aiYaw: ship.rotation.yaw,
+      // v0.21.x — forward the ship's current XZ velocity so the
+      // engageController can run its BRAKE branch. The XZ slice is
+      // intentional: ship.js' `velocity` includes a 0 Y component
+      // and the brain only needs the XZ plane.
+      aiVel: { x: ship.velocity.x, z: ship.velocity.z },
       asteroids,
       powerupPos: getPowerupPos ? getPowerupPos() : null,
       targetDist: opts.targetDist,
