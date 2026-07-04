@@ -8,6 +8,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || { echo "ERROR: not in a git repo"; exit 1; }
 [ -d .githooks ] || { echo "ERROR: .githooks/ missing in $(pwd)"; exit 1; }
+[ -x .githooks/post-commit ] || { echo "ERROR: .githooks/post-commit missing or not executable in $(pwd)"; exit 1; }
 
 git config core.hooksPath .githooks
 
