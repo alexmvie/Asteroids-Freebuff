@@ -965,35 +965,41 @@ console.log(
 console.log('Ship online. WASD/arrows to fly, Space to fire, any key to start.');
 console.log(`State: ${stateMachine.getState()}   Energy: ${ship.getEnergy()}   Score: ${score}`);
 
+// ---- Dev-friendly console banner ----------------------------------------
+console.log(
+  '%c Asteroids -> Elite %c scaffolded ',
+  'background:#48dbfb;color:#05060c;font-weight:bold;padding:2px 6px;border-radius:2px;',
+  'color:#97a3c4;',
+);
+console.log('Ship online. WASD/arrows to fly, Space to fire, any key to start.');
+console.log(`State: ${stateMachine.getState()}   Energy: ${ship.getEnergy()}   Score: ${score}`);
+
 // ---- Game version chip (bottom-right HUD) -------------------------------
 // SSOT for the visible build version. Standing rule from the user
-// (2026-07-04): bump GAME_VERSION in EVERY commit AND push immediately
-// after, so the corner chip always reflects the actual code on origin.
-// GAME_BRANCH + GAME_COMMIT separately track the branch + short SHA
-// so the user can verify at a glance they're on the up-to-date build
-// AND the right branch.
-const GAME_VERSION = 'v0.17.0';
+// (2026-07-04): bump GAME_VERSION in EVERY commit AND `git push -u origin
+// <branch>` immediately after, so the corner chip + the remote are
+// always in sync with the local checkout. GAME_BRANCH + GAME_COMMIT
+// separately track the branch + short SHA so the user can verify at a
+// glance they're on the up-to-date build AND the right branch.
+const GAME_VERSION = 'v0.17.1'; // hotfix: removed duplicate bottom console.logs
 const GAME_BRANCH = 'refine-coded-ai';
-const GAME_COMMIT = '2d9c243'; // git short SHA; update per commit
+const GAME_COMMIT = 'TBD'; // filled by the post-commit hook (no hook yet)
 {
   const v = document.getElementById('game-version');
   if (v) {
     v.innerHTML =
-      `<span class="game-version__branch">${GAME_BRANCH}</span>` +
-      `<span class="game-version__ver">${GAME_VERSION}</span>` +
-      `<span class="game-version__commit">${GAME_COMMIT}</span>`;
+      '<span class="game-version__branch">' + GAME_BRANCH + '</span>' +
+      '<span class="game-version__ver">' + GAME_VERSION + '</span>' +
+      '<span class="game-version__commit">' + GAME_COMMIT + '</span>';
   }
 }
 
-// Re-stamp the dev console banner so the version is visible in DevTools
-// alongside the in-game chip. Same SSOT constants above.
+// One extra console.log stamping the version. The 3 logs above this
+// block are NOT duplicated here — the prior commit accidentally re-
+// emitted all three (banner + Ship online + State) on top of the
+// new version line; this hotfix fixes that regression.
 console.log(
-  '%c Asteroids \u2192 Elite %c scaffolded ',
-  'background:#48dbfb;color:#05060c;font-weight:bold;padding:2px 6px;border-radius:2px;',
-  'color:#97a3c4;',
-);
-console.log(
-  `%c${GAME_VERSION}%c on %c${GAME_BRANCH}%c @ %c${GAME_COMMIT}%c`,
+  '%c' + GAME_VERSION + '%c on %c' + GAME_BRANCH + '%c @ %c' + GAME_COMMIT + '%c',
   'background:#48dbfb;color:#05060c;padding:2px 6px;border-radius:2px;font-weight:bold;',
   'color:#97a3c4;',
   'color:#48dbfb;',
@@ -1001,5 +1007,3 @@ console.log(
   'color:#48dbfb;',
   'color:#97a3c4;',
 );
-console.log('Ship online. WASD/arrows to fly, Space to fire, any key to start.');
-console.log(`State: ${stateMachine.getState()}   Energy: ${ship.getEnergy()}   Score: ${score}`);
