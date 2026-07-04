@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""
+.githooks/post-commit -- auto-publish every commit to origin/<branch>.
+
+Standing rule (AGENTS.md Rule 6, updated 2026-07-04): on the
+`refine-coded-ai` branch, unattended pushes are sanctioned. The user
+explicitly requested this after the Vite `define` chip landed, so
+they no longer have to remember `git push` after every commit.
+
+Why this hook exists (and stays trivial)
+----------------------------------------
+The previous post-commit hook on this repo tried to AMEND the
+commit's content (bake the SHA into src/version-constants.js +
+git amend) which created a chicken-and-egg and required a marker-
+based anti-recursion + try/except cleanup. That hook was deleted
+when the Vite `define` approach shipped (see SPEC.md §16) -- the
+SHA now reads at config-load via `git rev-parse --short HEAD`,
+honest by construction, no amend needed.
+
+This NEW hook is simpler because it does NOT touch the commit's
+content. It just calls `git push` -- which is additive (pushes any
+upstream-missing commits + the current HEAD) and cannot re-fire the
+source-side post-commit hook (only the receiving-side hooks fire,
+and there are none on origin). Zero recursion risk -- NO MARKER
+FILE NEEDED.
+
+Failure handling
+----------------
+If git push returns non-zero (network down, auth expired, repo
+removed, etc.):
+- The commit STAYS committed locally (the commit happens BEFORE
+  this hook fires; the hook is post-commit).
+- The hook prints a stderr line + exits 1, so the user sees the
+  failure on the terminal right after they typed git commit.
+- The NEXT commit's hook re-attempts `git push`, which is additive
+  -- it picks up the stray commit from last time + the new HEAD.
+
+Idempotency
+-----------
+`git push` is idempotent on the receiving side (pushes only what
+origin doesn't already have). So this hook can fire as many times
+as the user commits without ever "double-pushing" anything.
+
+Install
+-------
+git config core.hooksPath .githooks    # project-local, one-time
+                                        # per fresh clone
+
+Or use the convenience wrapper: `./scripts/install-hooks.sh`
+"""
+import subprocess
+import sys
+
+
+def main():
+    try:
+        subprocess.check_call(['git', 'push'])
+        print('[post-commit] git push ok.')
+    except subprocess.CalledProcessError as e:
+        print(
+            f'[post-commit] git push failed (exit {e.returncode}).\n'
+            f'[post-commit] commit WAS COMMITTED LOCALLY but NOT PUSHED.\n'
+            f'[post-commit] next commit will retry (git push is additive).',
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
