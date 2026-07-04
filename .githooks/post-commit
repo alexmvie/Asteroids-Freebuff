@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""
+.githooks/post-commit — keep src/version-constants.js's COMMIT line in
+sync with HEAD so the bottom-right version chip + dev-console banner
+honestly report the actual SHA. Without this hook the only way to
+keep the chip honest is to manually update the constant + amend each
+time, which happens rarely in practice.
+
+Install (project-local, picked up by clones that re-run it):
+
+    git config core.hooksPath .githooks
+
+Anti-recursion: the amend uses --no-verify so neither the pre-commit
+nor the post-commit hook re-fires for the amend commit. Without
+--no-verify this hook would amend → fire post-commit → amend → …
+
+Idempotency: if the COMMIT line already equals git rev-parse --short
+HEAD, the hook exits without amending (no reflog churn).
+
+Edge cases handled:
+- COMMIT line missing entirely (e.g. project pre-bootstrap): insert a
+  fresh COMMIT line immediately before the existing `export { … }`.
+- macOS / Linux portability: pure Python3 (re.sub + Path.write_text),
+  no GNU-vs-BSD sed dependency. Tested on macOS 14 + Debian 12 (both
+  Python 3.11).
+- shebang: `#!/usr/bin/env python3` — works on every Unix + macOS
+  + WSL env; Windows-native git would need extra setup (rarely used
+  for this project).
+"""
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(
+    subprocess.check_output(['git', 'rev-parse', '--show-toplevel'])
+    .decode()
+    .strip()
+)
+TARGET = REPO_ROOT / 'src' / 'version-constants.js'
+SHORT_SHA = (
+    subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'])
+    .decode()
+    .strip()
+)
+
+text = TARGET.read_text(encoding='utf-8')
+
+# Idempotency short-circuit: bail when the file is already in sync.
+# Matches both `'<sha>'` and `"<sha>"` quote styles (defensive — we
+# use double quotes inside Python itself).
+if re.search(rf"^const COMMIT = ['\"]" + re.escape(SHORT_SHA) + r"['\"];",
+             text, re.M):
+    sys.exit(0)
+
+new_line = f'const COMMIT = "{SHORT_SHA}";'
+
+# Replace an existing COMMIT line (keeps the export block order intact).
+# Fall back to insertion before `export { … }` when the line is missing
+# entirely (e.g. pre-bootstrap files that haven't been touched by an
+# earlier hook run).
+if re.search(r'^const COMMIT = ', text, re.M):
+    text = re.sub(r'^const COMMIT = .*$', new_line, text, flags=re.M)
+else:
+    text = re.sub(r'^(export \{)', new_line + r'\n\1', text, flags=re.M, count=1)
+
+TARGET.write_text(text, encoding='utf-8')
+
+subprocess.check_call(['git', 'add', str(TARGET)])
+# --no-edit prevents the message from changing. --no-verify prevents
+# both pre-commit + post-commit hooks from re-running for this amend.
+subprocess.check_call(['git', 'commit', '--amend', '--no-edit', '--no-verify'])

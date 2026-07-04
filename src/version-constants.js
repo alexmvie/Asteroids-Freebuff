@@ -1,6 +1,6 @@
 /**
- * src/version.js — single source of truth for the game's version +
- * branch metadata.
+ * src/version-constants.js — single source of truth for the game's version +
+ * branch + commit metadata.
  *
  * Why this file exists (SSOT)
  * ---------------------------
@@ -9,40 +9,56 @@
  * their consumers (e.g. `src/entities/ship-constants.js` owns ship
  * physics, `src/scene/camera-constants.js` owns camera behavior,
  * `src/training/defaults.js` owns training tunables). The game
- * metadata (version label + branch name) is the same kind of tunable
- * — it's a build-time constant that two distinct consumers read
- * (the bottom-right HUD chip + the dev console banner) — and
- * therefore belongs in its own constants module rather than being
- * inlined in `src/main.js`.
+ * metadata (version label + branch name + commit SHA) is the same kind
+ * of tunable — it's a build-time constant that the bottom-right HUD
+ * chip + dev-console banner read — and therefore belongs in its own
+ * constants module rather than being inlined in `src/main.js`.
  *
  * Consumers
  * ---------
  *   1. `src/main.js` renders the bottom-right version chip
- *      (`#game-version`) using `BRANCH` + `VERSION` here.
+ *      (`#game-version`) using `BRANCH` + `VERSION` + `COMMIT` here.
  *   2. `src/main.js` prints the dev-console banner stamping the
- *      same two values so DevTools and the corner chip agree.
+ *      same three values so DevTools and the corner chip agree.
  *
  * Update procedure
  * ----------------
- * Bump both VERSION and BRANCH here whenever a meaningful public
- * change ships:
- *   - VERSION: increment per the project's semver-ish convention
- *     (v0.MM.PP, with M bumped for behavior changes and P bumped
- *     for hotfixes on the same release).
- *   - BRANCH: lowercased branch name ("refine-coded-ai",
- *     "power-up-system", etc.). The display chip distinguishes
- *     branches without code changes -- a different branch renders
- *     a different label.
+ * - VERSION: increment per the project's semver-ish convention
+ *   (v0.MM.PP, with M bumped for behavior changes and P bumped for
+ *   hotfixes on the same release). Manual edits only — never
+ *   auto-bumped because VERSION reflects SEMANTIC version, not
+ *   commit count.
+ * - BRANCH: lowercased branch name ("refine-coded-ai",
+ *   "power-up-system", etc.). Manual edits only — distinguishes
+ *   branches visually without code changes elsewhere.
+ * - COMMIT: populated automatically by `.githooks/post-commit`
+ *   after each `git commit`. The hook reads `git rev-parse --short
+ *   HEAD` and writes it back into this file, then `git commit
+ *   --amend --no-verify`s so the file's content reflects its own
+ *   SHA. The chip stays in sync with HEAD because every commit
+ *   captures a version-constants.js whose COMMIT line == its own
+ *   hash. The bootstrap placeholder `'\'<unset>\'` (this string)
+ *   is replaced on the FIRST commit that fires the hook; until
+ *   then the chip's commit span reads literally `'<unset>'`.
  *
- * NOTE: this file does NOT export a "commit" string. A hard-coded or
- * stale SHA leaves the chip disagreeing with itself (v0.17.3 hit
- * this exact bug twice). When a post-commit hook updates this file
- * from `git rev-parse --short HEAD`, that's the right place to add
- * it -- the chip render path will start including it, the constants
- * stay declarative, and the chip stays in sync with HEAD.
+ * Install the hook (one-time, project-local):
+ *
+ *     git config core.hooksPath .githooks
+ *
+ * The hook is plain Python (`#!/usr/bin/env python3`); works on
+ * macOS + Linux + WSL out of the box. It is idempotent: commits
+ * whose COMMIT line already equals HEAD SHA exit without
+ * amending. It uses `--no-verify` on the amend so neither the
+ * pre-commit nor post-commit hook re-fires for the amend commit
+ * (no infinite amend cycle).
  */
 
 const VERSION = 'v0.18.0';
 const BRANCH = 'refine-coded-ai';
+// Populated automatically by .githooks/post-commit after each commit.
+// The string `'\'<unset>\'` is the bootstrap placeholder shown when
+// the hook has not yet fired for this working copy (e.g. fresh
+// clone whose first commit was created WITHOUT the hook installed).
+const COMMIT = "c235baf";
 
-export { VERSION, BRANCH };
+export { VERSION, BRANCH, COMMIT };

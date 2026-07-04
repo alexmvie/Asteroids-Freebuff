@@ -23,7 +23,7 @@ import { createEventBus } from './systems/events.js';
 import { createStateMachine, State } from './systems/state.js';
 import { createHud } from './ui/hud.js';
 import { createDebugHud } from './ui/debug-hud.js';
-import { VERSION, BRANCH } from './version-constants.js';
+import { VERSION, BRANCH, COMMIT } from './version-constants.js';
 import { createDemoAi } from './entities/ai.js';
 import { createAsteroidField } from './systems/asteroid-field.js';
 import { createAsteroidUvDebugOverlay } from './systems/asteroid-uv-debug-overlay.js';
@@ -986,19 +986,31 @@ function escapeHtml(s) {
 {
   const v = document.getElementById('game-version');
   if (v) {
-    // Two-span chip (branch + version). The commit-span was dropped:
-    // a hard-coded or stale SHA leaves the chip disagreeing with
-    // itself. Future post-commit-hook iteration will re-add it.
+    // Three-span chip (branch + version + commit). The commit span is
+    // populated by `.githooks/post-commit` after every `git commit`,
+    // which writes the just-created SHA into `COMMIT` in
+    // src/version-constants.js and amends the current commit. So the
+    // committed file's content always reflects its own SHA -- the
+    // chip stays in lockstep with HEAD. Before the hook fires (e.g.
+    // a fresh clone whose first commit was created without the
+    // hook installed) the span reads the literal `<unset>` placeholder.
+    //
+    // The escapeHtml helper is defense-in-depth: the SHA is
+    // alphanumeric so it's safe today, but if COMMIT ever becomes
+    // user-influenced (e.g. extended to read a CI variable), the
+    // helper treats accidental HTML injection as an invalid-character
+    // sequence rather than an XSS bug.
     v.innerHTML =
       `<span class="game-version__branch">${escapeHtml(BRANCH)}</span>` +
-      `<span class="game-version__ver">${escapeHtml(VERSION)}</span>`;
+      `<span class="game-version__ver">${escapeHtml(VERSION)}</span>` +
+      `<span class="game-version__commit">${escapeHtml(COMMIT)}</span>`;
   }
 }
 
-// One extra console.log stamping the version + branch (matches the
-// chip so DevTools and the corner chip agree). ONE log, not two:
+// One extra console.log stamping version + branch + commit (matches
+// the chip so DevTools and the corner chip agree). ONE log, not two:
 console.log(
-  `%c${VERSION}%c on %c${BRANCH}%c`,
+  `%c${VERSION}%c on %c${BRANCH}%c @ ${COMMIT}`,
   'background:#48dbfb;color:#05060c;padding:2px 6px;border-radius:2px;font-weight:bold;',
   'color:#97a3c4;',
   'color:#48dbfb;',

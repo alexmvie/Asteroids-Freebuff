@@ -1612,3 +1612,17 @@ canvas {
   letter-spacing: var(--letter-spacing-wider);
   color: var(--color-primary);
 }
+.game-version__commit {
+  display: block;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-normal);
+  letter-spacing: var(--letter-spacing-tight);
+  color: var(--color-fg-dim);
+  opacity: 0.7;
+  /* tabular-nums keeps the SHA's letters at a fixed width so the
+     chip's right edge doesn't jitter as the user types new SHAs
+     (the COMMIT span changes between dev sessions and rebuilds).
+     Monospace is overkill here but tabular-nums is enough. */
+  font-variant-numeric: tabular-nums;
+  text-transform: lowercase;
+}
