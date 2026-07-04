@@ -23,6 +23,7 @@ import { createEventBus } from './systems/events.js';
 import { createStateMachine, State } from './systems/state.js';
 import { createHud } from './ui/hud.js';
 import { createDebugHud } from './ui/debug-hud.js';
+import { VERSION, BRANCH } from './version-constants.js';
 import { createDemoAi } from './entities/ai.js';
 import { createAsteroidField } from './systems/asteroid-field.js';
 import { createAsteroidUvDebugOverlay } from './systems/asteroid-uv-debug-overlay.js';
@@ -965,9 +966,6 @@ console.log(
 console.log('Ship online. WASD/arrows to fly, Space to fire, any key to start.');
 console.log(`State: ${stateMachine.getState()}   Energy: ${ship.getEnergy()}   Score: ${score}`);
 
-const GAME_VERSION = 'v0.17.3'; // final cleanup: drop dead GAME_COMMIT + dead .game-version__commit CSS + add escapeHtml defense
-const GAME_BRANCH = 'refine-coded-ai';
-
 // escapeHtml -- defense-in-depth against accidental HTML injection when
 // the chip constants become dynamic in a future iteration (a post-commit
 // hook reading `git rev-parse --short HEAD`, or `process.env.GITHUB_REF`).
@@ -992,15 +990,15 @@ function escapeHtml(s) {
     // a hard-coded or stale SHA leaves the chip disagreeing with
     // itself. Future post-commit-hook iteration will re-add it.
     v.innerHTML =
-      `<span class="game-version__branch">${escapeHtml(GAME_BRANCH)}</span>` +
-      `<span class="game-version__ver">${escapeHtml(GAME_VERSION)}</span>`;
+      `<span class="game-version__branch">${escapeHtml(BRANCH)}</span>` +
+      `<span class="game-version__ver">${escapeHtml(VERSION)}</span>`;
   }
 }
 
 // One extra console.log stamping the version + branch (matches the
 // chip so DevTools and the corner chip agree). ONE log, not two:
 console.log(
-  `%c${GAME_VERSION}%c on %c${GAME_BRANCH}%c`,
+  `%c${VERSION}%c on %c${BRANCH}%c`,
   'background:#48dbfb;color:#05060c;padding:2px 6px;border-radius:2px;font-weight:bold;',
   'color:#97a3c4;',
   'color:#48dbfb;',
