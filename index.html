@@ -110,6 +110,10 @@
       <button class="debug-hud__toggle" id="debug-toggle-uv-viewer" type="button" data-debug="uvViewerToggle">UV UNWRAP: OFF</button>
       <button class="debug-hud__toggle" id="debug-toggle-edit" type="button" data-debug="editToggle">EDIT OBJECT</button>
     </div>
+    <!-- Bottom-right version chip. Populated by src/main.js so the
+         version string lives in a single SSOT (GAME_VERSION constant).
+         aria-hidden=true because it's decorative and not actionable. -->
+    <div id="game-version" class="game-version" aria-hidden="true"></div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

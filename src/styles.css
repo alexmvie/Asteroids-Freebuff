@@ -1564,3 +1564,59 @@ canvas {
 .edit-screen__pick-hint--hidden {
   display: none;
 }
+
+/* ============================================================================
+   Block: game-version (bottom-right HUD)
+   ----------------------------------------------------------------------------
+   Display-only chip that always shows the live build version + branch
+   + short commit hash. Lives in the bottom-right corner (the chosen
+   corner because top-bar / top-right / bottom-left are taken by the
+   score + energy bar + debug HUD respectively). `pointer-events: none`
+   so it never intercepts clicks on the canvas or any UI. The chip
+   is purely informational, never actionable, hence `aria-hidden=true`
+   in the HTML (set by src/main.js and the index.html container).
+   ============================================================================ */
+
+.game-version {
+  position: fixed;
+  bottom: var(--space-3);
+  right: var(--space-3);
+  z-index: var(--z-hud);
+  font-family: var(--font-family);
+  text-align: right;
+  user-select: none;
+  pointer-events: none;
+  line-height: var(--line-height-tight);
+  color: var(--color-fg);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-quarter);
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-md);
+}
+.game-version__branch {
+  display: block;
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--letter-spacing-wide);
+  color: var(--color-fg-dim);
+  opacity: 0.8;
+  text-transform: uppercase;
+}
+.game-version__ver {
+  display: block;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  color: var(--color-primary);
+}
+.game-version__commit {
+  display: block;
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--letter-spacing-base);
+  color: var(--color-fg-dim);
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
