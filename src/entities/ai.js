@@ -138,6 +138,17 @@ const DEFAULTS = Object.freeze({
   fireMaxDist: 55,
 
   /**
+   * v0.22.x (Laser-Awareness) -- tight cone (~3 deg) for laser
+   * mode lock-on. When activeWeapon === 'laser', the fire-loop
+   * uses this narrow cone instead of bullet-mode's ~20 deg cone.
+   * The user-reported "kein Plan was das Ship im Laser-Modus
+   * tut" symptom is solved: bot's beam lines up with target
+   * BEFORE firing (continuous beam + tight aim = turret mode),
+   * no more wide sweep with mostly-misses.
+   */
+  laserFireConeHalfAngle: 0.05,
+
+  /**
    * Lookahead horizon (seconds) for predictive collision avoidance.
    * v0.22.x — fires when ANY asteroid projects within
    * `lookaheadMinRadius` of the ship within this window. Default
@@ -586,7 +597,9 @@ export function aiBrainTick({
   panicDist = DEFAULTS.panicDist,
   fireConeHalfAngle = DEFAULTS.fireConeHalfAngle,
   fireMinDist = DEFAULTS.fireMinDist, // v0.22.x — close-range skip for fire check
-  fireMaxDist = DEFAULTS.fireMaxDist, // v0.22.x — far-range skip for fire check
+  fireMaxDist = DEFAULTS.fireMaxDist,
+  activeWeapon = 'bullet', // v0.22.x Step 4 - 'bullet' | 'laser'; laser uses tight cone + no dist gate
+  laserFireConeHalfAngle = DEFAULTS.laserFireConeHalfAngle, // v0.22.x — tight aim for laser-mode lock-on
   lookaheadTime = DEFAULTS.lookaheadTime, // v0.22.x — lookahead horizon for predictive dodge
   lookaheadMinRadius = DEFAULTS.lookaheadMinRadius, // v0.22.x — projDist threshold for lookahead dodge
 }) {
@@ -695,7 +708,36 @@ export function aiBrainTick({
     // yaw gating and produces visible wobble at the ±0.15 deadband.
     const ec = engageController(aiPos, aiYaw, target.pos, aiVel, aiAngularVel);
     let fire = false;
-    for (const a of asteroids) {
+    if (activeWeapon === 'laser') {
+      // v0.22.x Step 4: laser-mode path - continuous beam, tight
+      // cone on chase target, no dist gate (laser has 500u
+      // effective range per LASER_LENGTH in src/entities/laser.js).
+      // The user's complaint was that the AI ship had no plan in
+      // laser mode (sweeping wildly, no lock-on). Laser mode now
+      // LOCKS ON to the pickTarget result and aims dead-center
+      // via laserFireConeHalfAngle (~3 deg), firing any tick the
+      // chase target is in cone.
+      //
+      // Lock-on semantics (vs `swept widecone`): the fire-check
+      // targets ONLY the chase target (target.pos), even if another
+      // in-cone asteroid would make a clean shot. This is the
+      // whole point of laser-mode — beam locks on the chase arc,
+      // sweeps-and-misses at any in-cone asteroid while the chase
+      // target sits off-axis. If a future refactor "optimizes"
+      // this to scan all asteroids like bullet-mode, the locked-on
+      // contract breaks and the player sees sweeping beam probes
+      // again.
+      //
+      // Powerup-expiry smoothness: when the laser expires mid-
+      // chase and the target is past bullet fireMaxDist=55, the
+      // brain drops from laser-fire (no dist gate) to bullet-no-
+      // fire (dist gate enforces) for ~1s until chase closes the
+      // gap. Invisible in practice: chase cruises at ~40 u/s, gap
+      // closes fast. Doc-as-test pin: the engageController always
+      // closes the chase regardless of fire branch.
+      fire = isTargetInFront(aiPos, aiYaw, target.pos, laserFireConeHalfAngle);
+    } else {
+      for (const a of asteroids) {
       if (!a || typeof a.getPosition !== 'function') continue;
       const p = a.getPosition();
       if (!p) continue;
@@ -711,6 +753,7 @@ export function aiBrainTick({
         fire = true;
         break;
       }
+    }
     }
     return { yaw: ec.yaw, thrust: ec.thrust, mode: target.mode, fire };
   }
@@ -768,7 +811,7 @@ export function pickAiSpawn(radius = DEFAULTS.spawnRadius, rng = Math.random) {
  *   options?: object,
  * }} opts
  */
-export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = null, options = {} } = {}) {
+export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = null, getActiveWeapon = null, options = {} } = {}) {
   if (!scene) throw new Error('createDemoAi: `scene` is required');
   if (!Array.isArray(asteroids)) throw new Error('createDemoAi: `asteroids` must be an array');
 
@@ -825,6 +868,12 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       // chase itself remains unbounded (see Step 3 chained nudge).
       fireMinDist: opts.fireMinDist,
       fireMaxDist: opts.fireMaxDist,
+      // v0.22.x Step 4 - active weapon (bullet|laser) forwarded
+      // so aiBrainTick branches fire-loop between distance-gated
+      // wide-cone (bullet, Step 3) and tight-cone laser path.
+      // Default 'bullet' if no getActiveWeapon hook; back-compat
+      // with existing callers (no-hook path = pure bullet AI).
+      activeWeapon: getActiveWeapon ? getActiveWeapon() : 'bullet',
       // v0.22.x — forward the lookahead opts so aiBrainTick's
       // LOOKAHEAD-DODGE branch can project the flight path against
       // the asteroid field and break off BEFORE a swarm gets in

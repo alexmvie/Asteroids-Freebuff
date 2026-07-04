@@ -396,6 +396,14 @@ const demoAi = createDemoAi({
     const p = powerupSystem.getPendingSpawn();
     return p ? p.getPosition() : null;
   },
+  // v0.22.x Step 4 (Laser-Awareness): tell the brain whether the
+  // laser power-up is currently active. aiBrainTick branches its
+  // fire-loop on this: 'bullet' → distance-gated wide-cone fire
+  // (Step 3), 'laser' → tight ~3° cone lock-on the chase target
+  // with no dist gate. The brain re-reads this every tick (the
+  // hook is a closure), so the AI automatically switches its aim
+  // style the moment the laser power-up is picked up or expires.
+  getActiveWeapon: () => (powerupSystem.isLaserActive() ? 'laser' : 'bullet'),
   // No `options` override needed — the factory uses the hand-coded
   // rule-based brain by default (see createDemoAi in src/entities/ai.js).
 });

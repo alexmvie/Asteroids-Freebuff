@@ -1598,6 +1598,171 @@ test('createDemoAi: factory threads lookaheadTime + lookaheadMinRadius into brai
     'factory threads options.lookaheadMinRadius into brain.args.lookaheadMinRadius');
 });
 
+// ------------------------------------------------------------------
+// v0.22.x Step 4 (Laser-Awareness): laser-mode fire loop branches on
+// activeWeapon. Laser locks on the chase target with a tight ~3° cone
+// (`laserFireConeHalfAngle: 0.05`) and no distance gate (the laser
+// has ~500u effective range per LASER_LENGTH in src/entities/laser.js).
+// Bullet-mode (Step 3) keeps the distance-gated wide-cone fire. The
+// "lock-on wins over widecone any-asteroid" semantic is THE contract:
+// even if a clean widecone shot exists, the laser fires ONLY at the
+// chase target — the beam locks, doesn't sweep.
+// ------------------------------------------------------------------
+
+test('aiBrainTick: laser-mode — chase target in tight cone → fire=true', () => {
+  // Ship facing -Z (yaw=0, facingAngle=-π/2). Chase target at (0, -40)
+  // — directly ahead. ticks of laser mode activates, default
+  // laserFireConeHalfAngle=0.05 (~3°). Target on-axis → tight-cone YES.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    aiVel: ZERO_VEL,
+    asteroids: [mockAsteroid(0, -40)],
+    time: 0,
+    activeWeapon: 'laser',
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.fire, true,
+    'laser-mode + chase target on-axis → fire=true (lock-on aligned)');
+});
+
+test('aiBrainTick: laser-mode — chase target off-axis > 3° → fire=false', () => {
+  // Same chase setup, but the chase target is OFF the laser-tight
+  // cone (3°). The ship needs to rotate to align. Without a clean
+  // chase-target alignment, the laser DOES NOT fire (lock-on blocks).
+  //
+  // To trigger ENGAGE with a target outside laser cone but inside
+  // default widecone (0.35 rad ≈ 20°): place target at angle ~12°
+  // from -Z (= ~0.21 rad ≈ 12°). The ship is currently at
+  // facingAngle=-π/2; target at angle 0.21 above (-Z) means dx>0,
+  // slightly positive dz magnitude < 1.0 (mostly -Z).
+  // - targetAngle = atan2(dz, dx) ~ 0.21 ≈ +12°. Ship facingAngle=-π/2.
+  //   Diff = wrapAngle(0.21 - (-π/2)) = wrapAngle(1.78) = 1.78 (~17°).
+  //   1.78 > 0.05 (laser cone) → laser-mode returns fire=false.
+  //   1.78 < 0.35 (wide cone) → bulld not check this since we're in laser mode.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0, // facing -Z
+    aiVel: ZERO_VEL,
+    asteroids: [mockAsteroid(20, -40)], // ~26° off-axis
+    time: 0,
+    activeWeapon: 'laser',
+  });
+  assert.equal(result.mode, 'asteroid');
+  // Laser-mode gates by chase-target ALIGNMENT, not distance.
+  // atan2(-40, 20) ≈ -63°; ship facingAngle=-π/2 (=-90°);
+  // |diff| ≈ 27° >> laserFireConeHalfAngle=0.05 (≈3°) → misalignment →
+  // fire=false. (Distance doesn't enter the laser-mode calculation.)
+  assert.equal(result.fire, false,
+    'laser-mode + chase target off-axis (27°) > laser cone (3°) → NO fire');
+});
+
+test('aiBrainTick: laser-mode lock-on wins over widecone any-asteroid (THE Step 4 contract)', () => {
+  // v0.22.x Step 4 — critical contract test. The chase target is
+  // OFF-AXIS (so the laser doesn't fire — lock-on fails even if a
+  // widecone-asteroid would make a clean shot). Another asteroid
+  // is ON-AXIS dead-center (in tight cone) — in bullet mode this
+  // WOULD fire, in laser mode this DOES NOT fire because the laser
+  // is locked on the chase target, not scanning asteroids.
+  //
+  // Without this test, a future "optimization" that scans all
+  // asteroids like bullet mode would silently break the laser
+  // contract — the beam would sweep widecone like Step 3.
+  //
+  // Setup: ship at origin facing -Z. Two asteroids:
+  //   - chase target (15, 0): +X, 15u from ship — 90° off-axis
+  //     from the ship's facing direction -Z. Distance 15u.
+  //   - decoy (0, -30): dead-ahead, 30u from ship. INSIDE the
+  //     laser tight cone (~3° from -Z).
+  //
+  // pickTarget picks the NEAREST asteroid — pickTarget returns
+  // (15, 0) because 15u < 30u regardless of array order
+  // (findNearestAsteroid scans by MIN distance, not array index).
+  // The laser-mode fire-check then targets ONLY this chase target
+  // via isTargetInFront(aiPos, aiYaw, target.pos, laserFireConeHalfAngle)
+  // where target.pos = (15, 0). targetAngle=atan2(0,15)=0,
+  // facingAngle=-π/2, |diff|=π/2 ≈ 90° ≫ 0.05 → fire=false. The
+  // in-cone decoy is NEVER considered by the laser-mode check:
+  // lock-on wins over widecone any-asteroid.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0, // facing -Z
+    aiVel: ZERO_VEL,
+    // Array order: decoy (would-be clean shot) FIRST, chase target
+    // (off-axis) SECOND. findNearestAsteroid picks nearest by distance
+    // regardless of array order.
+    asteroids: [
+      mockAsteroid(0, -30), // decoy: dead-ahead, inside laser cone
+      mockAsteroid(15, 0), // chase target: 15u at +X (90° off-axis)
+    ],
+    time: 0,
+    activeWeapon: 'laser',
+  });
+  assert.equal(result.mode, 'asteroid',
+    'chase target (15, 0) is closer than decoy (0, -30) → pickTarget picks (15, 0)');
+  assert.equal(result.fire, false,
+    'laser-mode + chase target at 90° off-axis → beam does NOT fire on the ' +
+    'in-cone decoy; lock-on wins over any-other-asteroid');
+});
+
+test('createDemoAi: factory threads activeWeapon via getActiveWeapon hook', () => {
+  // v0.22.x Step 4 — verify the factory reads the getActiveWeapon
+  // closure each tick and forwards its return value into
+  // brain.args.activeWeapon. The hook is the live read; powerup
+  // state changes mid-game propagate on the next tick.
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(0, -40)];
+  const mock = mockShipFactory();
+  let seenActiveWeapon = null;
+  const mockBrain = {
+    tick: (args) => {
+      seenActiveWeapon = args.activeWeapon;
+      return { yaw: 0, thrust: false, mode: 'asteroid', fire: false };
+    },
+  };
+  let hookResult = 'bullet';
+  const ai = createDemoAi({
+    scene,
+    asteroids,
+    getActiveWeapon: () => hookResult,
+    options: { shipFactory: mock.build, brain: mockBrain },
+  });
+  // Tick 1: hook returns 'bullet'.
+  ai.update(0.1);
+  assert.equal(seenActiveWeapon, 'bullet',
+    'factory reads getActiveWeapon()=bullet when powerup inactive');
+  // Tick 2: hook returns 'laser' (simulating powerup pickup).
+  hookResult = 'laser';
+  ai.update(0.1);
+  assert.equal(seenActiveWeapon, 'laser',
+    'factory reads getActiveWeapon()=laser on the next tick (closure is live)');
+});
+
+test('createDemoAi: factory defaults activeWeapon=bullet when no getActiveWeapon hook', () => {
+  // v0.22.x Step 4 back-compat: callers that don't wire
+  // getActiveWeapon (existing call sites from v0.22.x step 3 + prior)
+  // see activeWeapon='bullet' by default — unchanged Step 3 behavior.
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(0, -40)];
+  const mock = mockShipFactory();
+  let seenActiveWeapon = 'not-set';
+  const mockBrain = {
+    tick: (args) => {
+      seenActiveWeapon = args.activeWeapon;
+      return { yaw: 0, thrust: false, mode: 'asteroid', fire: false };
+    },
+  };
+  const ai = createDemoAi({
+    scene,
+    asteroids,
+    // No getActiveWeapon hook.
+    options: { shipFactory: mock.build, brain: mockBrain },
+  });
+  ai.update(0.1);
+  assert.equal(seenActiveWeapon, 'bullet',
+    'no getActiveWeapon hook → defaults to activeWeapon=bullet (Step 3 behavior)');
+});
+
 test('createDemoAi: works without weapon option (no firing at all)', () => {
   const scene = mockScene();
   const asteroids = [mockAsteroid(0, -40)];
