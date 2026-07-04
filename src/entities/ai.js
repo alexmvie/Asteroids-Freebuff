@@ -534,7 +534,7 @@ export function engageController(aiPos, aiYaw, targetPos, aiVel, aiAngularVel = 
  * }} args
  * @returns {{ pos: {x:number,z:number}, mode: 'asteroid'|'powerup', dist: number } | null}
  */
-function pickTarget({ aiPos, asteroids, powerupPos, targetDist, powerupBiasU }) {
+export function pickTarget({ aiPos, asteroids, powerupPos, targetDist, powerupBiasU }) {
   const nearest = findNearestAsteroid(aiPos, asteroids);
   // Step 1: in-range asteroid as baseline.
   let best = null;
@@ -831,6 +831,23 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
   // hysteresis this is mostly redundant with `getMode()`, but the
   // API surface stays stable for any caller that reads it.
   let lastMode = 'idle';
+  // v0.23.x AI Debug Overlay — decision snapshot from the last
+  // brain tick. Consumed by the overlay's panels row. Initialized
+  // with a sane `idle` seed so a reader right after construction
+  // (before `update` runs) gets a valid object. The factory
+  // publishes it via `getLastDecision()` (a frozen shallow copy so
+  // callers can't mutate factory state by accident).
+  let lastDecision = {
+    mode: 'idle',
+    yaw: 0,
+    thrust: false,
+    fire: false,
+    activeWeapon: 'bullet',
+    target: null,        // { pos, mode, dist } | null  (pickTarget result)
+    nearest: null,       // { pos, dist } | null        (findNearestAsteroid result)
+    threatsCount: 0,     // asteroids within panicDist — the active-threat count
+    lookaheadThreats: 0, // asteroids projected to come within lookaheadMinRadius inside lookaheadTime
+  };
 
   function spawn() {
     const sp = pickAiSpawn(opts.spawnRadius, rng);
@@ -898,6 +915,50 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     const decision = brain ? brain.tick(args) : aiBrainTick(args);
     lastMode = decision.mode;
 
+    // v0.23.x AI Debug Overlay — cache a decision snapshot so the
+    // overlay's panel rows can read what the brain decided without
+    // recomputing. Cheap (~1 findNearestAsteroid pass + an O(N)
+    // panicDist/lookahead sweep) — adds well under 0.1ms at MVP
+    // scale (~300 asteroids). We re-derive pickTarget here (it
+    // would already need this snapshot internally for fire-loop
+    // bookkeeping; the exported helper is exported so we don't have
+    // to inline it).
+    const nearest = findNearestAsteroid(ship.position, asteroids);
+    const powerupPos = args.powerupPos;
+    const target = pickTarget({
+      aiPos: ship.position,
+      asteroids,
+      powerupPos,
+      targetDist: opts.targetDist,
+      powerupBiasU: opts.powerupBiasU,
+    });
+    let threatsCount = 0;
+    let lookaheadThreats = 0;
+    for (const a of asteroids) {
+      if (!a || typeof a.getPosition !== 'function') continue;
+      const p = a.getPosition();
+      if (!p) continue;
+      const d = Math.hypot(p.x - ship.position.x, p.z - ship.position.z);
+      if (d < opts.panicDist) threatsCount += 1;
+      if (opts.lookaheadTime > 0) {
+        const ca = computeClosestApproachTime(ship.position, args.aiVel, p);
+        if (ca.valid && ca.tStar >= 0 && ca.tStar <= opts.lookaheadTime && ca.projDist < opts.lookaheadMinRadius) {
+          lookaheadThreats += 1;
+        }
+      }
+    }
+    lastDecision = {
+      mode: decision.mode,
+      yaw: decision.yaw,
+      thrust: decision.thrust,
+      fire: decision.fire,
+      activeWeapon: args.activeWeapon,
+      target: target ? { pos: { ...target.pos }, mode: target.mode, dist: target.dist } : null,
+      nearest: nearest ? { pos: { x: nearest.dx + ship.position.x, z: nearest.dz + ship.position.z }, dist: nearest.dist } : null,
+      threatsCount,
+      lookaheadThreats,
+    };
+
     ship.setYaw(decision.yaw);
     ship.setThrust(decision.thrust);
     ship.update(dt);
@@ -931,5 +992,50 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       return brain ? brain.tick(args).mode : aiBrainTick(args).mode;
     },
     getLastMode: () => lastMode,
+    /**
+     * v0.23.x — snapshot of the LAST brain tick's decision. Returns
+     * a frozen shallow copy so callers (the AI Debug Overlay's
+     * panels row) can read it safely without risking a mutation of
+     * factory state. The shape is documented on the `lastDecision`
+     * closure var above.
+     *
+     * The `target.pos` and `nearest.pos` are fresh objects (copied
+     * per call) so the caller can hold the snapshot across frames
+     * without aliasing into the live closure.
+     *
+     * @returns {{
+     *   mode: 'dodge'|'asteroid'|'powerup'|'idle',
+     *   yaw: -1|0|+1,
+     *   thrust: boolean,
+     *   fire: boolean,
+     *   activeWeapon: 'bullet'|'laser',
+     *   target: { pos: {x:number,z:number}, mode: 'asteroid'|'powerup', dist: number } | null,
+     *   nearest: { pos: {x:number,z:number}, dist: number } | null,
+     *   threatsCount: number,
+     *   lookaheadThreats: number,
+     * }}
+     */
+    getLastDecision: () => Object.freeze({
+      mode: lastDecision.mode,
+      yaw: lastDecision.yaw,
+      thrust: lastDecision.thrust,
+      fire: lastDecision.fire,
+      activeWeapon: lastDecision.activeWeapon,
+      target: lastDecision.target
+        ? Object.freeze({
+            pos: Object.freeze({ ...lastDecision.target.pos }),
+            mode: lastDecision.target.mode,
+            dist: lastDecision.target.dist,
+          })
+        : null,
+      nearest: lastDecision.nearest
+        ? Object.freeze({
+            pos: Object.freeze({ ...lastDecision.nearest.pos }),
+            dist: lastDecision.nearest.dist,
+          })
+        : null,
+      threatsCount: lastDecision.threatsCount,
+      lookaheadThreats: lastDecision.lookaheadThreats,
+    }),
   };
 }

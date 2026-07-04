@@ -1566,6 +1566,175 @@ canvas {
 }
 
 /* ============================================================================
+   Block: ai-debug  (v0.23.x — AI Debug Overlay)
+   ----------------------------------------------------------------------------
+   Always-visible (no toggle, user-requested) bottom-right stack:
+     • Header chip ("AI DEBUG")
+     • Radar canvas (200x200) with subject-centered mini-map
+     • Mode chip (color-coded by brain mode)
+     • Decision panel (yaw / thrust / fire / weapon / target / threats)
+     • State panel (state / score / energy)
+   The whole stack respects the existing right-margin reserved for the
+   .game-version chip — moved up so they don't overlap (the version
+   chip auto-positions to its own bottom corner via flex-end padding,
+   the AI debug lives above it). `pointer-events: none` on the
+   container so the underlying canvas stays clickable.
+   ============================================================================ */
+
+.ai-debug {
+  position: fixed;
+  bottom: 60px;
+  right: var(--space-3);
+  z-index: var(--z-hud);
+  font-family: var(--font-family);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-md);
+  color: var(--color-fg);
+  pointer-events: none;
+  min-width: 200px;
+}
+
+.ai-debug__title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  color: var(--color-primary);
+  text-shadow: 0 0 var(--space-2) var(--color-primary-glow-soft);
+  text-align: center;
+  padding-bottom: var(--space-half);
+  border-bottom: var(--border-width) solid var(--color-primary-soft);
+}
+
+.ai-debug__radar {
+  display: block;
+  margin: 0 auto;
+  background: var(--color-bg-elevated);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-md);
+  /* Logical size 200x200; the canvas bitmap is DPR-scaled by the
+     factory at mount time (src/ui/ai-debug-overlay.js). CSS sizes
+     the canvas visually. */
+  width: 200px;
+  height: 200px;
+}
+
+.ai-debug__chip {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  text-align: center;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  border: var(--border-width) solid currentColor;
+  background: var(--color-bg-tint-primary-faint);
+  color: var(--color-primary);
+  text-shadow: 0 0 var(--space-2) currentColor;
+}
+.ai-debug__chip--dodge {
+  color: var(--color-danger);
+  background: rgba(255, 85, 102, 0.10);
+  animation: ai-debug-chip-pulse 0.4s ease-in-out infinite alternate;
+}
+.ai-debug__chip--asteroid {
+  color: var(--color-primary);
+  background: var(--color-bg-tint-primary-soft);
+}
+.ai-debug__chip--powerup {
+  color: #c084fc; /* purple — distinct from cyan/orange/red */
+  background: rgba(192, 132, 252, 0.10);
+}
+.ai-debug__chip--idle {
+  color: var(--color-fg-dim);
+  background: rgba(151, 163, 196, 0.05);
+}
+@keyframes ai-debug-chip-pulse {
+  from { opacity: 0.85; }
+  to   { opacity: 1.0; }
+}
+
+.ai-debug__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-quarter);
+  margin-top: var(--space-half);
+}
+
+.ai-debug__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-base);
+}
+
+.ai-debug__row__key {
+  color: var(--color-primary);
+  font-weight: var(--font-weight-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-base);
+}
+
+.ai-debug__row__value {
+  color: var(--color-fg);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-bold);
+}
+
+/* Laser-active weapon row tints to orange — visual mirror of the
+   laser powerup chip color in the top HUD. */
+.ai-debug__row__value--weapon-laser {
+  color: var(--color-warn);
+  text-shadow: 0 0 var(--space-2) rgba(255, 136, 68, 0.45);
+}
+
+.ai-debug__divider {
+  height: var(--border-width);
+  margin: var(--space-1) 0;
+  background: var(--color-primary-soft);
+}
+
+.ai-debug__row__energy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.ai-debug__row__energy-bar {
+  display: inline-block;
+  width: 60px;
+  height: var(--space-2);
+  background: var(--color-bg-elevated-2);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  position: relative;
+}
+.ai-debug__row__energy-bar-fill {
+  display: block;
+  width: var(--energy-bar-progress, 0%);
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-primary), #6ee0ff);
+  box-shadow: 0 0 var(--space-1) var(--color-primary-glow-soft);
+  transition: width 0.18s ease-out;
+}
+
+/* Future: a compass dial can swap the radar for a horizon-line view
+   when the root has the ai-debug--compass class. The factory adds
+   the class lazily (see createAiDebugOverlay in src/ui/ai-debug-overlay.js)
+   so the CSS-only swap is intentional. */
+.ai-debug--compass .ai-debug__radar {
+  /* placeholder — full compass dial is a future iteration */
+}
+
+/* ============================================================================
    Block: game-version (bottom-right HUD)
    ----------------------------------------------------------------------------
    Display-only chip that always shows the live build version + branch

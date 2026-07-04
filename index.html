@@ -114,6 +114,14 @@
          version string lives in a single SSOT (GAME_VERSION constant).
          aria-hidden=true because it's decorative and not actionable. -->
     <div id="game-version" class="game-version" aria-hidden="true"></div>
+    <!-- v0.23.x AI Debug Overlay — bottom-right modular stack:
+         radar Canvas2D + mode chip + decision panel + state panel.
+         Populated by createAiDebugOverlay in src/ui/ai-debug-overlay.js.
+         The factory injects its innerHTML on mount via `root.innerHTML = ...`.
+         data-ai-debug-root lets main.js find the host element by
+         attribute instead of getElementById (consistent with how
+         debug-hud is wired). -->
+    <div id="ai-debug-overlay" class="ai-debug" data-ai-debug-root></div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

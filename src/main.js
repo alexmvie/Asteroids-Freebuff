@@ -23,6 +23,7 @@ import { createEventBus } from './systems/events.js';
 import { createStateMachine, State } from './systems/state.js';
 import { createHud } from './ui/hud.js';
 import { createDebugHud } from './ui/debug-hud.js';
+import { createAiDebugOverlay } from './ui/ai-debug-overlay.js';
 import { VERSION } from './version-constants.js';
 // __BRANCH__ + __COMMIT__ are Vite-define globals, populated from git at
 // config-load time in vite.config.js. See that file for the rationale
@@ -766,6 +767,34 @@ const debugHud = createDebugHud();
   if (root) debugHud.mount(root);
 }
 
+// v0.23.x AI Debug Overlay (bottom-right; radar + panels).
+// Always visible. Reads game state via per-frame getter closures.
+const aiDebugOverlay = createAiDebugOverlay({
+  getSubject: () => stateMachine.getState() === State.DEMO
+    ? (demoAi && demoAi.getShip()) || ship
+    : ship,
+  getAiShip: () => demoAi && demoAi.getShip(),
+  getLastDecision: () => demoAi && demoAi.getLastDecision
+    ? demoAi.getLastDecision()
+    : null,
+  getActiveWeapon: () => (powerupSystem.isLaserActive() ? 'laser' : 'bullet'),
+  getAsteroids: () => field.getEntities(),
+  getPowerupPos: () => {
+    const p = powerupSystem.getPendingSpawn();
+    return p ? p.getPosition() : null;
+  },
+  getScore: () => score,
+  getEnergy: () => ({
+    value: ship.getEnergy ? ship.getEnergy() : 0,
+    max: ship.getMaxEnergy ? ship.getMaxEnergy() : 100,
+  }),
+  getState: () => stateMachine.getState(),
+});
+{
+  const root = document.querySelector('[data-ai-debug-root]');
+  if (root) aiDebugOverlay.mount(root);
+}
+
 // ---- Render loop ---------------------------------------------------------
 
 /**
@@ -960,6 +989,9 @@ function tick(dt) {
       ? demoAi.getLastMode()
       : null,
   });
+
+  // v0.23.x AI Debug Overlay per-frame tick.
+  aiDebugOverlay.update();
 }
 
 function loop() {
