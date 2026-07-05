@@ -296,6 +296,48 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
 
   **Total: 491 tests pass** (was 450 at end of v0.22.x, +41 net), Vite build OK.
 
+- [x] **v0.24.x (Target Commitment + LOOKAHEAD-DODGE tuning)** — `src/entities/ai.js` + `tests/ai.test.js`. Two fixes for the user-reported "still moving around without a plan" symptom:
+
+  **Fix 1: LOOKAHEAD-DODGE reduced aggression.** The v0.22.x defaults (`lookaheadTime=3.5`, `lookaheadMinRadius=6.0`) were too trigger-happy: at ~40 u/s cruise the bot scanned a ~140u corridor, and in a dense field (~300 asteroids) there was almost always an asteroid in that corridor. The bot spent most of its time in DODGE mode (thrust-perpendicular-to-velocity) instead of pursuing targets. Fixed: `lookaheadTime` 3.5 → 1.5 (still ~60u of warning at cruise), `lookaheadMinRadius` 6.0 → 8.0 (wider clearing margin for the shorter window). All 5 existing LOOKAHEAD-DODGE tests pass explicit values and are unaffected.
+
+  **Fix 2: Target commitment tracking.** `pickTarget` always picked the nearest asteroid with `targetDist=Infinity`. As the ship moved, the "nearest" changed constantly, producing visible zigzag. Added factory-level commitment state: `committedTargetPos` + `committedTargetSince`. Once the brain picks a target, the factory commits to it for `COMMIT_WINDOW_S=3.0` seconds. After the window expires, a new target must be `COMMIT_HYSTERESIS_U=10.0` units closer to steal focus. Commitment is validated each frame — if the committed asteroid is destroyed (leaves the array), the factory resets immediately. The brain receives commitment as optional `committedTargetPos`/`committedTargetSince` args; `pickTarget` gains an optional `committedTarget` parameter. All params are optional with zero-value defaults → full back-compat with existing callers.
+
+  **Code review fixes:** (a) removed duplicate `pickTarget` JSDoc block (old function declaration was hoisting over the new one — the hysteresis code was dead), (b) moved hysteresis check before the `return best` early-exit for no-powerup case (control flow bug: `return best` on line 556 exited before the hysteresis block), (c) added `typeof committedTarget.dist === 'number'` guard for callers that pass `{ pos }` without `dist`, (d) changed `ai.getMode()` assertion to `ai.getLastMode()` in the powerup test (getMode creates fresh brain args without commitment state).
+
+  **8 new tests** in `tests/ai.test.js`: pickTarget commitment (within window, outside+delta>hysteresis, outside+delta<hysteresis, no committed, back-compat), factory wiring (commit on first tick, clear on target removal, decision snapshot includes committedTargetSince). Total: **101 AI tests pass** (was 93, +8 net), Vite build OK.
+
+- [x] **v0.25.x (Orbiting fix: engageController BRAKE condition)** — `src/entities/ai.js` + `tests/ai.test.js`. The user reported the bot "constantly accelerates and flies for minutes in a circle around the asteroid — same with extras". Root cause: the `engageController`'s BRAKE condition was `speed > 4 && closingSpeed > desiredClosing`. When orbiting (velocity perpendicular to line-of-sight), `closingSpeed ≈ 0`, so `0 > desiredClosing` was always false — BRAKE never fired. Meanwhile, APPROACH thrust condition (`closingSpeed < desiredClosing`) was always true during orbit, perpetuating the tangential thrust. Fix: BRAKE condition changed to `speed > desiredClosing`. This catches ALL cases where the ship is moving too fast — head-on approach OR orbiting. The `desiredClosing` floor (8 u/s minimum) replaces the old `speed > 4` floor. The change also correctly handles receding ships at high speed: a ship moving AWAY from the target at 200 u/s now brakes and redirects instead of drifting with drag-only deceleration. JSDoc updated to document the v0.25.x change rationale.
+
+  **Test updates:** (1) `closingSpeed<0 (receding)` → updated from APPROACH→BRAKE (correct: receding at 200 u/s should redirect), (2) `speed <= 4` → renamed to `speed <= desiredClosing` (floor is now 8 u/s), (3) `BRAKE near-zero speed` → updated for desiredClosing floor, (4) `BRAKE→APPROACH transition` → velocity lowered from 8→5 to stay below desiredClosing, (5) NEW orbiting regression test: perpendicular velocity at 100 u/s, closingSpeed≈0 → MUST trigger BRAKE (pins the exact bug scenario).
+
+  **Code review finding:** all edge cases verified correct (orbit, head-on, idle, pickup, receding, speed=desiredClosing boundary). No unintended side effects on APPROACH branch.
+
+  **Total: 102 AI tests pass** (was 101, +1 net orbiting regression test), Vite build OK.
+
+- [x] **v0.26.x (Approach thrust gate: tighten to ±0.10 rad to stop simultaneous thrust+turn)** — `src/entities/ai.js` + `tests/ai.test.js`. The user reported "it is still giving thrust and turning simultaneously so it takes long to turn towards the target". Root cause: `APPROACH_THRUST_GATE` was 0.30 rad (~17°) — the ship would thrust forward while still significantly off-heading, turning approach trajectories into wide arcs. Fix: tightened from 0.30 to 0.10 rad (~6°). The ship now only thrusts when nearly aligned with the target; otherwise it turns without thrusting, letting LINEAR_DRAG decelerate tangential velocity while it pivots cleanly. The result is stop-turn-thrust approach instead of a spiral.
+
+  **Deadband coupling note:** YAW_DEADBAND (0.15) and APPROACH_THRUST_GATE (0.10) have a 0.05 rad "coast zone" where yaw=0 (inside deadband) but thrust=off (outside gate). Ship drifts through this gap in 1-2 frames via residual YAW_INERTIA_TAU angular velocity — intentional, produces the clean "align then accelerate" feel. Source comment added to prevent independent widening.
+
+- [x] **v0.27.x (Complete AI rewrite: simple 3-mode brain)** — `src/entities/ai.js` + `tests/ai.test.js`. Ground-up rewrite after the user reported the ship "is now waiting somewhere in space, sometimes attacks some asteroids, never collects extras". The previous architecture (v0.20.x–v0.26.x) had accumulated so many patches (BRAKE branch, lookahead dodge, target commitment, spin-brake prediction, distance-gated fire, tight thrust gate) that the AI was paralyzed.
+
+  **New brain: EVADE → ENGAGE → IDLE.** Three modes, no BRAKE branch, no lookahead dodge, no target commitment, no closing-speed throttle. The ship relies on LINEAR_DRAG (0.4 exponential decay) for deceleration when thrust is off — no complex braking system needed.
+
+  **Key changes:**
+  1. Replaced `engageController` (3-branch: PICKUP/BRAKE/APPROACH) with `engageTarget` (turn + thrust when aligned). No velocity input needed.
+  2. Thrust gate widened from 0.10 to 0.52 rad (~30°) — ship visibly moves while turning, not paralyzed.
+  3. Powerup bias changed from -30 to +60 — AI aggressively collects powerups.
+  4. Fire discipline: sweeps ALL asteroids in cone + range (not just chase target). Matches "feuer bis split, dann weiter auf die verbleibenden Teile".
+  5. Removed `computeClosestApproachTime`, `engageController`, target commitment/hysteresis, lookahead dodge entirely.
+  6. `evadeDist=12` (wider than old `panicDist=6`) for better clearance.
+  7. Fire range [15, 100]u with 0.20 rad heading gate (wider than old [25, 55]u).
+  8. Spin-brake prediction kept (YAW_INERTIA_TAU=0.2) to prevent wobble at yaw deadband.
+
+  **API preserved** for main.js compatibility: `createDemoAi`, `update`, `dispose`, `getShip`, `setEnabled`, `isEnabled`, `getLastMode`, `getLastDecision` (includes legacy fields for overlay compat).
+
+  **57 unit tests** (down from 105 — removed tests for deleted BRAKE/lookahead/commitment features). Vite build OK (197 KB gzipped).
+
+  **v0.27.x patch: yaw===0 thrust guard** — `engageTarget` now gates thrust on `yaw === 0` (not turning). When the ship is commanding yaw (predictedDiff outside ±0.10 deadband), thrust is ALWAYS off regardless of angle. Only when yaw settles to 0 does the angle gate (0.52 rad) apply. This guarantees pure stop-turn-thrust: turn → aligned → thrust. No simultaneous turn+thrust possible, no matter what thrustHeadingGate is set to.
+
 ### ⏳ Next Steps (priority order)
 
 1. **Spatial hash** — `src/systems/collision.js` (broad-phase): uniform grid keyed by world position. The narrow-phase step is already in place; this is the O(1) candidate-selection layer above it.

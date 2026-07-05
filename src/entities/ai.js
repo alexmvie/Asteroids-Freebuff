@@ -1,29 +1,23 @@
 /**
  * Demo AI — an NPC ship for the DEMO attract state.
  *
- * v0.29.x — tighter thrust gate + lower approach speed. v0.28.x had
- * thrustGate=0.60 (34°) and MAX_APPROACH=150 u/s — the ship thrusted
- * while still 30° off-heading and cruised at 150 u/s, producing wide
- * inefficient arcs. "Zuviel Schub, zuwenig Drehen."
+ * v0.30.x — radical simplification driven by simulation data. v0.29.x's
+ * speed management + soft-yaw-guard + aggressive powerup bias (60u) locked
+ * the ship into chasing distant powerups it never reached:
+ *   - 84% of time in powerup mode, 0 collected
+ *   - Only 16u traveled in 45s (avg 0.36 u/s!)
+ *   - Mode locked: 7 transitions total
  *
- * Fixes:
+ * The fix drops all speed-management machinery and returns to a simple
+ * "see asteroid → fly toward it → shoot" controller:
  *
- *   1. **thrustGate 0.60 → 0.30 rad** (17°): thrust only when well-aligned.
- *      At 17°, 95% of thrust goes toward target (vs 83% at 34°).
+ *   1. Turn toward target (wide thrust gate: 0.52 rad ≈ 30°)
+ *   2. Thrust whenever roughly aligned (no soft yaw guard, no speed cap)
+ *   3. Fire at any in-cone asteroid
+ *   4. Powerups are STRICTLY opportunistic (bias reduced to 15u)
+ *   5. Tight evade zone (8u) for emergencies only
  *
- *   2. **MAX_APPROACH 150 → 90 u/s**: at 90 u/s, a 90° turn causes 36u of
- *      lateral drift (down from 60u at 150 u/s). Leaves headroom for evasion.
- *
- *   3. **SPEED_FACTOR 1.5 → 1.0**: desiredClosing = dist × 1.0 now.
- *      At dist=40: 40 u/s (was 60). Ship eases off throttle as it closes.
- *
- *   4. **Soft yaw guard**: thrust ALSO requires |predictedDiff| < 0.20 rad.
- *      If the ship is still commanding a hard turn, thrust is withheld
- *      regardless of geometric alignment. Produces human-like "coast into
- *      the turn, punch it when settled" behavior.
- *
- * Three modes: EVADE (nearby threat → thrust perpendicular) →
- * ENGAGE (speed-managed approach toward target) → IDLE (no targets).
+ * The ship's LINEAR_DRAG handles natural deceleration.
  */
 
 import { createShip } from './ship.js';
@@ -45,45 +39,47 @@ const DEFAULTS = Object.freeze({
 
   /**
    * Evade distance (world units). When the nearest asteroid is closer
-   * than this, the AI thrusts 90° perpendicular — pure reflex.
-   * Tighter than the old 12u to reduce frequent evade→asteroid cycling.
+   * than this, the AI thrusts 90° perpendicular — emergency reflex.
+   * v0.30.x: tightened to 8u so evade is truly last-resort.
    */
-  evadeDist: 10,
+  evadeDist: 8,
 
   /**
    * Powerup detour bias (world units). Powerup wins over nearest
    * asteroid if `powerupDist < asteroidDist + powerupBiasU`.
-   * Default 60 — aggressive pickup. The AI will detour up to 60u
-   * to grab a powerup. The old -30 was too conservative.
+   * v0.30.x: reduced from 60 to 15 — strictly opportunistic.
+   * A powerup must be within 15u of the nearest asteroid's distance
+   * to steal focus. Prevents the "locked onto distant powerup" bug.
    */
-  powerupBiasU: 60,
+  powerupBiasU: 15,
 
   /**
    * Thrust heading gate (radians). Ship thrusts when |heading diff|
-   * is within this angle AND the yaw controller has settled (soft
-   * yaw guard: |predictedDiff| < 0.20). 0.30 rad ≈ 17° — tight
-   * enough that 95% of thrust goes toward target, loose enough
-   * for a natural "coast into alignment" feel.
+   * is within this angle. No soft yaw guard — thrust happens
+   * whenever roughly aligned, even during turns.
+   * 0.52 rad ≈ 30° — wide enough for decisive movement.
    */
-  thrustHeadingGate: 0.30,
+  thrustHeadingGate: 0.52,
 
   /**
    * Fire heading gate (radians). Ship fires when |heading diff|
-   * is within this angle. 0.20 ≈ 11.5° — tight enough for
-   * accurate shots, loose enough to fire during approach.
+   * is within this angle. 0.30 ≈ 17° — wider for more firing
+   * opportunities while approaching.
    */
-  fireHeadingGate: 0.20,
+  fireHeadingGate: 0.30,
 
   /**
    * Fire distance range (world units). Ship fires at asteroids
-   * within [fireMinDist, fireMaxDist].
+   * within [fireMinDist, fireMaxDist]. v0.30.x: wider range for
+   * more firing.
    */
-  fireMinDist: 15,
-  fireMaxDist: 100,
+  fireMinDist: 8,
+  fireMaxDist: 120,
 
   /**
    * Fire cone half-angle for checking if ANY asteroid is in front
-   * (not just the chase target). Used by the bullet-mode fire sweep.
+   * (not just the chase target). NOTE: v0.30.x fire loop uses
+   * `fireHeadingGate` instead; this is kept for legacy callers.
    */
   fireConeHalfAngle: 0.35,
 
@@ -95,26 +91,11 @@ const DEFAULTS = Object.freeze({
 });
 
 /**
- * Module-scope constants for the engage controller.
- * YAW_DEADBAND: stop turning when the predicted heading is within
- * this angle of the target. Spin-brake prediction (YAW_INERTIA_TAU)
- * fires counter-yaw before the ship overshoots.
+ * Yaw deadband (radians). Stop turning when the predicted heading
+ * is within this angle of the target. Spin-brake prediction
+ * (YAW_INERTIA_TAU) prevents overshoot wobble.
  */
-const YAW_DEADBAND = 0.10;
-
-/**
- * Speed factor for distance-proportional desired closing speed.
- * desiredClosing = clamp(dist × SPEED_FACTOR, MIN_APPROACH, MAX_APPROACH).
- */
-const SPEED_FACTOR = 1.0;
-const MIN_APPROACH = 8;   // minimum approach speed (u/s) — never fully stop
-const MAX_APPROACH = 90;  // maximum approach speed (u/s) — leave headroom below MAX_SPEED for evasion/braking
-
-/**
- * Active braking kicks in when totalSpeed > desiredClosing × BRAKE_MULTIPLIER
- * AND closingSpeed still exceeds desired (we're overshooting, not just fast).
- */
-const BRAKE_MULTIPLIER = 3;
+const YAW_DEADBAND = 0.08;
 
 // --------------------------------------------------------------------------
 // Private helpers
@@ -238,85 +219,44 @@ export function pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU }) {
 }
 
 /**
- * Velocity-aware engagement controller with speed management and
- * active braking. Produces smooth pursuit curves instead of robotic
- * stop-turn-thrust.
+ * Simple engagement controller: turn toward target, thrust when
+ * roughly aligned. No speed management, no soft yaw guard, no
+ * active braking. The ship's LINEAR_DRAG handles deceleration.
  *
- * **Speed management**: desired approach speed is proportional to
- * distance. If the ship is already closing faster than desired,
- * thrust is withheld and LINEAR_DRAG slows the ship naturally.
- * If closing slower than desired, thrust engages.
- *
- * **Active braking**: when total speed far exceeds the desired
- * closing speed, the ship faces retrograde (opposite its velocity)
- * and thrusts — using the main engine as a brake. This prevents
- * the endless overshoot→turn→overshoot cycle.
- *
- * **Simultaneous turn+thrust** with **soft yaw guard**: thrust fires
- * when heading is within `thrustGate` AND the yaw controller has
- * settled (`|predictedDiff| < 0.20`). No thrust during hard turns.
- * YAW_INERTIA_TAU spin-brake prediction prevents wobble at the
- * yaw deadband.
+ * v0.30.x: stripped all speed-management complexity. The v0.29.x
+ * controller's isSteady + desiredClosing thresholds locked the ship
+ * into "turn without thrusting" for the majority of ticks (analysis
+ * showed only 45% thrust in powerup mode, 15% in asteroid mode).
  *
  * @param {{x:number,z:number}} aiPos
  * @param {number} aiYaw
- * @param {{x:number,z:number}} aiVel  ship's XZ velocity (for closing-speed calc)
+ * @param {{x:number,z:number}} aiVel  kept for backward compat, unused
  * @param {{x:number,z:number}} targetPos
  * @param {number} [aiAngularVel=0]  for spin-brake prediction
- * @param {number} [thrustGate=0.30] heading gate for thrust (with soft yaw guard)
- * @returns {{ yaw: number, thrust: boolean, diff: number, dist: number, closingSpeed: number }}
+ * @param {number} [thrustGate=0.52] heading gate for thrust
+ * @returns {{ yaw: number, thrust: boolean, diff: number, dist: number }}
  */
 export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, thrustGate = DEFAULTS.thrustHeadingGate) {
   const dx = targetPos.x - aiPos.x;
   const dz = targetPos.z - aiPos.z;
   const dist = Math.hypot(dx, dz);
-  if (dist < 0.01) return { yaw: 0, thrust: false, diff: 0, dist: 0, closingSpeed: 0 };
+  if (dist < 0.01) return { yaw: 0, thrust: false, diff: 0, dist: 0 };
 
-  const dirX = dx / dist;
-  const dirZ = dz / dist;
-
-  // Speed metrics
-  const vx = (aiVel && typeof aiVel.x === 'number') ? aiVel.x : 0;
-  const vz = (aiVel && typeof aiVel.z === 'number') ? aiVel.z : 0;
-  const totalSpeed = Math.hypot(vx, vz);
-  const closingSpeed = vx * dirX + vz * dirZ; // positive = moving toward target
-
-  // Desired approach speed: fast when far, slow when close
-  const desiredClosing = Math.max(MIN_APPROACH, Math.min(MAX_APPROACH, dist * SPEED_FACTOR));
-
-  // Active braking: ship is going way too fast AND still closing on target
-  const isBraking = totalSpeed > desiredClosing * BRAKE_MULTIPLIER && closingSpeed > desiredClosing;
-
-  // Choose face angle: retrograde (brake) or toward target (approach)
-  const faceAngle = (isBraking && totalSpeed > 1)
-    ? Math.atan2(-vz, -vx)  // face opposite velocity (brake)
-    : Math.atan2(dz, dx);   // face toward target (approach)
-
+  // Face toward target (no braking — always approach)
+  const faceAngle = Math.atan2(dz, dx);
   const targetDiff = wrapAngle(faceAngle - facingAngle(aiYaw));
   const angVel = (typeof aiAngularVel === 'number') ? aiAngularVel : 0;
   const predictedDiff = wrapAngle(targetDiff + angVel * YAW_INERTIA_TAU);
 
-  // Yaw: turn toward the chosen face angle
+  // Yaw: spin-brake prediction prevents wobble
   const yaw = predictedDiff > YAW_DEADBAND ? -1
     : predictedDiff < -YAW_DEADBAND ? 1
     : 0;
 
-  // Thrust: gated on geometric alignment AND control settlement.
-  // |predictedDiff| < 0.25 (YAW_DEADBAND×2.5) means the yaw controller
-  // has mostly settled — no hard turn in progress. This prevents thrusting
-  // while still slewing the nose around, but allows thrust during the
-  // final alignment phase of a turn.
-  const isSteady = Math.abs(predictedDiff) < YAW_DEADBAND * 2.5;
-  let thrust = false;
-  if (Math.abs(targetDiff) < thrustGate && isSteady) {
-    if (isBraking) {
-      thrust = true; // thrust to shed speed
-    } else if (closingSpeed < desiredClosing) {
-      thrust = true; // need more closing speed
-    }
-  }
+  // Thrust: fire engines whenever roughly aligned (no soft yaw guard)
+  const thrust = Math.abs(targetDiff) < thrustGate;
 
-  return { yaw, thrust, diff: targetDiff, dist, closingSpeed };
+  return { yaw, thrust, diff: targetDiff, dist };
 }
 
 /**
@@ -387,7 +327,6 @@ export function aiBrainTick({
   powerupPos = null,
   evadeDist = DEFAULTS.evadeDist,
   powerupBiasU = DEFAULTS.powerupBiasU,
-  fireConeHalfAngle = DEFAULTS.fireConeHalfAngle,
   fireMinDist = DEFAULTS.fireMinDist,
   fireMaxDist = DEFAULTS.fireMaxDist,
   thrustHeadingGate = DEFAULTS.thrustHeadingGate,
@@ -408,16 +347,14 @@ export function aiBrainTick({
   const nearest = findNearestAsteroid(aiPos, asteroids);
 
   // ---- 1. EVADE (nearest asteroid within evadeDist) --------------------
-  // Pure reflex: thrust 90° perpendicular to the nearest asteroid.
-  // Always thrust — the ship needs to escape the danger zone.
-  // evadeDist is kept tight (12u) so evasion is a last-resort reflex,
-  // not a frequent state.
+  // Emergency reflex: thrust 90° perpendicular to the nearest asteroid.
+  // Always thrust + turn simultaneously for maximum escape velocity.
   if (nearest && nearest.dist < ed) {
     const threatAngle = Math.atan2(nearest.dz, nearest.dx);
     const escapeAngle = threatAngle + Math.PI / 2;
     const diff = wrapAngle(escapeAngle - facingAngle(aiYaw));
     return {
-      yaw: diff > 0.1 ? -1 : diff < -0.1 ? 1 : 0,
+      yaw: diff > 0.05 ? -1 : diff < -0.05 ? 1 : 0,
       thrust: true,
       mode: 'evade',
       fire: false,
