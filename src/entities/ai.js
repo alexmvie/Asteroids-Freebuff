@@ -1,28 +1,26 @@
 /**
  * Demo AI — an NPC ship for the DEMO attract state.
  *
- * v0.28.x — speed-aware controller. The previous architecture (v0.27.x)
- * used stop-turn-thrust (yaw===0 guard) with no speed management — the
- * ship would accelerate to 200 u/s, overshoot the target, turn around,
- * and accelerate back, producing endless orbiting. LINEAR_DRAG alone
- * takes ~5s to slow from 200→25 u/s, far too slow for close-range
- * maneuvering.
+ * v0.29.x — tighter thrust gate + lower approach speed. v0.28.x had
+ * thrustGate=0.60 (34°) and MAX_APPROACH=150 u/s — the ship thrusted
+ * while still 30° off-heading and cruised at 150 u/s, producing wide
+ * inefficient arcs. "Zuviel Schub, zuwenig Drehen."
  *
- * The new controller (`engageTarget`) is velocity-aware:
+ * Fixes:
  *
- *   1. **Speed management**: desired approach speed is proportional to
- *      distance (`clamp(dist × 1.5, 8, 150)`). If the ship is already
- *      closing faster than desired → don't thrust (let drag slow it).
- *      If it's closing slower than desired → thrust toward target.
+ *   1. **thrustGate 0.60 → 0.30 rad** (17°): thrust only when well-aligned.
+ *      At 17°, 95% of thrust goes toward target (vs 83% at 34°).
  *
- *   2. **Active braking**: when total speed exceeds `desiredClosing × 3`,
- *      the ship faces OPPOSITE its velocity and thrusts — using the
- *      main thruster as a brake. This catches extreme overshoot.
+ *   2. **MAX_APPROACH 150 → 90 u/s**: at 90 u/s, a 90° turn causes 36u of
+ *      lateral drift (down from 60u at 150 u/s). Leaves headroom for evasion.
  *
- *   3. **Simultaneous turn+thrust** (no yaw===0 guard): thrust fires
- *      when the heading is within `thrustGate` (0.60 rad ≈ 34°),
- *      even while still turning. Produces smooth pursuit curves
- *      instead of robotic stop-turn-go.
+ *   3. **SPEED_FACTOR 1.5 → 1.0**: desiredClosing = dist × 1.0 now.
+ *      At dist=40: 40 u/s (was 60). Ship eases off throttle as it closes.
+ *
+ *   4. **Soft yaw guard**: thrust ALSO requires |predictedDiff| < 0.20 rad.
+ *      If the ship is still commanding a hard turn, thrust is withheld
+ *      regardless of geometric alignment. Produces human-like "coast into
+ *      the turn, punch it when settled" behavior.
  *
  * Three modes: EVADE (nearby threat → thrust perpendicular) →
  * ENGAGE (speed-managed approach toward target) → IDLE (no targets).
@@ -62,11 +60,12 @@ const DEFAULTS = Object.freeze({
 
   /**
    * Thrust heading gate (radians). Ship thrusts when |heading diff|
-   * is within this angle — even while still turning (simultaneous
-   * turn+thrust for smooth pursuit curves). Wider than v0.27.x (0.60
-   * vs 0.52) to allow thrust during the final phase of a turn.
+   * is within this angle AND the yaw controller has settled (soft
+   * yaw guard: |predictedDiff| < 0.20). 0.30 rad ≈ 17° — tight
+   * enough that 95% of thrust goes toward target, loose enough
+   * for a natural "coast into alignment" feel.
    */
-  thrustHeadingGate: 0.60,
+  thrustHeadingGate: 0.30,
 
   /**
    * Fire heading gate (radians). Ship fires when |heading diff|
@@ -107,9 +106,9 @@ const YAW_DEADBAND = 0.10;
  * Speed factor for distance-proportional desired closing speed.
  * desiredClosing = clamp(dist × SPEED_FACTOR, MIN_APPROACH, MAX_APPROACH).
  */
-const SPEED_FACTOR = 1.5;
+const SPEED_FACTOR = 1.0;
 const MIN_APPROACH = 8;   // minimum approach speed (u/s) — never fully stop
-const MAX_APPROACH = 150; // maximum approach speed (u/s) — leave headroom below MAX_SPEED
+const MAX_APPROACH = 90;  // maximum approach speed (u/s) — leave headroom below MAX_SPEED for evasion/braking
 
 /**
  * Active braking kicks in when totalSpeed > desiredClosing × BRAKE_MULTIPLIER
@@ -253,8 +252,9 @@ export function pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU }) {
  * and thrusts — using the main engine as a brake. This prevents
  * the endless overshoot→turn→overshoot cycle.
  *
- * **Simultaneous turn+thrust**: thrust fires when heading is within
- * `thrustGate`, even while still turning. No yaw===0 guard.
+ * **Simultaneous turn+thrust** with **soft yaw guard**: thrust fires
+ * when heading is within `thrustGate` AND the yaw controller has
+ * settled (`|predictedDiff| < 0.20`). No thrust during hard turns.
  * YAW_INERTIA_TAU spin-brake prediction prevents wobble at the
  * yaw deadband.
  *
@@ -263,7 +263,7 @@ export function pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU }) {
  * @param {{x:number,z:number}} aiVel  ship's XZ velocity (for closing-speed calc)
  * @param {{x:number,z:number}} targetPos
  * @param {number} [aiAngularVel=0]  for spin-brake prediction
- * @param {number} [thrustGate=0.60] heading gate for thrust (simultaneous turn+thrust)
+ * @param {number} [thrustGate=0.30] heading gate for thrust (with soft yaw guard)
  * @returns {{ yaw: number, thrust: boolean, diff: number, dist: number, closingSpeed: number }}
  */
 export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, thrustGate = DEFAULTS.thrustHeadingGate) {
@@ -301,9 +301,13 @@ export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, t
     : predictedDiff < -YAW_DEADBAND ? 1
     : 0;
 
-  // Thrust: simultaneous turn+thrust allowed (no yaw===0 guard)
+  // Thrust: gated on geometric alignment AND control settlement.
+  // |predictedDiff| < 0.20 (YAW_DEADBAND×2) means the yaw controller
+  // has settled — no hard turn in progress. This prevents thrusting
+  // while still slewing the nose around.
+  const isSteady = Math.abs(predictedDiff) < YAW_DEADBAND * 2;
   let thrust = false;
-  if (Math.abs(targetDiff) < thrustGate) {
+  if (Math.abs(targetDiff) < thrustGate && isSteady) {
     if (isBraking) {
       thrust = true; // thrust to shed speed
     } else if (closingSpeed < desiredClosing) {

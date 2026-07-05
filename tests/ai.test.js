@@ -1,16 +1,17 @@
 /**
- * Unit tests for src/entities/ai.js (v0.28.x — speed-aware controller).
+ * Unit tests for src/entities/ai.js (v0.29.x — tighter thrust gate + soft yaw guard).
  *
  * The brain (`aiBrainTick`) is a pure function that maps
  *   (ship position + yaw + velocity + angular velocity + asteroid list + powerup)
  * to a 4-tuple `{ yaw, thrust, mode, fire }`.
  *
  * Three modes: EVADE (nearest within evadeDist) → ENGAGE (speed-managed
- * approach with active braking) → IDLE (no targets).
+ * approach with active braking + soft yaw guard) → IDLE (no targets).
  *
- * `engageTarget` is now velocity-aware: it manages approach speed
- * proportionally to distance, actively brakes when going too fast,
- * and allows simultaneous turn+thrust (no yaw===0 guard).
+ * `engageTarget` is velocity-aware with:
+ *   - thrustGate=0.30 (tight, 17°)
+ *   - SPEED_FACTOR=1.0, MAX_APPROACH=90
+ *   - Soft yaw guard: thrust only when |predictedDiff| < 0.20
  */
 
 import { test } from 'node:test';
@@ -165,8 +166,8 @@ test('aiBrainTick: legacy panicDist param works as fallback for evadeDist', () =
 
 test('aiBrainTick: nearest asteroid in range → mode=asteroid, thrust when aligned and need speed', () => {
   // Ship at origin, facing -X toward asteroid at +X (40u away).
-  // dist=40 → desiredClosing = min(150, max(8, 40*1.5)) = 60 u/s.
-  // aiVel=(0,0) → closingSpeed=0 < desiredClosing=60 → thrust=true when aligned.
+  // dist=40 → desiredClosing = clamp(40*1.0, 8, 90) = 40 u/s.
+  // aiVel=(0,0) → closingSpeed=0 < desiredClosing=40 → thrust=true when aligned.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2, // facing +X
@@ -180,7 +181,7 @@ test('aiBrainTick: nearest asteroid in range → mode=asteroid, thrust when alig
 
 test('aiBrainTick: ENGAGE turn toward asteroid when misaligned', () => {
   // Ship facing -Z (yaw=0), asteroid at +X (90° off).
-  // Still turns, but may thrust if within thrustGate (0.60).
+  // Still turns, but may thrust if within thrustGate (0.30).
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0, // facing -Z
@@ -189,7 +190,7 @@ test('aiBrainTick: ENGAGE turn toward asteroid when misaligned', () => {
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, -1, 'turn to face the +X asteroid');
-  // At 90° off-axis, |targetDiff| ≈ π/2 ≈ 1.57 > thrustGate=0.60 → thrust OFF.
+  // At 90° off-axis, |targetDiff| ≈ π/2 ≈ 1.57 > thrustGate=0.30 → thrust OFF.
   assert.equal(result.thrust, false, '90° off-axis → thrust OFF');
 });
 
@@ -210,11 +211,11 @@ test('aiBrainTick: ENGAGE picks the NEAREST asteroid', () => {
   assert.equal(result.thrust, true);
 });
 
-test('aiBrainTick: simultaneous turn+thrust when within thrustGate (no yaw===0 guard)', () => {
-  // Ship facing -Z (yaw=0), target slightly off-axis at 0.3 rad (~17°).
-  // 0.3 < thrustGate=0.60 → thrust while still turning.
-  const targetX = Math.sin(0.3) * 40;
-  const targetZ = -Math.cos(0.3) * 40;
+test('aiBrainTick: simultaneous turn+thrust when settled AND within thrustGate', () => {
+  // Ship aligned within deadband (diff=0.08), predictedDiff=0.08 < 0.20 (steady).
+  // 0.08 < thrustGate=0.30 AND isSteady=true → thrust while not actively turning.
+  const targetX = Math.sin(0.08) * 40;
+  const targetZ = -Math.cos(0.08) * 40;
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
@@ -222,12 +223,14 @@ test('aiBrainTick: simultaneous turn+thrust when within thrustGate (no yaw===0 g
     time: 0,
   });
   assert.equal(result.mode, 'asteroid');
-  assert.equal(result.thrust, true, 'within thrustGate → simultaneous turn+thrust');
+  assert.equal(result.yaw, 0, 'within deadband → no yaw command');
+  assert.equal(result.thrust, true,
+    '0.08 < thrustGate + predictedDiff < 0.20 (steady) → thrust');
 });
 
 test('aiBrainTick: thrust ON when aligned + need speed (yaw===0, within thrust gate)', () => {
-  // Ship facing -Z, target at -Z (aligned). dist=40 → desiredClosing=60.
-  // closingSpeed=0 < 60 → thrust=true.
+  // Ship facing -Z, target at -Z (aligned). dist=40 → desiredClosing=40.
+  // closingSpeed=0 < 40 → thrust=true.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
@@ -244,8 +247,8 @@ test('aiBrainTick: thrust ON when aligned + need speed (yaw===0, within thrust g
 // --------------------------------------------------------------------------
 
 test('aiBrainTick: thrust OFF when closing speed already meets desired', () => {
-  // Ship at origin, facing +X toward target at (40, 0). dist=40 → desiredClosing=60.
-  // Ship already moving at 80 u/s toward target → closingSpeed=80 > 60 → no thrust.
+  // Ship at origin, facing +X toward target at (40, 0). dist=40 → desiredClosing=40.
+  // Ship already moving at 80 u/s toward target → closingSpeed=80 > 40 → no thrust.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2, // facing +X
@@ -256,12 +259,12 @@ test('aiBrainTick: thrust OFF when closing speed already meets desired', () => {
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0, 'aligned → no turning');
   assert.equal(result.thrust, false,
-    'closingSpeed=80 > desiredClosing=60 → thrust OFF (drag will slow)');
+    'closingSpeed=80 > desiredClosing=40 → thrust OFF (drag will slow)');
 });
 
 test('aiBrainTick: thrust ON when closing speed is below desired', () => {
-  // Ship at origin facing +X toward target at (40, 0). dist=40 → desiredClosing=60.
-  // Ship moving at 20 u/s toward target → closingSpeed=20 < 60 → thrust.
+  // Ship at origin facing +X toward target at (40, 0). dist=40 → desiredClosing=40.
+  // Ship moving at 20 u/s toward target → closingSpeed=20 < 40 → thrust.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -272,11 +275,11 @@ test('aiBrainTick: thrust ON when closing speed is below desired', () => {
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0);
   assert.equal(result.thrust, true,
-    'closingSpeed=20 < desiredClosing=60 → thrust ON');
+    'closingSpeed=20 < desiredClosing=40 → thrust ON');
 });
 
 test('aiBrainTick: close target → low desiredClosing → likely no thrust', () => {
-  // Ship at origin facing +X toward target at (4, 0). dist=4 → desiredClosing = max(8, 4*1.5=6) = 8.
+  // Ship at origin facing +X toward target at (4, 0). dist=4 → desiredClosing = max(8, 4*1.0=4) = 8.
   // evadeDist=2 so we stay in ENGAGE mode.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
@@ -313,8 +316,8 @@ test('aiBrainTick: close target + already fast → no thrust', () => {
 // --------------------------------------------------------------------------
 
 test('aiBrainTick: active braking when total speed far exceeds desired closing', () => {
-  // Ship at origin facing +X toward target at (40, 0). dist=40 → desiredClosing=60.
-  // totalSpeed=200 > desiredClosing*3=180 AND closingSpeed=200 > 60 → BRAKE.
+  // Ship at origin facing +X toward target at (40, 0). dist=40 → desiredClosing=40.
+  // totalSpeed=200 > desiredClosing*3=120 AND closingSpeed=200 > 40 → BRAKE.
   // Ship faces retrograde (-X direction), which is opposite of facing (+X).
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
@@ -328,11 +331,11 @@ test('aiBrainTick: active braking when total speed far exceeds desired closing',
   // predictedDiff ≈ π → yaw=-1 or 1 to turn around.
   assert.notEqual(result.yaw, 0, 'must turn to face retrograde');
   assert.equal(result.thrust, false,
-    '180° from retrograde (>0.60 rad) → thrust OFF during turn');
+    '180° from retrograde (>0.30 rad) → thrust OFF during turn');
 });
 
 test('aiBrainTick: no brake when speed is below threshold', () => {
-  // totalSpeed=100, desiredClosing=60, 100 < 60*3=180 → no brake.
+  // totalSpeed=100, desiredClosing=40, 100 < 40*3=120 → no brake.
   // Ship keeps approaching normally.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
@@ -343,13 +346,13 @@ test('aiBrainTick: no brake when speed is below threshold', () => {
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0);
-  // closingSpeed=100 > desiredClosing=60 → thrust OFF (drag slows)
+  // closingSpeed=100 > desiredClosing=40 → thrust OFF (drag slows)
   assert.equal(result.thrust, false);
 });
 
 test('aiBrainTick: no brake when closing is already slow even if total fast', () => {
   // Ship moving fast but perpendicular to target. totalSpeed=200 but closingSpeed≈0.
-  // 200 > 60*3=180 but closingSpeed=0 NOT > desiredClosing=60 → no brake.
+  // 200 > 40*3=120 but closingSpeed=0 NOT > desiredClosing=40 → no brake.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2, // facing +X, toward target
@@ -358,16 +361,16 @@ test('aiBrainTick: no brake when closing is already slow even if total fast', ()
     time: 0,
   });
   assert.equal(result.mode, 'asteroid');
-  // closingSpeed=0 < desiredClosing=60 → wants thrust
+  // closingSpeed=0 < desiredClosing=40 → wants thrust
   assert.equal(result.thrust, true, 'perpendicular velocity → still need closing speed');
 });
 
 test('aiBrainTick: overshoot (negative closingSpeed) → thrust toward target', () => {
   // Ship at origin, target at (10, 0). Ship moving away at 50 u/s (past the target).
-  // dist=10 → desiredClosing = max(8, 10*1.5=15) = 15.
+  // dist=10 → desiredClosing = max(8, 10*1.0=10) = 10.
   // closingSpeed = (-10*50 + 0*0) / 10 = -50 (moving away).
-  // totalSpeed=50, desiredClosing*3=45. 50>45 but closingSpeed=-50 NOT > 15 → no brake.
-  // closingSpeed=-50 < desiredClosing=15 → approach branch: thrust toward target.
+  // totalSpeed=50, desiredClosing*3=30. 50>30 but closingSpeed=-50 NOT > 10 → no brake.
+  // closingSpeed=-50 < desiredClosing=10 → approach branch: thrust toward target.
   // evadeDist=2 so we stay in ENGAGE mode.
   const result = aiBrainTick({
     aiPos: { x: 10, z: 0 },
@@ -382,7 +385,7 @@ test('aiBrainTick: overshoot (negative closingSpeed) → thrust toward target', 
   // yaw should be 0 (already facing the right way).
   assert.equal(result.yaw, 0, 'facing target = retrograde → yaw=0');
   assert.equal(result.thrust, true,
-    'closingSpeed=-50 < desiredClosing=15 → thrust ON toward target');
+    'closingSpeed=-50 < desiredClosing=10 → thrust ON toward target');
 });
 
 // --------------------------------------------------------------------------
@@ -551,17 +554,17 @@ test('engageTarget: aligned + stationary → yaw=0, thrust=true (need speed)', (
 });
 
 test('engageTarget: aligned + fast enough → yaw=0, thrust=false', () => {
-  // dist=60, desiredClosing = clamp(60*1.5, 8, 150) = 90.
-  // closingSpeed=100 > 90 → no thrust.
+  // dist=60, desiredClosing = clamp(60*1.0, 8, 90) = 60.
+  // closingSpeed=100 > 60 → no thrust.
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 100, z: 0 }, { x: 60, z: 0 },
   );
   assert.equal(r.yaw, 0);
-  assert.equal(r.thrust, false, 'closingSpeed=100 > desiredClosing=90 → no thrust');
+  assert.equal(r.thrust, false, 'closingSpeed=100 > desiredClosing=60 → no thrust');
 });
 
 test('engageTarget: aligned + need more speed → yaw=0, thrust=true', () => {
-  // dist=60, desiredClosing=90. closingSpeed=30 < 90 → thrust.
+  // dist=60, desiredClosing=60. closingSpeed=30 < 60 → thrust.
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 30, z: 0 }, { x: 60, z: 0 },
   );
@@ -570,25 +573,27 @@ test('engageTarget: aligned + need more speed → yaw=0, thrust=true', () => {
 });
 
 test('engageTarget: 90° off → yaw=-1, thrust=false (outside thrustGate)', () => {
-  // Ship facing +X, target at +Z. diff = π/2 ≈ 1.57 > thrustGate=0.60.
+  // Ship facing +X, target at +Z. diff = π/2 ≈ 1.57 > thrustGate=0.30.
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 }, { x: 0, z: 60 },
   );
   assert.equal(r.yaw, -1);
-  assert.equal(r.thrust, false, '1.57 rad > 0.60 thrustGate → thrust OFF');
+  assert.equal(r.thrust, false, '1.57 rad > 0.30 thrustGate → thrust OFF');
 });
 
-test('engageTarget: simultaneous turn+thrust within thrustGate', () => {
-  // Ship facing +X, target at ~0.30 rad off-axis. diff ≈ 0.30 < thrustGate=0.60.
-  // yaw may be ±1 (turning) BUT thrust=true because diff < thrustGate.
-  const angle = 0.30;
+test('engageTarget: simultaneous turn+thrust — small offset, no angVel (isSteady)', () => {
+  // Ship facing +X, target at ~0.12 rad off-axis.
+  // predictedDiff ≈ 0.12 > YAW_DEADBAND=0.10 → yaw=-1 (turning).
+  // BUT: |predictedDiff|=0.12 < 0.20 (isSteady=true).
+  // AND: |targetDiff|=0.12 < thrustGate=0.30 → thrust=true while turning.
+  const angle = 0.12;
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 },
     { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
   );
-  // predictedDiff ≈ 0.30 > YAW_DEADBAND=0.10 → yaw=-1 (turning toward target)
-  assert.equal(r.yaw, -1, '0.30 rad off → turning toward target');
-  assert.equal(r.thrust, true, '0.30 < 0.60 thrustGate → simultaneous turn+thrust');
+  assert.equal(r.yaw, -1, '0.12 rad off → turning toward target');
+  assert.equal(r.thrust, true,
+    '0.12 < thrustGate + predictedDiff=0.12 < 0.20 (steady) → thrust while turning');
 });
 
 test('engageTarget: small diff (0.08) within deadband → yaw=0, thrust=true', () => {
@@ -618,7 +623,7 @@ test('engageTarget: spin-brake fires counter-yaw at alignment with positive angV
 });
 
 test('engageTarget: active braking — faces retrograde when too fast', () => {
-  // dist=60, desiredClosing=90. totalSpeed=300 > 90*3=270 AND closingSpeed=300 > 90.
+  // dist=60, desiredClosing=60. totalSpeed=300 > 60*3=180 AND closingSpeed=300 > 60.
   // → isBraking=true → faceAngle = opposite of velocity.
   // Ship facing +X toward target. Velocity=(300,0). Retrograde = (-1, 0) direction.
   const r = engageTarget(
@@ -652,13 +657,13 @@ test('engageTarget: active braking — thrusts when facing retrograde', () => {
 });
 
 test('engageTarget: no brake when total speed is below threshold', () => {
-  // dist=60, desiredClosing=90. totalSpeed=100 < 90*3=270 → no brake.
-  // closingSpeed=100 > desiredClosing=90 → thrust OFF (drag slows).
+  // dist=60, desiredClosing=60. totalSpeed=100 < 60*3=180 → no brake.
+  // closingSpeed=100 > desiredClosing=60 → thrust OFF (drag slows).
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 100, z: 0 }, { x: 60, z: 0 },
   );
   assert.equal(r.yaw, 0, 'aligned → yaw=0');
-  assert.equal(r.thrust, false, '100 > 90 → thrust OFF');
+  assert.equal(r.thrust, false, '100 > 60 → thrust OFF');
 });
 
 test('engageTarget: custom thrust gate works', () => {
@@ -688,7 +693,7 @@ test('engageTarget: back-compat with null aiVel → treats as zero velocity', ()
 });
 
 test('engageTarget: near target → low desired closing', () => {
-  // dist=5, desiredClosing = max(8, 5*1.5=7.5) = 8 u/s.
+  // dist=5, desiredClosing = max(8, 5*1.0=5) = 8 u/s.
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 }, { x: 5, z: 0 },
   );
@@ -705,6 +710,36 @@ test('engageTarget: returns dist and closingSpeed in result', () => {
   assert.ok(typeof r.closingSpeed === 'number');
   // closingSpeed = (40*50 + 0*0) / 40 = 50
   assert.ok(Math.abs(r.closingSpeed - 50) < 1e-9);
+});
+
+test('engageTarget: soft yaw guard — no thrust during hard turn even within gate', () => {
+  // Ship facing +X, target at 0.20 rad off-axis (within thrustGate=0.30).
+  // But ship has angVel=-3 → predictedDiff = 0.20 + (-3)*0.2 = -0.40.
+  // |predictedDiff|=0.40 > 0.20 → isSteady=false → NO thrust.
+  const angle = 0.20;
+  const r = engageTarget(
+    { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 },
+    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
+    -3,
+  );
+  // targetDiff ≈ 0.20, thrustGate check passes (0.20 < 0.30).
+  // But predictedDiff ≈ -0.40 → isSteady=false → thrust blocked.
+  assert.equal(r.thrust, false,
+    'within thrustGate but predictedDiff=-0.40 > 0.20 (unsteady) → thrust OFF');
+});
+
+test('engageTarget: soft yaw guard — thrust allowed when settled (low predictedDiff)', () => {
+  // Ship facing +X, target at 0.20 rad off-axis (within thrustGate=0.30).
+  // angVel=-0.5 → predictedDiff = 0.20 + (-0.5)*0.2 = 0.10.
+  // |predictedDiff|=0.10 < 0.20 → isSteady=true → thrust allowed.
+  const angle = 0.20;
+  const r = engageTarget(
+    { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 },
+    { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
+    -0.5,
+  );
+  assert.equal(r.thrust, true,
+    'within thrustGate + predictedDiff=0.10 < 0.20 (steady) → thrust ON');
 });
 
 // --------------------------------------------------------------------------
