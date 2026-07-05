@@ -46,9 +46,9 @@ const DEFAULTS = Object.freeze({
   /**
    * Evade distance (world units). When the nearest asteroid is closer
    * than this, the AI thrusts 90° perpendicular — pure reflex.
-   * Wider than the old panicDist (6u) to give more clearance.
+   * Tighter than the old 12u to reduce frequent evade→asteroid cycling.
    */
-  evadeDist: 12,
+  evadeDist: 10,
 
   /**
    * Powerup detour bias (world units). Powerup wins over nearest
@@ -302,10 +302,11 @@ export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, t
     : 0;
 
   // Thrust: gated on geometric alignment AND control settlement.
-  // |predictedDiff| < 0.20 (YAW_DEADBAND×2) means the yaw controller
-  // has settled — no hard turn in progress. This prevents thrusting
-  // while still slewing the nose around.
-  const isSteady = Math.abs(predictedDiff) < YAW_DEADBAND * 2;
+  // |predictedDiff| < 0.25 (YAW_DEADBAND×2.5) means the yaw controller
+  // has mostly settled — no hard turn in progress. This prevents thrusting
+  // while still slewing the nose around, but allows thrust during the
+  // final alignment phase of a turn.
+  const isSteady = Math.abs(predictedDiff) < YAW_DEADBAND * 2.5;
   let thrust = false;
   if (Math.abs(targetDiff) < thrustGate && isSteady) {
     if (isBraking) {
@@ -408,6 +409,9 @@ export function aiBrainTick({
 
   // ---- 1. EVADE (nearest asteroid within evadeDist) --------------------
   // Pure reflex: thrust 90° perpendicular to the nearest asteroid.
+  // Always thrust — the ship needs to escape the danger zone.
+  // evadeDist is kept tight (12u) so evasion is a last-resort reflex,
+  // not a frequent state.
   if (nearest && nearest.dist < ed) {
     const threatAngle = Math.atan2(nearest.dz, nearest.dx);
     const escapeAngle = threatAngle + Math.PI / 2;

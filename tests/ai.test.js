@@ -115,7 +115,7 @@ test('aiBrainTick: nearest within evadeDist → mode=evade, thrust=true', () => 
     aiYaw: 0,
     asteroids: [mockAsteroid(5, 0)],
     time: 0,
-    evadeDist: 12,
+    evadeDist: 10,
   });
   assert.equal(result.mode, 'evade');
   assert.equal(result.thrust, true);
@@ -129,23 +129,24 @@ test('aiBrainTick: evade steers ~90° perpendicular from threat', () => {
     aiYaw: -Math.PI / 2,
     asteroids: [mockAsteroid(5, 0)],
     time: 0,
-    evadeDist: 12,
+    evadeDist: 10,
   });
   assert.equal(result.mode, 'evade');
   assert.notEqual(result.yaw, 0, 'must turn to escape');
   assert.equal(result.thrust, true);
 });
 
-test('aiBrainTick: dodge mode → no fire', () => {
+test('aiBrainTick: evade mode → no fire, always thrust', () => {
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
     asteroids: [mockAsteroid(0, -3)],
     time: 0,
-    evadeDist: 12,
+    evadeDist: 10,
   });
   assert.equal(result.mode, 'evade');
   assert.equal(result.fire, false);
+  assert.equal(result.thrust, true, 'evade always thrusts to escape danger zone');
 });
 
 test('aiBrainTick: legacy panicDist param works as fallback for evadeDist', () => {
@@ -439,7 +440,7 @@ test('aiBrainTick: no fire when target is too close (<fireMinDist)', () => {
     asteroids: [mockAsteroid(0, -20)],
     time: 0,
     fireMinDist: 25,
-    evadeDist: 12,
+    evadeDist: 10,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.fire, false, '20u < fireMinDist=25 → no fire');
@@ -715,7 +716,7 @@ test('engageTarget: returns dist and closingSpeed in result', () => {
 test('engageTarget: soft yaw guard — no thrust during hard turn even within gate', () => {
   // Ship facing +X, target at 0.20 rad off-axis (within thrustGate=0.30).
   // But ship has angVel=-3 → predictedDiff = 0.20 + (-3)*0.2 = -0.40.
-  // |predictedDiff|=0.40 > 0.20 → isSteady=false → NO thrust.
+  // |predictedDiff|=0.40 > 0.25 → isSteady=false → NO thrust.
   const angle = 0.20;
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 },
@@ -725,13 +726,13 @@ test('engageTarget: soft yaw guard — no thrust during hard turn even within ga
   // targetDiff ≈ 0.20, thrustGate check passes (0.20 < 0.30).
   // But predictedDiff ≈ -0.40 → isSteady=false → thrust blocked.
   assert.equal(r.thrust, false,
-    'within thrustGate but predictedDiff=-0.40 > 0.20 (unsteady) → thrust OFF');
+    'within thrustGate but predictedDiff=-0.40 > 0.25 (unsteady) → thrust OFF');
 });
 
 test('engageTarget: soft yaw guard — thrust allowed when settled (low predictedDiff)', () => {
   // Ship facing +X, target at 0.20 rad off-axis (within thrustGate=0.30).
   // angVel=-0.5 → predictedDiff = 0.20 + (-0.5)*0.2 = 0.10.
-  // |predictedDiff|=0.10 < 0.20 → isSteady=true → thrust allowed.
+  // |predictedDiff|=0.10 < 0.25 → isSteady=true → thrust allowed.
   const angle = 0.20;
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 },
@@ -739,7 +740,7 @@ test('engageTarget: soft yaw guard — thrust allowed when settled (low predicte
     -0.5,
   );
   assert.equal(r.thrust, true,
-    'within thrustGate + predictedDiff=0.10 < 0.20 (steady) → thrust ON');
+    'within thrustGate + predictedDiff=0.10 < 0.25 (steady) → thrust ON');
 });
 
 // --------------------------------------------------------------------------
