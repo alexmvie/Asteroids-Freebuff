@@ -57,16 +57,16 @@ const DEFAULTS = Object.freeze({
    * Thrust heading gate (radians). Ship thrusts when |heading diff|
    * is within this angle. No soft yaw guard — thrust happens
    * whenever roughly aligned, even during turns.
-   * 0.52 rad ≈ 30° — wide enough for decisive movement.
+   * 0.30 rad ≈ 17° — moderate. 96% of thrust goes toward target.
    */
-  thrustHeadingGate: 0.52,
+  thrustHeadingGate: 0.30,
 
   /**
    * Fire heading gate (radians). Ship fires when |heading diff|
-   * is within this angle. 0.30 ≈ 17° — wider for more firing
-   * opportunities while approaching.
+   * is within this angle. 0.10 rad ≈ 5.7° — tight for accuracy.
+   * At 40u: offset = 40*sin(5.7°) ≈ 4u → within asteroid radius.
    */
-  fireHeadingGate: 0.30,
+  fireHeadingGate: 0.10,
 
   /**
    * Fire distance range (world units). Ship fires at asteroids
@@ -94,6 +94,8 @@ const DEFAULTS = Object.freeze({
  * Yaw deadband (radians). Stop turning when the predicted heading
  * is within this angle of the target. Spin-brake prediction
  * (YAW_INERTIA_TAU) prevents overshoot wobble.
+ * 0.08 rad ≈ 4.6° — tight enough for accurate firing, loose enough
+ * to not fight YAW_INERTIA_TAU settling.
  */
 const YAW_DEADBAND = 0.08;
 
@@ -253,7 +255,9 @@ export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, t
     : predictedDiff < -YAW_DEADBAND ? 1
     : 0;
 
-  // Thrust: fire engines whenever roughly aligned (no soft yaw guard)
+  // Thrust: fire engines whenever roughly aligned (no coasting, no speed cap).
+  // The ship naturally flies past targets → engines cut → turns around while
+  // LINEAR_DRAG decelerates → clean fly-by attack pattern.
   const thrust = Math.abs(targetDiff) < thrustGate;
 
   return { yaw, thrust, diff: targetDiff, dist };

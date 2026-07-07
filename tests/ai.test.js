@@ -9,8 +9,9 @@
  * → IDLE (no targets).
  *
  * `engageTarget` is simple: turn toward target (spin-brake prediction),
- * thrust when within thrustGate=0.52. No speed management, no soft yaw
- * guard, no active braking.
+ * thrust when within thrustGate=0.30. No coasting, no speed management.
+ * Fly-by attack pattern: ship naturally flies past targets → engines cut
+ * → turns around while LINEAR_DRAG decelerates.
  */
 
 import { test } from 'node:test';
@@ -187,7 +188,7 @@ test('aiBrainTick: ENGAGE turn toward asteroid when misaligned', () => {
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, -1, 'turn to face the +X asteroid');
-  // At 90° off-axis, |targetDiff| ≈ π/2 ≈ 1.57 > thrustGate=0.52 → thrust OFF.
+  // At 90° off-axis, |targetDiff| ≈ π/2 ≈ 1.57 > thrustGate=0.30 → thrust OFF.
   assert.equal(result.thrust, false, '90° off-axis → thrust OFF');
 });
 
@@ -208,11 +209,10 @@ test('aiBrainTick: ENGAGE picks the NEAREST asteroid', () => {
   assert.equal(result.thrust, true);
 });
 
-test('aiBrainTick: thrust within gate even during turn (v0.30.x: no soft yaw guard)', () => {
-  // Ship 0.40 rad off target — within thrustGate=0.52 but still turning.
-  // v0.29.x would block thrust due to soft yaw guard. v0.30.x allows it.
-  const targetX = Math.sin(0.40) * 40;
-  const targetZ = -Math.cos(0.40) * 40;
+test('aiBrainTick: 0.20 rad off → within thrustGate=0.30 → thrust during turn', () => {
+  // Ship 0.20 rad off target — within thrustGate=0.30, still turning.
+  const targetX = Math.sin(0.20) * 40;
+  const targetZ = -Math.cos(0.20) * 40;
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
@@ -222,7 +222,7 @@ test('aiBrainTick: thrust within gate even during turn (v0.30.x: no soft yaw gua
   assert.equal(result.mode, 'asteroid');
   assert.notEqual(result.yaw, 0, 'still turning toward target');
   assert.equal(result.thrust, true,
-    '0.40 < thrustGate=0.52 + no soft yaw guard → thrust during turn');
+    '0.20 < thrustGate=0.30 → thrust during turn');
 });
 
 test('aiBrainTick: thrust ON when aligned (simple controller)', () => {
@@ -241,20 +241,20 @@ test('aiBrainTick: thrust ON when aligned (simple controller)', () => {
 // aiBrainTick: simple controller — thrust whenever within gate
 // --------------------------------------------------------------------------
 
-test('aiBrainTick: thrust ON when aligned regardless of speed (v0.30.x)', () => {
-  // Ship at origin, facing +X toward target at (40, 0).
-  // v0.30.x: simple controller — thrust when |diff| < thrustGate, no speed check.
+test('aiBrainTick: aligned + high speed + far target → still thrusts (no coasting, fly-by pattern)', () => {
+  // Ship at origin, facing +X toward target at (200, 0).
+  // Fly-by controller: no coasting, no speed management. Always thrust when aligned.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
-    aiVel: { x: 80, z: 0 }, // already fast — v0.29.x would block thrust here
-    asteroids: [mockAsteroid(40, 0)],
+    aiVel: { x: 80, z: 0 },
+    asteroids: [mockAsteroid(200, 0)],
     time: 0,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0);
   assert.equal(result.thrust, true,
-    'v0.30.x: thrust when aligned, even at high speed');
+    'fly-by: thrust when aligned regardless of speed');
 });
 
 test('aiBrainTick: close target still thrusts when aligned (v0.30.x)', () => {
@@ -270,8 +270,9 @@ test('aiBrainTick: close target still thrusts when aligned (v0.30.x)', () => {
   assert.equal(result.thrust, true, 'v0.30.x: thrust when aligned, simple controller');
 });
 
-test('aiBrainTick: high speed + aligned → still thrusts (no speed cap)', () => {
-  // v0.30.x: no speed management. Ship thrusts whenever aligned.
+test('aiBrainTick: high speed + close target → still thrusts (fly-by: no coasting)', () => {
+  // Ship at origin, facing +X toward target at (40, 0).
+  // Fly-by controller: no coasting. Always thrust when aligned.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -281,7 +282,7 @@ test('aiBrainTick: high speed + aligned → still thrusts (no speed cap)', () =>
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0);
-  assert.equal(result.thrust, true, 'v0.30.x: always thrusts when aligned');
+  assert.equal(result.thrust, true, 'fly-by: always thrust when aligned');
 });
 
 test('aiBrainTick: perpendicular velocity → turn + thrust toward target', () => {
@@ -464,13 +465,13 @@ test('engageTarget: aligned + stationary → yaw=0, thrust=true', () => {
   assert.equal(r.thrust, true, 'aligned → thrust');
 });
 
-test('engageTarget: aligned + fast → yaw=0, thrust=true (no speed cap)', () => {
-  // v0.30.x: always thrust when within gate, regardless of speed.
+test('engageTarget: aligned + fast → yaw=0, thrust=true (fly-by: no coasting)', () => {
+  // Fly-by controller: always thrust when within gate, regardless of speed.
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 100, z: 0 }, { x: 60, z: 0 },
   );
   assert.equal(r.yaw, 0);
-  assert.equal(r.thrust, true, 'v0.30.x: thrust when aligned regardless of speed');
+  assert.equal(r.thrust, true, 'fly-by: thrust when aligned regardless of speed');
 });
 
 test('engageTarget: aligned + slow → yaw=0, thrust=true', () => {
@@ -490,16 +491,15 @@ test('engageTarget: 90° off → yaw=-1, thrust=false (outside thrustGate)', () 
   assert.equal(r.thrust, false, '1.57 rad > 0.52 thrustGate → thrust OFF');
 });
 
-test('engageTarget: 0.40 rad off → thrust during turn (within gate, no soft yaw guard)', () => {
-  // v0.30.x: 0.40 < thrustGate=0.52 → thrust even during turn.
-  const angle = 0.40;
+test('engageTarget: 0.20 rad off → thrust during turn (within thrustGate=0.30)', () => {
+  const angle = 0.20;
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 },
     { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
   );
   assert.equal(r.yaw, -1, 'still turning toward target');
   assert.equal(r.thrust, true,
-    '0.40 < 0.52 thrustGate + no soft yaw guard → thrust during turn');
+    '0.20 < thrustGate=0.30 → thrust during turn');
 });
 
 test('engageTarget: within deadband (0.07 rad) → yaw=0', () => {
@@ -569,20 +569,19 @@ test('engageTarget: returns dist in result', () => {
   assert.ok(typeof r.diff === 'number');
 });
 
-test('engageTarget: no brake — always faces toward target', () => {
-  // v0.30.x: even at 300 u/s toward target, the ship still faces
-  // TOWARD the target (not retrograde). No active braking.
+test('engageTarget: aligned + fast toward close target → thrust (fly-by: no coasting)', () => {
+  // Fly-by controller: even at 300 u/s toward a close target, thrust stays on.
+  // The ship will fly past → target moves behind → engines cut naturally.
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 300, z: 0 }, { x: 60, z: 0 },
   );
-  assert.equal(r.yaw, 0, 'facing toward target (not retrograde)');
-  assert.equal(r.thrust, true, 'aligned → thrust (no brake)');
+  assert.equal(r.yaw, 0, 'facing toward target');
+  assert.equal(r.thrust, true, 'fly-by: thrust when aligned, flies past target naturally');
 });
 
 test('engageTarget: retrograde-facing ship still turns toward target', () => {
   // Ship moving +X at 300 u/s, but facing -X (retrograde).
-  // v0.30.x ignores velocity, always faces target at (60,0).
-  // Target is at +X, ship faces -X → 180° turn needed.
+  // Fly-by controller always faces toward target (no braking).
   const r = engageTarget(
     { x: 0, z: 0 }, Math.PI / 2, { x: 300, z: 0 }, { x: 60, z: 0 },
   );
