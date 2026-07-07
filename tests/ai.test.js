@@ -119,6 +119,7 @@ test('aiBrainTick: nearest within evadeDist → mode=evade, thrust=true', () => 
   assert.equal(result.thrust, true);
   assert.ok(result.yaw === -1 || result.yaw === 1);
   assert.equal(result.fire, false);
+  assert.equal(result.braking, false);
 });
 
 test('aiBrainTick: evade steers ~90° perpendicular from threat', () => {
@@ -270,9 +271,9 @@ test('aiBrainTick: close target + stationary → thrusts (low closing speed, no 
   assert.equal(result.thrust, true, 'stationary → no coast-in, thrust to accelerate');
 });
 
-test('aiBrainTick: high speed + close target → coast-in (no thrust)', () => {
-  // v0.33.3 coast-in: ship at 150 u/s closing speed toward target
-  // at 10u. dist=10 < coastDist=15 && closingSpeed=150 > 30 → coast.
+test('aiBrainTick: high speed + close target → active brake (flip and thrust backward)', () => {
+  // v0.34.3 active brake: ship at 150 u/s closing speed toward target
+  // at 10u. dist=10 < BRAKE_DIST=40 && closingSpeed=150 > 25 → brake.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -282,8 +283,9 @@ test('aiBrainTick: high speed + close target → coast-in (no thrust)', () => {
     evadeDist: 5,  // avoid triggering EVADE at 10u
   });
   assert.equal(result.mode, 'asteroid');
-  assert.equal(result.yaw, 0);
-  assert.equal(result.thrust, false, 'v0.33.3: coast-in when closing fast within coastDist=15');
+  assert.notEqual(result.yaw, 0, 'v0.34.3: active brake flips ship to face opposite velocity');
+  assert.equal(result.thrust, true, 'v0.34.3: active brake thrusts backward to shed speed');
+  assert.equal(result.braking, true, 'braking flag is true during active brake');
 });
 
 test('aiBrainTick: perpendicular velocity → turn + thrust toward target', () => {
@@ -315,17 +317,91 @@ test('aiBrainTick: receding velocity within coastDist → still thrusts', () => 
   assert.equal(result.thrust, true, 'receding closingSpeed<0 → no coast → thrust');
 });
 
-test('aiBrainTick: closing speed exactly at threshold (30) → no coast (strict >)', () => {
-  // Ship closing at exactly 30 u/s. Strict > means 30 is NOT coasting.
+test('aiBrainTick: brake does NOT fire when closingSpeed below entry threshold', () => {
+  // dist=20 < BRAKE_DIST=40, but closingSpeed=10 < 25 → no brake, normal coast
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
-    aiVel: { x: 30, z: 0 },
+    aiVel: { x: 10, z: 0 },
+    asteroids: [mockAsteroid(20, 0)],
+    time: 0,
+    evadeDist: 5,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.thrust, false, 'slow approach → coast, no brake');
+  assert.equal(result.braking, false, 'braking flag is false when not braking');
+});
+
+test('aiBrainTick: brake does NOT fire when beyond BRAKE_DIST', () => {
+  // dist=35 < BRAKE_DIST=40, but closingSpeed=20 < 25 → no brake
+  // dist=35 < coastDist=40, closingSpeed=20 > 5 → coast → no thrust
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 20, z: 0 },
+    asteroids: [mockAsteroid(35, 0)],
+    time: 0,
+    evadeDist: 5,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.thrust, false, 'no brake (closingSpeed<25) → coast (dist<40) → no thrust');
+  assert.equal(result.braking, false);
+});
+
+test('aiBrainTick: perpendicular motion near target → no brake', () => {
+  // dist=20 < BRAKE_DIST, but closingSpeed≈0 (perpendicular) → no brake
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 50 },
+    asteroids: [mockAsteroid(20, 0)],
+    time: 0,
+    evadeDist: 5,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.thrust, true, 'perpendicular → closingSpeed≈0 → no coast → thrust');
+  assert.equal(result.braking, false);
+});
+
+test('aiBrainTick: coast boundary — dist=40 exactly does NOT coast (strict <)', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 20, z: 0 },
     asteroids: [mockAsteroid(40, 0)],
     time: 0,
   });
   assert.equal(result.mode, 'asteroid');
-  assert.equal(result.thrust, true, 'closingSpeed=30 is NOT >30 → no coast → thrust');
+  assert.equal(result.thrust, true, 'dist=40 is NOT < coastDist=40 → no coast');
+});
+
+test('aiBrainTick: beyond coastDist → thrust even when closing fast', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 100, z: 0 },
+    asteroids: [mockAsteroid(55, 0)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.thrust, true, 'dist=55 > coastDist=50 → no coast → thrust');
+});
+
+test('aiBrainTick: moderate closing speed within coastDist → coast (no thrust)', () => {
+  // Ship closing at 20 u/s toward target at 35u.
+  // v0.34.3: coastDist=40, COAST_SPEED_THRESHOLD=5.
+  // closingSpeed=20 < BRAKE_ENTER=25 → no brake
+  // dist=35 < 40 && closingSpeed=20 > 5 → shouldCoast=true → thrust=false.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 20, z: 0 },
+    asteroids: [mockAsteroid(35, 0)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.thrust, false, 'v0.34.3: coast-in when closing within coastDist=40');
+  assert.equal(result.braking, false, 'coasting is not braking');
 });
 
 // --------------------------------------------------------------------------
@@ -355,6 +431,59 @@ test('aiBrainTick: asteroid wins when powerup is not biased closer', () => {
     powerupBiasU: 60,
   });
   assert.equal(result.mode, 'asteroid');
+});
+
+// --------------------------------------------------------------------------
+// aiBrainTick: brake hysteresis
+// --------------------------------------------------------------------------
+
+test('aiBrainTick: brake hysteresis — continues braking until closingSpeed < 10', () => {
+  // wasBraking=true, dist=20 < 40, closingSpeed=20 (between exit=10 and entry=25)
+  // Hysteresis: should KEEP braking because wasBraking=true and closingSpeed > 10
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 20, z: 0 },
+    asteroids: [mockAsteroid(20, 0)],
+    time: 0,
+    evadeDist: 5,
+    wasBraking: true,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.braking, true, 'hysteresis: keep braking while closingSpeed=20 > exit=10');
+  assert.notEqual(result.yaw, 0, 'still turning to face opposite velocity');
+});
+
+test('aiBrainTick: brake hysteresis — releases when closingSpeed drops below 10', () => {
+  // wasBraking=true, dist=20 < 40, closingSpeed=8 < 10
+  // Hysteresis: should RELEASE brake
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 8, z: 0 },
+    asteroids: [mockAsteroid(20, 0)],
+    time: 0,
+    evadeDist: 5,
+    wasBraking: true,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.braking, false, 'hysteresis: release brake when closingSpeed=8 < exit=10');
+});
+
+test('aiBrainTick: brake hysteresis — does NOT start braking at closingSpeed=20', () => {
+  // wasBraking=false, dist=20 < 40, closingSpeed=20 (between exit=10 and entry=25)
+  // Without hysteresis history, should NOT brake (entry requires >25)
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 20, z: 0 },
+    asteroids: [mockAsteroid(20, 0)],
+    time: 0,
+    evadeDist: 5,
+    wasBraking: false,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.braking, false, 'no hysteresis: do not start braking at closingSpeed=20 (entry=25)');
 });
 
 // --------------------------------------------------------------------------
@@ -403,7 +532,7 @@ test('aiBrainTick: no fire when target is off-axis (>fireHeadingGate)', () => {
     aiYaw: 0,
     asteroids: [mockAsteroid(40, 0)],
     time: 0,
-    fireHeadingGate: 0.20,
+    fireHeadingGate: 0.25,
     fireMaxDist: 80,
   });
   assert.equal(result.mode, 'asteroid');
@@ -419,7 +548,7 @@ test('aiBrainTick: fires at ANY in-cone asteroid in range (not just chase target
       mockAsteroid(0, -20),  // dead-ahead, in fire cone, 20u in range
     ],
     time: 0,
-    fireHeadingGate: 0.20,
+    fireHeadingGate: 0.25,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.fire, true,
@@ -427,16 +556,17 @@ test('aiBrainTick: fires at ANY in-cone asteroid in range (not just chase target
 });
 
 test('aiBrainTick: adaptive cone narrows with distance — wide at close, tight at far', () => {
-  // At 35u dead-ahead: within fireMaxDist=40, adaptive cone ≈ 0.15 → fires
+  // v0.34.3: fireMaxDist=120, fireHeadingGate=0.25, cone min=0.12.
+  // At 35u dead-ahead: adaptive cone = max(0.12, 0.25*(1-35/180)) ≈ 0.201 → fires
   const result35 = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
     asteroids: [mockAsteroid(0, -35)],
     time: 0,
   });
-  assert.equal(result35.fire, true, 'dead-ahead at 35u → adaptive cone≈0.15 → fires');
+  assert.equal(result35.fire, true, 'dead-ahead at 35u → adaptive cone≈0.201 → fires');
 
-  // A target at 10u that's 0.20 rad off-axis: adaptive cone = max(0.06, 0.25*(1-10/60)) ≈ 0.208 > 0.20 → fires
+  // A target at 10u that's 0.20 rad off-axis: adaptive cone = max(0.12, 0.25*(1-10/180)) ≈ 0.236 > 0.20 → fires
   const closeOffAxis = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
@@ -444,16 +574,16 @@ test('aiBrainTick: adaptive cone narrows with distance — wide at close, tight 
     time: 0,
     evadeDist: 5,  // avoid triggering EVADE at 10u
   });
-  assert.equal(closeOffAxis.fire, true, '10u at 0.20 rad off → adaptive cone≈0.208 → fires');
+  assert.equal(closeOffAxis.fire, true, '10u at 0.20 rad off → adaptive cone≈0.236 → fires');
 
-  // Same 0.20 rad off-axis at 35u: adaptive cone ≈ 0.15 < 0.20 → no fire
+  // Same 0.20 rad off-axis at 80u: adaptive cone = max(0.12, 0.25*(1-80/180)) ≈ 0.139 < 0.20 → no fire
   const farOffAxis = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
-    asteroids: [mockAsteroid(Math.sin(0.20) * 35, -Math.cos(0.20) * 35)],
+    asteroids: [mockAsteroid(Math.sin(0.20) * 80, -Math.cos(0.20) * 80)],
     time: 0,
   });
-  assert.equal(farOffAxis.fire, false, '35u at 0.20 rad off → adaptive cone≈0.15 → no fire');
+  assert.equal(farOffAxis.fire, false, '80u at 0.20 rad off → adaptive cone≈0.139 → no fire');
 });
 
 test('aiBrainTick: idle mode → no fire', () => {
@@ -1041,7 +1171,7 @@ test('createDemoAi: evade mode in getMode()', () => {
   const ai = createDemoAi({
     scene,
     asteroids: [mockAsteroid(0, 0)],
-    options: { shipFactory: mock.build, rng: () => 0 },
+    options: { shipFactory: mock.build, rng: () => 0, evadeDist: 8 },
   });
   ai.getShip().position.x = 0;
   ai.getShip().position.z = 0;

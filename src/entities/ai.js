@@ -46,19 +46,21 @@ const DEFAULTS = Object.freeze({
   /**
    * Evade distance (world units). When the nearest asteroid is closer
    * than this, the AI thrusts 90° perpendicular — emergency reflex.
-   * v0.33.x: widened to 12u for better clearance.
+   * v0.34.1: 8u. Large asteroids have radius ~6u, ship radius ~1.4u,
+   * collision at 7.4u center-distance. 8u provides minimal safe margin.
+   * DO NOT reduce below 8 — the ship will collide with large asteroids.
    */
-  evadeDist: 12,
+  evadeDist: 8,
 
   /**
    * Powerup detour bias (world units). Powerup wins over nearest
    * asteroid if `powerupDist < asteroidDist + powerupBiasU`.
-   * v0.33.4: 40u — AI detours for nearby powerups but doesn't
-   * abandon asteroid-clearing duty. At 40u bias, a powerup at 50u
-   * beats a 10u-away asteroid (50 < 10+40 = false → asteroid wins).
-   * A powerup at 20u beats a 30u asteroid (20 < 30+40 = true).
+   * v0.34.0: 9999u — powerups are ALWAYS priority. The AI never
+   * ignores a powerup for an asteroid. This is required because
+   * powerup collection is the primary failure mode (the ship
+   * circles powerups at high speed without active braking).
    */
-  powerupBiasU: 40,
+  powerupBiasU: 9999,
 
   /**
    * Thrust heading gate (radians). Ship thrusts when |heading diff|
@@ -70,24 +72,25 @@ const DEFAULTS = Object.freeze({
   /**
    * Fire heading gate (radians). MAX cone at close range (0.25 rad = 14.3°
    * for spray-while-turning). The actual cone used in the fire loop is
-   * distance-adaptive: `max(0.06, fireHeadingGate * (1 - dist/(fireMaxDist*1.5)))`.
-   * At 10u: cone ≈ 0.23 rad, miss ≈ 2.3u → hits small (R=2).
-   * At 40u: cone ≈ 0.17 rad, miss ≈ 6.6u → hits large (R=6).
-   * At 80u: cone ≈ 0.08 rad, miss ≈ 6.6u → hits large (R=6).
-   * fireMaxDist=80 keeps the AI firing opportunistically at long
-   * range (where the adaptive cone tightens to ~0.08 rad).
+   * distance-adaptive: `max(0.12, fireHeadingGate * (1 - dist/(fireMaxDist*1.5)))`.
+   * At 10u: cone ≈ 0.24 rad, miss ≈ 2.4u → hits small (R=2).
+   * At 40u: cone ≈ 0.19 rad, miss ≈ 7.7u → hits large (R=6).
+   * At 80u: cone ≈ 0.14 rad, miss ≈ 11u → hits large clusters.
+   * v0.34.3: reverted from 0.35 — wide cone caused excessive misses at
+   * medium range. Tight cone + high fire rate beats wide cone + low accuracy.
    */
   fireHeadingGate: 0.25,
 
   /**
-   * Fire distance range (world units). v0.33.6: reduced to 40u.
-   * Beyond 40u the adaptive cone is too tight for reliable hits
-   * (miss at 40u ≈ 6.6u, barely hits large R=6). Reducing range
-   * stops the AI from wasting its 0.18s cooldown on far misses.
-   * Close range (<40u) maximizes hit probability.
+   * Fire distance range (world units). v0.34.0: increased to 120u.
+   * The adaptive cone tightens with distance, so far shots are
+   * naturally less likely to hit — but the AI should still try,
+   * because the bullet pool (16 capacity, 0.18s cooldown) can
+   * sustain opportunistic long-range fire without wasting ammo.
+   * The cone minimum (0.12 rad) guarantees ~14° even at max range.
    */
   fireMinDist: 0,
-  fireMaxDist: 40,
+  fireMaxDist: 120,
 
   // Note: fireConeHalfAngle was removed in v0.33.2 — the fire
   // loop uses fireHeadingGate for all cone checks.
@@ -109,11 +112,20 @@ const DEFAULTS = Object.freeze({
    * Coast-in distance (world units). When within this distance of
    * the target, the AI cuts engines and lets LINEAR_DRAG decelerate
    * naturally. Prevents fly-through at high speed.
-   * v0.33.3: 15u — very tight. At 100 u/s, 15u of coasting slows
-   * the ship to ~94 u/s. The AI must get very close before the
-   * coast-in engages. Beyond 15u, thrust pushes it forward.
+   * v0.34.3: 40u — tighter than 50u. With earlier braking (BRAKE_DIST
+   * 40, entry 25), the ship sheds most speed before coasting begins.
+   * Tighter coastDist means more thrust = faster approach = more
+   * asteroids destroyed per minute.
    */
-  coastDist: 15,
+  coastDist: 40,
+
+  /**
+   * Brake hysteresis exit speed (u/s). Once the active brake branch
+   * fires, it keeps firing until closingSpeed drops below this.
+   * Prevents Yaw oscillation when closingSpeed hovers near the
+   * entry threshold (35 u/s). Must be < BRAKE_ENTER_SPEED.
+   */
+  brakeExitSpeed: 15,
 });
 
 /**
@@ -257,30 +269,35 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
     }
 
     return best;
-  }
-
-/**
- * Engagement controller: turn toward target, thrust when aligned
- * AND beyond coast-in distance. Within coastDist, engines cut and
- * LINEAR_DRAG decelerates the ship naturally — prevents fly-through
- * at high speed.
- *
- * v0.33.x: added coast-in heuristic. The v0.30.x fly-by pattern
- * (always thrust when aligned) caused the ship to fly through
- * pickup radii at 100+ u/s. The coast-in lets drag do the braking
- * without adding complex speed-management (which caused the v0.28.x
- * paralysis).
- *
- * @param {{x:number,z:number}} aiPos
- * @param {number} aiYaw
- * @param {{x:number,z:number}} aiVel  used for closing-speed coast-in check
- * @param {{x:number,z:number}} targetPos
- * @param {number} [aiAngularVel=0]  for spin-brake prediction
- * @param {number} [thrustGate=0.50] heading gate for thrust
- * @param {number} [coastDist=60]    coast-in distance
- * @returns {{ yaw: number, thrust: boolean, diff: number, dist: number }}
+  }  /**
+   * Engagement controller: turn toward target, thrust when aligned
+   * AND beyond coast-in distance. Within coastDist, engines cut and
+   * LINEAR_DRAG decelerates the ship naturally — prevents fly-through
+   * at high speed.
+   *
+   * v0.33.x: added coast-in heuristic. The v0.30.x fly-by pattern
+   * (always thrust when aligned) caused the ship to fly through
+   * pickup radii at 100+ u/s. The coast-in lets drag do the braking
+   * without adding complex speed-management (which caused the v0.28.x
+   * paralysis).
+   *
+   * v0.34.0: added active brake branch. LINEAR_DRAG=0.4 cannot
+   * decelerate MAX_SPEED=200 to collectible speed in reasonable
+   * distance (~450u needed). When dist < 30 and closingSpeed > 35,
+   * the ship flips 180° and thrusts backward at 60% power. The
+   * 35→5 u/s gap between brake entry and coast threshold prevents
+   * oscillation without stateful hysteresis.
+   *
+   * @param {{x:number,z:number}} aiPos
+   * @param {number} aiYaw
+   * @param {{x:number,z:number}} aiVel  used for closing-speed coast-in check
+   * @param {{x:number,z:number}} targetPos
+   * @param {number} [aiAngularVel=0]  for spin-brake prediction * @param {number} [thrustGate=0.50] heading gate for thrust
+ * @param {number} [coastDist=40]    coast-in distance
+ * @param {boolean} [wasBraking=false] hysteresis: already braking last tick
+ * @returns {{ yaw: number, thrust: boolean, diff: number, dist: number, braking: boolean }}
  */
-export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, thrustGate = DEFAULTS.thrustHeadingGate, coastDist = DEFAULTS.coastDist) {
+export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, thrustGate = DEFAULTS.thrustHeadingGate, coastDist = DEFAULTS.coastDist, wasBraking = false) {
   const dx = targetPos.x - aiPos.x;
   const dz = targetPos.z - aiPos.z;
   const dist = Math.hypot(dx, dz);
@@ -304,13 +321,33 @@ export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, t
   // (projection of velocity onto line-of-sight) so perpendicular
   // motion doesn't trigger coast-in.
   const vel = aiVel || { x: 0, z: 0 };
+  const speed = Math.hypot(vel.x, vel.z);
   const closingSpeed = dist > 0.01 ? (vel.x * dx + vel.z * dz) / dist : 0;
-  const COAST_SPEED_THRESHOLD = 30; // only coast when closing fast
+
+  // v0.34.3 — active brake with hysteresis. LINEAR_DRAG=0.4 cannot
+  // brake from 200 u/s to collectible speed alone (~450u needed).
+  // Once brake fires, it KEEPS firing until closingSpeed < 10 u/s.
+  // v0.34.3: widened BRAKE_DIST 30→40 and lowered entry 35→25 so
+  // the ship brakes earlier and more aggressively, reducing fly-through.
+  const BRAKE_DIST = 40;
+  const BRAKE_ENTER_SPEED = 25;
+  const BRAKE_EXIT_SPEED = 10;
+  const shouldStartBrake = dist < BRAKE_DIST && closingSpeed > BRAKE_ENTER_SPEED;
+  const shouldKeepBraking = wasBraking && closingSpeed > BRAKE_EXIT_SPEED;
+  if (shouldStartBrake || shouldKeepBraking) {
+    const velAngle = Math.atan2(vel.z, vel.x);
+    const brakeAngle = velAngle + Math.PI; // opposite to velocity
+    const brakeDiff = wrapAngle(brakeAngle - facingAngle(aiYaw));
+    const brakeYaw = brakeDiff > YAW_DEADBAND ? -1 : brakeDiff < -YAW_DEADBAND ? 1 : 0;
+    return { yaw: brakeYaw, thrust: true, diff: brakeDiff, dist, braking: true };
+  }
+
+  const COAST_SPEED_THRESHOLD = 5; // coast on any meaningful approach
   const shouldCoast = dist < coastDist && closingSpeed > COAST_SPEED_THRESHOLD;
   const isAligned = Math.abs(targetDiff) < thrustGate;
   const thrust = isAligned && !shouldCoast;
 
-  return { yaw, thrust, diff: targetDiff, dist };
+  return { yaw, thrust, diff: targetDiff, dist, braking: false };
 }
 
 /**
@@ -341,16 +378,15 @@ export function pickAiSpawn(radius = DEFAULTS.spawnRadius, rng = Math.random) {
     position: { x: Math.cos(angle) * r, y: 0, z: Math.sin(angle) * r },
     yaw: rng() * Math.PI * 2,
   };
-}
-
-/**
- * Pure: decide what the AI should do this tick.
- *
- * Returns `{ yaw, thrust, mode, fire }` where:
- *   - `yaw`     ∈ {-1, 0, +1}
- *   - `thrust`  boolean
- *   - `mode`    'evade' | 'asteroid' | 'powerup' | 'idle'
- *   - `fire`    boolean
+}  /**
+   * Pure: decide what the AI should do this tick.
+   *
+   * Returns `{ yaw, thrust, mode, fire, braking }` where:
+   *   - `yaw`     ∈ {-1, 0, +1}
+   *   - `thrust`  boolean
+   *   - `mode`    'evade' | 'asteroid' | 'powerup' | 'idle'
+   *   - `fire`    boolean
+   *   - `braking` boolean  (hysteresis: true if actively braking)
  *
  * @param {{
  *   aiPos: { x: number, z: number },
@@ -369,6 +405,7 @@ export function pickAiSpawn(radius = DEFAULTS.spawnRadius, rng = Math.random) {
  *   fireHeadingGate?: number,
  *   activeWeapon?: 'bullet' | 'laser',
  *   laserFireHeadingGate?: number,
+ *   wasBraking?: boolean,
  * }} args
  */
 export function aiBrainTick({
@@ -391,6 +428,8 @@ export function aiBrainTick({
   // Target stickiness: prefer committed target over slightly-closer alternatives
   committedPos = null,
   hysteresisU = DEFAULTS.hysteresisU,
+  // Brake hysteresis: already braking last tick
+  wasBraking = false,
   // Legacy param accepted for backward compat (treated as evadeDist alias)
   panicDist = undefined,
 }) {
@@ -416,13 +455,14 @@ export function aiBrainTick({
       thrust: true,
       mode: 'evade',
       fire: false,
+      braking: false,
     };
   }
 
   // ---- 2. ENGAGE (pick target + approach) -----------------------------
   const target = pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU, committedPos, hysteresisU });
   if (target) {
-    const ec = engageTarget(aiPos, aiYaw, aiVel, target.pos, aiAngularVel, thrustHeadingGate, coastDist);
+    const ec = engageTarget(aiPos, aiYaw, aiVel, target.pos, aiAngularVel, thrustHeadingGate, coastDist, wasBraking);
 
     // Fire discipline: fire when ANY asteroid is in the fire cone
     // AND within the fire distance range. Matches "feuer bis split,
@@ -440,9 +480,9 @@ export function aiBrainTick({
         const dist = Math.hypot(p.x - aiPos.x, p.z - aiPos.z);
         if (dist < fireMinDist || dist > fireMaxDist) continue;
         // Distance-adaptive cone: wide at close range for spray,
-        // tight at far range for precision. 0.06 rad floor (~3.4°)
+        // tight at far range for precision. 0.12 rad floor (~6.9°)
         // prevents the cone from closing to zero at max range.
-        const adaptiveCone = Math.max(0.06, fireHeadingGate * (1 - dist / (fireMaxDist * 1.5)));
+        const adaptiveCone = Math.max(0.12, fireHeadingGate * (1 - dist / (fireMaxDist * 1.5)));
         if (isTargetInFront(aiPos, aiYaw, p, adaptiveCone)) {
           fire = true;
           break;
@@ -455,11 +495,12 @@ export function aiBrainTick({
       thrust: ec.thrust,
       mode: target.mode,
       fire,
+      braking: ec.braking,
     };
   }
 
   // ---- 3. IDLE (no targets) -------------------------------------------
-  return { yaw: 0, thrust: false, mode: 'idle', fire: false };
+  return { yaw: 0, thrust: false, mode: 'idle', fire: false, braking: false };
 }
 
 /**
@@ -491,6 +532,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
   let time = 0;
   let enabled = true;
   let lastMode = 'idle';
+  let isBraking = false;
   let lastDecision = {
     mode: 'idle',
     yaw: 0,
@@ -511,6 +553,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     ship.reset(sp.position);
     ship.rotation.yaw = sp.yaw;
     committedPos = null; // clear stale target on respawn
+    isBraking = false;   // clear stale brake state on respawn
   }
 
   /** Build the args the brain consumes from the live ship state. */
@@ -535,6 +578,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       coastDist: opts.coastDist,
       committedPos,
       hysteresisU: opts.hysteresisU,
+      wasBraking: isBraking,
     };
   }
 
@@ -578,6 +622,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     const args = brainArgsFromShip();
     const decision = brain ? brain.tick(args) : aiBrainTick(args);
     lastMode = decision.mode;
+    isBraking = !!decision.braking;
 
     // Build decision snapshot for the AI debug overlay.
     const nearest = findNearestAsteroid(ship.position, asteroids);
@@ -600,6 +645,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       yaw: decision.yaw,
       thrust: decision.thrust,
       fire: decision.fire,
+      braking: !!decision.braking,
       activeWeapon: args.activeWeapon,
       target: target ? { pos: { ...target.pos }, mode: target.mode, dist: target.dist } : null,
       nearest: nearest ? { pos: { x: nearest.dx + ship.position.x, z: nearest.dz + ship.position.z }, dist: nearest.dist } : null,
