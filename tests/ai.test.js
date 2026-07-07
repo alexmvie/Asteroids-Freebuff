@@ -271,18 +271,19 @@ test('aiBrainTick: close target + stationary → thrusts (low closing speed, no 
 });
 
 test('aiBrainTick: high speed + close target → coast-in (no thrust)', () => {
-  // v0.33.1 coast-in: ship at 150 u/s closing speed toward target
-  // at 30u. dist=30 < coastDist=40 && closingSpeed=150 > 30 → coast.
+  // v0.33.3 coast-in: ship at 150 u/s closing speed toward target
+  // at 10u. dist=10 < coastDist=15 && closingSpeed=150 > 30 → coast.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
     aiVel: { x: 150, z: 0 },
-    asteroids: [mockAsteroid(30, 0)],
+    asteroids: [mockAsteroid(10, 0)],
     time: 0,
+    evadeDist: 5,  // avoid triggering EVADE at 10u
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0);
-  assert.equal(result.thrust, false, 'v0.33.1: coast-in when closing fast within coastDist=40');
+  assert.equal(result.thrust, false, 'v0.33.3: coast-in when closing fast within coastDist=15');
 });
 
 test('aiBrainTick: perpendicular velocity → turn + thrust toward target', () => {
@@ -364,11 +365,11 @@ test('aiBrainTick: fires when chase target is in fire cone + in range', () => {
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
-    asteroids: [mockAsteroid(0, -40)],
+    asteroids: [mockAsteroid(0, -20)],
     time: 0,
   });
   assert.equal(result.mode, 'asteroid');
-  assert.equal(result.fire, true, '40u in range + aligned → fire=true');
+  assert.equal(result.fire, true, '20u in range [0,30] + aligned → fire=true');
 });
 
 test('aiBrainTick: no fire when target is too close (<fireMinDist)', () => {
@@ -388,12 +389,12 @@ test('aiBrainTick: no fire when target is too far (>fireMaxDist)', () => {
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
-    asteroids: [mockAsteroid(0, -150)],
+    asteroids: [mockAsteroid(0, -200)],
     time: 0,
     fireMaxDist: 100,
   });
   assert.equal(result.mode, 'asteroid');
-  assert.equal(result.fire, false, '150u > fireMaxDist=100 → no fire');
+  assert.equal(result.fire, false, '200u > fireMaxDist=100 → no fire');
 });
 
 test('aiBrainTick: no fire when target is off-axis (>fireHeadingGate)', () => {
@@ -403,9 +404,10 @@ test('aiBrainTick: no fire when target is off-axis (>fireHeadingGate)', () => {
     asteroids: [mockAsteroid(40, 0)],
     time: 0,
     fireHeadingGate: 0.20,
+    fireMaxDist: 80,
   });
   assert.equal(result.mode, 'asteroid');
-  assert.equal(result.fire, false, '90° off-axis > fireHeadingGate=0.20 → no fire');
+  assert.equal(result.fire, false, '90° off-axis > fireHeadingGate → no fire');
 });
 
 test('aiBrainTick: fires at ANY in-cone asteroid in range (not just chase target)', () => {
@@ -414,14 +416,44 @@ test('aiBrainTick: fires at ANY in-cone asteroid in range (not just chase target
     aiYaw: 0,
     asteroids: [
       mockAsteroid(20, 0),   // nearest → chase target, 90° off-axis
-      mockAsteroid(0, -40),  // dead-ahead, in fire cone, 40u in range
+      mockAsteroid(0, -20),  // dead-ahead, in fire cone, 20u in range
     ],
     time: 0,
     fireHeadingGate: 0.20,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.fire, true,
-    'fires at in-cone asteroid (0,-40) even though chase target is elsewhere');
+    'fires at in-cone asteroid (0,-20) even though chase target is elsewhere');
+});
+
+test('aiBrainTick: adaptive cone narrows with distance — wide at close, tight at far', () => {
+  // At 60u dead-ahead: adaptive cone ≈ 0.125, 0 < 0.125 → fires
+  const result60 = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [mockAsteroid(0, -60)],
+    time: 0,
+  });
+  assert.equal(result60.fire, true, 'dead-ahead at 60u → adaptive cone≈0.125 → fires');
+
+  // A target at 20u that's 0.20 rad off-axis: adaptive cone ≈ 0.208 > 0.20 → fires
+  const closeOffAxis = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [mockAsteroid(Math.sin(0.20) * 20, -Math.cos(0.20) * 20)],
+    time: 0,
+    evadeDist: 5,  // avoid triggering EVADE at 20u
+  });
+  assert.equal(closeOffAxis.fire, true, '20u at 0.20 rad off → adaptive cone≈0.208 → fires');
+
+  // Same 0.20 rad off-axis at 60u: adaptive cone ≈ 0.125 < 0.20 → no fire
+  const farOffAxis = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [mockAsteroid(Math.sin(0.20) * 60, -Math.cos(0.20) * 60)],
+    time: 0,
+  });
+  assert.equal(farOffAxis.fire, false, '60u at 0.20 rad off → adaptive cone≈0.125 → no fire');
 });
 
 test('aiBrainTick: idle mode → no fire', () => {
@@ -817,9 +849,9 @@ test('createDemoAi: dt <= 0 is a no-op', () => {
 
 test('createDemoAi: fires weapon when chasing asteroid', () => {
   const scene = mockScene();
-  // Ship spawns at (12, 0) with rng=()=>0. Place asteroid at (12, -40)
-  // so it's dead-ahead of the ship's -Z facing direction.
-  const asteroids = [mockAsteroid(12, -40)];
+  // Ship spawns at (12, 0) with rng=()=>0. Place asteroid at (12, -20)
+  // so it's dead-ahead of the ship's -Z facing direction (within 30u range).
+  const asteroids = [mockAsteroid(12, -20)];
   const mock = mockShipFactory();
   const weaponCalls = [];
   const mockWeapon = {

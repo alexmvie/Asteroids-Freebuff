@@ -361,9 +361,9 @@ function createRadarView(deps) {
     ctx.arc(cssSize / 2, cssSize / 2, 4, 0, Math.PI * 2);
     ctx.fill();
     // Forward-cone overlay:
-    //   - bullet mode: wide (~20° half-angle, matches fireConeHalfAngle=0.35)
+    //   - bullet mode: wide (~14° half-angle, matches fireHeadingGate=0.25)
     //   - laser mode:  tight (~3° half-angle, matches laserFireConeHalfAngle=0.05)
-    const halfAngle = weapon === 'laser' ? 0.05 : 0.35;
+    const halfAngle = weapon === 'laser' ? 0.05 : 0.20;
     const coneLength = cssSize / 2 - 6; // won't reach the outer ring
     // facingAngle returns radians in (-PI, PI] which IS the canvas
     // angle of the ship's forward direction (because world Z maps

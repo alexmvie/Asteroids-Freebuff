@@ -7,12 +7,15 @@
  *   1. AI couldn't collect powerups efficiently (bias was only 15u)
  *   2. AI couldn't shoot all asteroids (fire cone was 5.7°)
  *
- * v0.33.1 strategy:
- *   1. Powerups are ALWAYS priority (powerupBiasU: 9999)
- *   2. Tight fire cone (0.12 rad = 6.9°) for accurate hits
- *   3. Coast-in at 40u — engines cut, LINEAR_DRAG decelerates
- *   4. Wide thrust gate (0.50 rad) for fast repositioning
- *   5. No minimum fire distance (shoot point-blank)
+ * v0.33.5 strategy:
+ *   1. Powerup bias 40u — detours for nearby powerups, doesn't ignore asteroids
+ *   2. Distance-adaptive fire cone — wide at close range (0.25 rad spray),
+ *      tight at far range (0.06 rad precision). Fires at ALL asteroids
+ *      in path during approach, not just the chase target.
+ *   3. Long fire range (80u) — with adaptive cone, far shots are precise
+ *   4. Coast-in at 15u — tight so ship gets close before cutting
+ *   5. Wide thrust gate (0.50 rad) for fast repositioning
+ *   6. No minimum fire distance (shoot point-blank)
  *
  * Mode priority: EVADE → POWERUP → ASTEROID → IDLE
  * 
@@ -50,10 +53,12 @@ const DEFAULTS = Object.freeze({
   /**
    * Powerup detour bias (world units). Powerup wins over nearest
    * asteroid if `powerupDist < asteroidDist + powerupBiasU`.
-   * v0.33.x: 9999 — AI ALWAYS prioritizes powerups. The user's
-   * stated goal is "collect ALL extras efficiently".
+   * v0.33.4: 40u — AI detours for nearby powerups but doesn't
+   * abandon asteroid-clearing duty. At 40u bias, a powerup at 50u
+   * beats a 10u-away asteroid (50 < 10+40 = false → asteroid wins).
+   * A powerup at 20u beats a 30u asteroid (20 < 30+40 = true).
    */
-  powerupBiasU: 9999,
+  powerupBiasU: 40,
 
   /**
    * Thrust heading gate (radians). Ship thrusts when |heading diff|
@@ -63,29 +68,27 @@ const DEFAULTS = Object.freeze({
   thrustHeadingGate: 0.50,
 
   /**
-   * Fire heading gate (radians). Ship fires when |heading diff|
-   * is within this angle. v0.33.1: 0.12 rad ≈ 6.9° — calibrated
-   * so that at 40u: miss = 40*sin(0.12) ≈ 4.8u → hits medium
-   * asteroids (radius ~4u). At 50u: miss ≈ 6u → hits large (R=6).
-   * Previous 0.35 rad (20°) was too wide — most shots missed at
-   * medium range (miss at 30u = 10.3u, way beyond any radius).
+   * Fire heading gate (radians). MAX cone at close range (0.25 rad = 14.3°
+   * for spray-while-turning). The actual cone used in the fire loop is
+   * distance-adaptive: `max(0.06, fireHeadingGate * (1 - dist/(fireMaxDist*1.5)))`.
+   * At 10u: cone ≈ 0.23 rad, miss ≈ 2.3u → hits small (R=2).
+   * At 40u: cone ≈ 0.17 rad, miss ≈ 6.6u → hits large (R=6).
+   * At 80u: cone ≈ 0.08 rad, miss ≈ 6.6u → hits large (R=6).
+   * fireMaxDist=80 keeps the AI firing opportunistically at long
+   * range (where the adaptive cone tightens to ~0.08 rad).
    */
-  fireHeadingGate: 0.12,
+  fireHeadingGate: 0.25,
 
   /**
-   * Fire distance range (world units). Ship fires at asteroids
-   * within [fireMinDist, fireMaxDist]. v0.33.1: reduced max to 60u
-   * — beyond 60u, even with 0.12 rad cone the miss = 7.2u which
-   * exceeds large asteroid radius (6u). Wastes bullets.
+   * Fire distance range (world units). v0.33.5: increased to 80u.
+   * With the adaptive cone, far shots are precise (0.08 rad at 80u).
+   * The AI fires opportunistically at ALL asteroids in its path.
    */
   fireMinDist: 0,
-  fireMaxDist: 60,
+  fireMaxDist: 80,
 
-  /**
-   * Fire cone half-angle for checking if ANY asteroid is in front
-   * (not just the chase target).
-   */
-  fireConeHalfAngle: 0.12,
+  // Note: fireConeHalfAngle was removed in v0.33.2 — the fire
+  // loop uses fireHeadingGate for all cone checks.
 
   /**
    * Laser fire heading gate (radians). v0.33.x: 0.20 rad ≈ 11.5°
@@ -97,12 +100,11 @@ const DEFAULTS = Object.freeze({
    * Coast-in distance (world units). When within this distance of
    * the target, the AI cuts engines and lets LINEAR_DRAG decelerate
    * naturally. Prevents fly-through at high speed.
-   * v0.33.1: 40u — tighter coast-in so the ship gets closer
-   * before cutting engines. At 100 u/s, 40u of coasting slows
-   * the ship to ~85 u/s. Combined with the tighter fire cone,
-   * the AI fires fewer but more accurate shots.
+   * v0.33.3: 15u — very tight. At 100 u/s, 15u of coasting slows
+   * the ship to ~94 u/s. The AI must get very close before the
+   * coast-in engages. Beyond 15u, thrust pushes it forward.
    */
-  coastDist: 40,
+  coastDist: 15,
 });
 
 /**
@@ -338,7 +340,7 @@ export function pickAiSpawn(radius = DEFAULTS.spawnRadius, rng = Math.random) {
  *   powerupPos?: { x: number, z: number } | null,
  *   evadeDist?: number,
  *   powerupBiasU?: number,
- *   fireConeHalfAngle?: number,
+
  *   fireMinDist?: number,
  *   fireMaxDist?: number,
  *   thrustHeadingGate?: number,
@@ -412,7 +414,11 @@ export function aiBrainTick({
         if (!p) continue;
         const dist = Math.hypot(p.x - aiPos.x, p.z - aiPos.z);
         if (dist < fireMinDist || dist > fireMaxDist) continue;
-        if (isTargetInFront(aiPos, aiYaw, p, fireHeadingGate)) {
+        // Distance-adaptive cone: wide at close range for spray,
+        // tight at far range for precision. 0.06 rad floor (~3.4°)
+        // prevents the cone from closing to zero at max range.
+        const adaptiveCone = Math.max(0.06, fireHeadingGate * (1 - dist / (fireMaxDist * 1.5)));
+        if (isTargetInFront(aiPos, aiYaw, p, adaptiveCone)) {
           fire = true;
           break;
         }
@@ -489,7 +495,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       powerupPos: getPowerupPos ? getPowerupPos() : null,
       evadeDist: opts.evadeDist,
       powerupBiasU: opts.powerupBiasU,
-      fireConeHalfAngle: opts.fireConeHalfAngle,
+      // fireConeHalfAngle removed in v0.33.2 (dead code)
       fireMinDist: opts.fireMinDist,
       fireMaxDist: opts.fireMaxDist,
       thrustHeadingGate: opts.thrustHeadingGate,
