@@ -271,18 +271,18 @@ test('aiBrainTick: close target + stationary → thrusts (low closing speed, no 
 });
 
 test('aiBrainTick: high speed + close target → coast-in (no thrust)', () => {
-  // v0.33.x coast-in: ship at 150 u/s closing speed toward target
-  // at 40u. dist=40 < coastDist=60 && closingSpeed=150 > 30 → coast.
+  // v0.33.1 coast-in: ship at 150 u/s closing speed toward target
+  // at 30u. dist=30 < coastDist=40 && closingSpeed=150 > 30 → coast.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
     aiVel: { x: 150, z: 0 },
-    asteroids: [mockAsteroid(40, 0)],
+    asteroids: [mockAsteroid(30, 0)],
     time: 0,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0);
-  assert.equal(result.thrust, false, 'v0.33.x: coast-in when closing fast within coastDist');
+  assert.equal(result.thrust, false, 'v0.33.1: coast-in when closing fast within coastDist=40');
 });
 
 test('aiBrainTick: perpendicular velocity → turn + thrust toward target', () => {

@@ -7,10 +7,10 @@
  *   1. AI couldn't collect powerups efficiently (bias was only 15u)
  *   2. AI couldn't shoot all asteroids (fire cone was 5.7°)
  *
- * v0.33.x strategy:
+ * v0.33.1 strategy:
  *   1. Powerups are ALWAYS priority (powerupBiasU: 9999)
- *   2. Wide fire cone (0.35 rad = 20°) for more hits
- *   3. Coast-in at 60u — engines cut, LINEAR_DRAG decelerates
+ *   2. Tight fire cone (0.12 rad = 6.9°) for accurate hits
+ *   3. Coast-in at 40u — engines cut, LINEAR_DRAG decelerates
  *   4. Wide thrust gate (0.50 rad) for fast repositioning
  *   5. No minimum fire distance (shoot point-blank)
  *
@@ -64,24 +64,28 @@ const DEFAULTS = Object.freeze({
 
   /**
    * Fire heading gate (radians). Ship fires when |heading diff|
-   * is within this angle. v0.33.x: 0.35 rad ≈ 20° — wider for
-   * more aggressive firing during approach.
+   * is within this angle. v0.33.1: 0.12 rad ≈ 6.9° — calibrated
+   * so that at 40u: miss = 40*sin(0.12) ≈ 4.8u → hits medium
+   * asteroids (radius ~4u). At 50u: miss ≈ 6u → hits large (R=6).
+   * Previous 0.35 rad (20°) was too wide — most shots missed at
+   * medium range (miss at 30u = 10.3u, way beyond any radius).
    */
-  fireHeadingGate: 0.35,
+  fireHeadingGate: 0.12,
 
   /**
    * Fire distance range (world units). Ship fires at asteroids
-   * within [fireMinDist, fireMaxDist]. v0.33.x: no minimum
-   * (shoot point-blank) + wider max.
+   * within [fireMinDist, fireMaxDist]. v0.33.1: reduced max to 60u
+   * — beyond 60u, even with 0.12 rad cone the miss = 7.2u which
+   * exceeds large asteroid radius (6u). Wastes bullets.
    */
   fireMinDist: 0,
-  fireMaxDist: 150,
+  fireMaxDist: 60,
 
   /**
    * Fire cone half-angle for checking if ANY asteroid is in front
    * (not just the chase target).
    */
-  fireConeHalfAngle: 0.35,
+  fireConeHalfAngle: 0.12,
 
   /**
    * Laser fire heading gate (radians). v0.33.x: 0.20 rad ≈ 11.5°
@@ -93,12 +97,12 @@ const DEFAULTS = Object.freeze({
    * Coast-in distance (world units). When within this distance of
    * the target, the AI cuts engines and lets LINEAR_DRAG decelerate
    * naturally. Prevents fly-through at high speed.
-   * v0.33.x: 60u — at 100 u/s, coast distance = v/DRAG ≈ 250u,
-   * but 60u of coasting slows the ship from ~100 to ~80 u/s.
-   * The AI will overshoot and come back for another pass, each
-   * time slower due to drag.
+   * v0.33.1: 40u — tighter coast-in so the ship gets closer
+   * before cutting engines. At 100 u/s, 40u of coasting slows
+   * the ship to ~85 u/s. Combined with the tighter fire cone,
+   * the AI fires fewer but more accurate shots.
    */
-  coastDist: 60,
+  coastDist: 40,
 });
 
 /**
