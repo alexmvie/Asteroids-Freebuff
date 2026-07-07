@@ -7,15 +7,15 @@
  *   1. AI couldn't collect powerups efficiently (bias was only 15u)
  *   2. AI couldn't shoot all asteroids (fire cone was 5.7°)
  *
- * v0.33.5 strategy:
+ * v0.33.6 strategy:
  *   1. Powerup bias 40u — detours for nearby powerups, doesn't ignore asteroids
  *   2. Distance-adaptive fire cone — wide at close range (0.25 rad spray),
- *      tight at far range (0.06 rad precision). Fires at ALL asteroids
- *      in path during approach, not just the chase target.
- *   3. Long fire range (80u) — with adaptive cone, far shots are precise
- *   4. Coast-in at 15u — tight so ship gets close before cutting
- *   5. Wide thrust gate (0.50 rad) for fast repositioning
- *   6. No minimum fire distance (shoot point-blank)
+ *      tight at far range (0.06 rad precision).
+ *   3. Fire range 40u — stops wasting cooldown on far misses
+ *   4. Target stickiness — committed target preferred over slightly-closer
+ *      alternatives, reducing zigzag in dense fields
+ *   5. Coast-in at 15u — tight so ship gets close before cutting
+ *   6. Wide thrust gate (0.50 rad) for fast repositioning
  *
  * Mode priority: EVADE → POWERUP → ASTEROID → IDLE
  * 
@@ -80,15 +80,24 @@ const DEFAULTS = Object.freeze({
   fireHeadingGate: 0.25,
 
   /**
-   * Fire distance range (world units). v0.33.5: increased to 80u.
-   * With the adaptive cone, far shots are precise (0.08 rad at 80u).
-   * The AI fires opportunistically at ALL asteroids in its path.
+   * Fire distance range (world units). v0.33.6: reduced to 40u.
+   * Beyond 40u the adaptive cone is too tight for reliable hits
+   * (miss at 40u ≈ 6.6u, barely hits large R=6). Reducing range
+   * stops the AI from wasting its 0.18s cooldown on far misses.
+   * Close range (<40u) maximizes hit probability.
    */
   fireMinDist: 0,
-  fireMaxDist: 80,
+  fireMaxDist: 40,
 
   // Note: fireConeHalfAngle was removed in v0.33.2 — the fire
   // loop uses fireHeadingGate for all cone checks.
+
+  /**
+   * Target stickiness hysteresis (world units). The AI prefers its
+   * committed target over a new nearest that is only this much
+   * closer. Reduces zigzag in dense fields.
+   */
+  hysteresisU: 8,
 
   /**
    * Laser fire heading gate (radians). v0.33.x: 0.20 rad ≈ 11.5°
@@ -204,38 +213,51 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
  *      `powerupDist < asteroidDist + powerupBiasU`.
  *   2. Otherwise, the nearest asteroid wins.
  *   3. If neither is in range, returns null (idle).
- *
- * @param {{
- *   aiPos: {x:number,z:number},
- *   asteroids: Array<{getPosition: () => any}>,
- *   powerupPos: {x:number,z:number} | null,
- *   powerupBiasU: number,
- * }} args
- * @returns {{ pos: {x:number,z:number}, mode: 'asteroid'|'powerup', dist: number } | null}
- */
-export function pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU }) {
-  const nearest = findNearestAsteroid(aiPos, asteroids);
-  let best = null;
-  if (nearest) {
-    best = {
-      pos: nearest.asteroid.getPosition(),
-      mode: 'asteroid',
-      dist: nearest.dist,
-    };
-  }
-
-  if (powerupPos && typeof powerupPos.x === 'number') {
-    const pDist = Math.hypot(powerupPos.x - aiPos.x, powerupPos.z - aiPos.z);
-    if (best === null) {
-      return { pos: powerupPos, mode: 'powerup', dist: pDist };
+ *   * @param {{
+   *   aiPos: {x:number,z:number},
+   *   asteroids: Array<{getPosition: () => any}>,
+   *   powerupPos: {x:number,z:number} | null,
+   *   powerupBiasU: number,
+   *   committedPos?: {x:number,z:number} | null,
+   *   hysteresisU?: number,
+   * }} args
+   * @returns {{ pos: {x:number,z:number}, mode: 'asteroid'|'powerup', dist: number } | null}
+   */
+  export function pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU, committedPos = null, hysteresisU = 8 }) {
+    const nearest = findNearestAsteroid(aiPos, asteroids);
+    let best = null;
+    if (nearest) {
+      best = {
+        pos: nearest.asteroid.getPosition(),
+        mode: 'asteroid',
+        dist: nearest.dist,
+      };
     }
-    if (pDist < best.dist + powerupBiasU) {
-      return { pos: powerupPos, mode: 'powerup', dist: pDist };
-    }
-  }
 
-  return best;
-}
+    // Target stickiness: if the committed target is still in the asteroid
+    // list and the nearest alternative is only slightly closer, keep the
+    // committed target. Reduces zigzag in dense fields — the AI finishes
+    // what it started instead of constantly switching.
+    if (committedPos && typeof committedPos.x === 'number' && best) {
+      const cDist = Math.hypot(committedPos.x - aiPos.x, committedPos.z - aiPos.z);
+      if (cDist < best.dist + hysteresisU) {
+        // Committed target is close enough — prefer it.
+        best = { pos: committedPos, mode: 'asteroid', dist: cDist };
+      }
+    }
+
+    if (powerupPos && typeof powerupPos.x === 'number') {
+      const pDist = Math.hypot(powerupPos.x - aiPos.x, powerupPos.z - aiPos.z);
+      if (best === null) {
+        return { pos: powerupPos, mode: 'powerup', dist: pDist };
+      }
+      if (pDist < best.dist + powerupBiasU) {
+        return { pos: powerupPos, mode: 'powerup', dist: pDist };
+      }
+    }
+
+    return best;
+  }
 
 /**
  * Engagement controller: turn toward target, thrust when aligned
@@ -338,9 +360,9 @@ export function pickAiSpawn(radius = DEFAULTS.spawnRadius, rng = Math.random) {
  *   asteroids: Array<{ getPosition: () => any }>,
  *   time: number,
  *   powerupPos?: { x: number, z: number } | null,
- *   evadeDist?: number,
- *   powerupBiasU?: number,
-
+ *   evadeDist?: number, *   powerupBiasU?: number,
+ *   committedPos?: {x:number,z:number} | null,
+ *   hysteresisU?: number,
  *   fireMinDist?: number,
  *   fireMaxDist?: number,
  *   thrustHeadingGate?: number,
@@ -366,6 +388,9 @@ export function aiBrainTick({
   activeWeapon = 'bullet',
   laserFireHeadingGate = DEFAULTS.laserFireHeadingGate,
   coastDist = DEFAULTS.coastDist,
+  // Target stickiness: prefer committed target over slightly-closer alternatives
+  committedPos = null,
+  hysteresisU = DEFAULTS.hysteresisU,
   // Legacy param accepted for backward compat (treated as evadeDist alias)
   panicDist = undefined,
 }) {
@@ -395,7 +420,7 @@ export function aiBrainTick({
   }
 
   // ---- 2. ENGAGE (pick target + approach) -----------------------------
-  const target = pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU });
+  const target = pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU, committedPos, hysteresisU });
   if (target) {
     const ec = engageTarget(aiPos, aiYaw, aiVel, target.pos, aiAngularVel, thrustHeadingGate, coastDist);
 
@@ -476,11 +501,16 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     nearest: null,
     threatsCount: 0,
   };
+  // Target stickiness: track the position of the current chase target
+  // so the brain can prefer it over slightly-closer alternatives.
+  // Reset on spawn (the old target is stale after teleport).
+  let committedPos = null;
 
   function spawn() {
     const sp = pickAiSpawn(opts.spawnRadius, rng);
     ship.reset(sp.position);
     ship.rotation.yaw = sp.yaw;
+    committedPos = null; // clear stale target on respawn
   }
 
   /** Build the args the brain consumes from the live ship state. */
@@ -503,6 +533,8 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       activeWeapon: getActiveWeapon ? getActiveWeapon() : 'bullet',
       laserFireHeadingGate: opts.laserFireHeadingGate,
       coastDist: opts.coastDist,
+      committedPos,
+      hysteresisU: opts.hysteresisU,
     };
   }
 
@@ -513,6 +545,34 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
 
     if (shouldResetAi(ship.position, opts.resetDist)) {
       spawn();
+    }
+
+    // Validate committedPos against live asteroids each frame.
+    // If the committed target was destroyed (not in list) or drifted
+    // too far from any live asteroid, clear it. Otherwise refresh to
+    // the live asteroid's current position (asteroids drift <0.5 u/s).
+    if (committedPos) {
+      let found = false;
+      let bestDist = Infinity;
+      let bestPos = null;
+      for (const a of asteroids) {
+        if (!a || typeof a.getPosition !== 'function') continue;
+        const p = a.getPosition();
+        if (!p) continue;
+        const d = Math.hypot(p.x - committedPos.x, p.z - committedPos.z);
+        if (d < bestDist) {
+          bestDist = d;
+          bestPos = p;
+        }
+        if (d < 5) { found = true; break; }
+      }
+      if (found && bestPos) {
+        // Refresh committedPos to the live asteroid's current position.
+        committedPos = { x: bestPos.x, z: bestPos.z };
+      } else {
+        // No asteroid near committedPos — it was destroyed or drifted.
+        committedPos = null;
+      }
     }
 
     const args = brainArgsFromShip();
@@ -545,6 +605,23 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       nearest: nearest ? { pos: { x: nearest.dx + ship.position.x, z: nearest.dz + ship.position.z }, dist: nearest.dist } : null,
       threatsCount,
     };
+
+    // Track committed target for stickiness.
+    // Must mirror the brain's pickTarget call (WITH committedPos +
+    // hysteresisU) so we track the ACTUAL target, not the raw nearest.
+    // Without this, the snapshot's pickTarget (no stickiness) would
+    // overwrite committedPos every tick, defeating the hysteresis.
+    if (decision.mode === 'asteroid') {
+      const brainTarget = pickTarget({
+        aiPos: ship.position, asteroids,
+        powerupPos: args.powerupPos, powerupBiasU: opts.powerupBiasU,
+        committedPos, hysteresisU: opts.hysteresisU,
+      });
+      if (brainTarget) committedPos = { x: brainTarget.pos.x, z: brainTarget.pos.z };
+    } else if (decision.mode !== 'powerup') {
+      // Idle or evade — no target to commit to, clear stale committed.
+      committedPos = null;
+    }
 
     ship.setYaw(decision.yaw);
     ship.setThrust(decision.thrust);

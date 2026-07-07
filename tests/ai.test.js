@@ -427,33 +427,33 @@ test('aiBrainTick: fires at ANY in-cone asteroid in range (not just chase target
 });
 
 test('aiBrainTick: adaptive cone narrows with distance — wide at close, tight at far', () => {
-  // At 60u dead-ahead: adaptive cone ≈ 0.125, 0 < 0.125 → fires
-  const result60 = aiBrainTick({
+  // At 35u dead-ahead: within fireMaxDist=40, adaptive cone ≈ 0.15 → fires
+  const result35 = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
-    asteroids: [mockAsteroid(0, -60)],
+    asteroids: [mockAsteroid(0, -35)],
     time: 0,
   });
-  assert.equal(result60.fire, true, 'dead-ahead at 60u → adaptive cone≈0.125 → fires');
+  assert.equal(result35.fire, true, 'dead-ahead at 35u → adaptive cone≈0.15 → fires');
 
-  // A target at 20u that's 0.20 rad off-axis: adaptive cone ≈ 0.208 > 0.20 → fires
+  // A target at 10u that's 0.20 rad off-axis: adaptive cone = max(0.06, 0.25*(1-10/60)) ≈ 0.208 > 0.20 → fires
   const closeOffAxis = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
-    asteroids: [mockAsteroid(Math.sin(0.20) * 20, -Math.cos(0.20) * 20)],
+    asteroids: [mockAsteroid(Math.sin(0.20) * 10, -Math.cos(0.20) * 10)],
     time: 0,
-    evadeDist: 5,  // avoid triggering EVADE at 20u
+    evadeDist: 5,  // avoid triggering EVADE at 10u
   });
-  assert.equal(closeOffAxis.fire, true, '20u at 0.20 rad off → adaptive cone≈0.208 → fires');
+  assert.equal(closeOffAxis.fire, true, '10u at 0.20 rad off → adaptive cone≈0.208 → fires');
 
-  // Same 0.20 rad off-axis at 60u: adaptive cone ≈ 0.125 < 0.20 → no fire
+  // Same 0.20 rad off-axis at 35u: adaptive cone ≈ 0.15 < 0.20 → no fire
   const farOffAxis = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
-    asteroids: [mockAsteroid(Math.sin(0.20) * 60, -Math.cos(0.20) * 60)],
+    asteroids: [mockAsteroid(Math.sin(0.20) * 35, -Math.cos(0.20) * 35)],
     time: 0,
   });
-  assert.equal(farOffAxis.fire, false, '60u at 0.20 rad off → adaptive cone≈0.125 → no fire');
+  assert.equal(farOffAxis.fire, false, '35u at 0.20 rad off → adaptive cone≈0.15 → no fire');
 });
 
 test('aiBrainTick: idle mode → no fire', () => {
@@ -781,6 +781,34 @@ test('pickTarget: asteroid wins when powerup not biased closer', () => {
   assert.equal(result.mode, 'asteroid');
 });
 
+test('pickTarget: committedPos preferred over slightly-closer asteroid (stickiness)', () => {
+  // Asteroid at 30u, committed target at 37u. hysteresisU=8.
+  // 37 < 30 + 8 = 38 → true → committed wins.
+  const result = pickTarget({
+    aiPos: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(30, 0), mockAsteroid(37, 0)],
+    powerupPos: null,
+    powerupBiasU: 40,
+    committedPos: { x: 37, z: 0 },
+    hysteresisU: 8,
+  });
+  assert.equal(result.pos.x, 37, 'committed target preferred when within hysteresis');
+});
+
+test('pickTarget: committedPos loses when nearest is much closer', () => {
+  // Asteroid at 10u, committed target at 38u. hysteresisU=8.
+  // 38 < 10 + 8 = 18 → false → nearest wins.
+  const result = pickTarget({
+    aiPos: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(10, 0), mockAsteroid(38, 0)],
+    powerupPos: null,
+    powerupBiasU: 40,
+    committedPos: { x: 38, z: 0 },
+    hysteresisU: 8,
+  });
+  assert.equal(result.pos.x, 10, 'nearest wins when committed is much farther');
+});
+
 test('pickTarget: null when no asteroids and no powerup', () => {
   const result = pickTarget({
     aiPos: { x: 0, z: 0 },
@@ -971,6 +999,40 @@ test('createDemoAi: getLastDecision returns a frozen snapshot', () => {
   assert.equal(typeof dec.activeWeapon, 'string');
   assert.equal(typeof dec.threatsCount, 'number');
   assert.throws(() => { dec.mode = 'x'; }, /frozen|read.only/i);
+});
+
+test('createDemoAi: committedPos tracks asteroid target across ticks', () => {
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(40, 0)];
+  const mock = mockShipFactory();
+  const ai = createDemoAi({
+    scene,
+    asteroids,
+    options: { shipFactory: mock.build, rng: () => 0 },
+  });
+  ai.update(0.1);
+  const dec1 = ai.getLastDecision();
+  assert.equal(dec1.mode, 'asteroid');
+  // committedPos should be tracked — next tick prefers this target
+  ai.update(0.1);
+  const dec2 = ai.getLastDecision();
+  assert.equal(dec2.mode, 'asteroid', 'continues chasing committed target');
+});
+
+test('createDemoAi: committedPos cleared on spawn', () => {
+  const scene = mockScene();
+  const mock = mockShipFactory();
+  const ai = createDemoAi({
+    scene,
+    asteroids: [mockAsteroid(40, 0)],
+    options: { shipFactory: mock.build, rng: () => 0 },
+  });
+  ai.update(0.1);
+  // Force a respawn by drifting far away
+  ai.getShip().position.x = 300;
+  ai.update(0.1);
+  // After respawn, committedPos should be cleared — fresh start
+  assert.ok(mock.calls.reset.length >= 1, 'ship was reset');
 });
 
 test('createDemoAi: evade mode in getMode()', () => {
