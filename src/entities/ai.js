@@ -1,23 +1,26 @@
 /**
  * Demo AI — an NPC ship for the DEMO attract state.
  *
- * v0.30.x — radical simplification driven by simulation data. v0.29.x's
- * speed management + soft-yaw-guard + aggressive powerup bias (60u) locked
- * the ship into chasing distant powerups it never reached:
- *   - 84% of time in powerup mode, 0 collected
- *   - Only 16u traveled in 45s (avg 0.36 u/s!)
- *   - Mode locked: 7 transitions total
+ * v0.33.x — Powerup-Priority + Coast-In Controller.
  *
- * The fix drops all speed-management machinery and returns to a simple
- * "see asteroid → fly toward it → shoot" controller:
+ * Addresses two fundamental problems from v0.30.x–v0.32.x:
+ *   1. AI couldn't collect powerups efficiently (bias was only 15u)
+ *   2. AI couldn't shoot all asteroids (fire cone was 5.7°)
  *
- *   1. Turn toward target (wide thrust gate: 0.52 rad ≈ 30°)
- *   2. Thrust whenever roughly aligned (no soft yaw guard, no speed cap)
- *   3. Fire at any in-cone asteroid
- *   4. Powerups are STRICTLY opportunistic (bias reduced to 15u)
- *   5. Tight evade zone (8u) for emergencies only
+ * v0.33.x strategy:
+ *   1. Powerups are ALWAYS priority (powerupBiasU: 9999)
+ *   2. Wide fire cone (0.35 rad = 20°) for more hits
+ *   3. Coast-in at 60u — engines cut, LINEAR_DRAG decelerates
+ *   4. Wide thrust gate (0.50 rad) for fast repositioning
+ *   5. No minimum fire distance (shoot point-blank)
  *
- * The ship's LINEAR_DRAG handles natural deceleration.
+ * Mode priority: EVADE → POWERUP → ASTEROID → IDLE
+ * 
+ * The ship's LINEAR_DRAG handles all deceleration — the brain
+ * just cuts engines when close to target. No BRAKE branch,
+ * no Spin-Brake, no closing-speed throttle.
+ *
+ * See LOG.md for the full performance protocol.
  */
 
 import { createShip } from './ship.js';
@@ -40,54 +43,62 @@ const DEFAULTS = Object.freeze({
   /**
    * Evade distance (world units). When the nearest asteroid is closer
    * than this, the AI thrusts 90° perpendicular — emergency reflex.
-   * v0.30.x: tightened to 8u so evade is truly last-resort.
+   * v0.33.x: widened to 12u for better clearance.
    */
-  evadeDist: 8,
+  evadeDist: 12,
 
   /**
    * Powerup detour bias (world units). Powerup wins over nearest
    * asteroid if `powerupDist < asteroidDist + powerupBiasU`.
-   * v0.30.x: reduced from 60 to 15 — strictly opportunistic.
-   * A powerup must be within 15u of the nearest asteroid's distance
-   * to steal focus. Prevents the "locked onto distant powerup" bug.
+   * v0.33.x: 9999 — AI ALWAYS prioritizes powerups. The user's
+   * stated goal is "collect ALL extras efficiently".
    */
-  powerupBiasU: 15,
+  powerupBiasU: 9999,
 
   /**
    * Thrust heading gate (radians). Ship thrusts when |heading diff|
-   * is within this angle. No soft yaw guard — thrust happens
-   * whenever roughly aligned, even during turns.
-   * 0.30 rad ≈ 17° — moderate. 96% of thrust goes toward target.
+   * is within this angle AND the target is beyond coastDist.
+   * v0.33.x: 0.50 rad ≈ 28.6° — wide for fast repositioning.
    */
-  thrustHeadingGate: 0.30,
+  thrustHeadingGate: 0.50,
 
   /**
    * Fire heading gate (radians). Ship fires when |heading diff|
-   * is within this angle. 0.10 rad ≈ 5.7° — tight for accuracy.
-   * At 40u: offset = 40*sin(5.7°) ≈ 4u → within asteroid radius.
+   * is within this angle. v0.33.x: 0.35 rad ≈ 20° — wider for
+   * more aggressive firing during approach.
    */
-  fireHeadingGate: 0.10,
+  fireHeadingGate: 0.35,
 
   /**
    * Fire distance range (world units). Ship fires at asteroids
-   * within [fireMinDist, fireMaxDist]. v0.30.x: wider range for
-   * more firing.
+   * within [fireMinDist, fireMaxDist]. v0.33.x: no minimum
+   * (shoot point-blank) + wider max.
    */
-  fireMinDist: 8,
-  fireMaxDist: 120,
+  fireMinDist: 0,
+  fireMaxDist: 150,
 
   /**
    * Fire cone half-angle for checking if ANY asteroid is in front
-   * (not just the chase target). NOTE: v0.30.x fire loop uses
-   * `fireHeadingGate` instead; this is kept for legacy callers.
+   * (not just the chase target).
    */
   fireConeHalfAngle: 0.35,
 
   /**
-   * Laser fire heading gate (radians). Tighter than bullet mode —
-   * the laser locks on the chase target specifically.
+   * Laser fire heading gate (radians). v0.33.x: 0.20 rad ≈ 11.5°
+   * — wider than v0.32.x's 0.05 for better lock-on.
    */
-  laserFireHeadingGate: 0.05,
+  laserFireHeadingGate: 0.20,
+
+  /**
+   * Coast-in distance (world units). When within this distance of
+   * the target, the AI cuts engines and lets LINEAR_DRAG decelerate
+   * naturally. Prevents fly-through at high speed.
+   * v0.33.x: 60u — at 100 u/s, coast distance = v/DRAG ≈ 250u,
+   * but 60u of coasting slows the ship from ~100 to ~80 u/s.
+   * The AI will overshoot and come back for another pass, each
+   * time slower due to drag.
+   */
+  coastDist: 60,
 });
 
 /**
@@ -221,30 +232,33 @@ export function pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU }) {
 }
 
 /**
- * Simple engagement controller: turn toward target, thrust when
- * roughly aligned. No speed management, no soft yaw guard, no
- * active braking. The ship's LINEAR_DRAG handles deceleration.
+ * Engagement controller: turn toward target, thrust when aligned
+ * AND beyond coast-in distance. Within coastDist, engines cut and
+ * LINEAR_DRAG decelerates the ship naturally — prevents fly-through
+ * at high speed.
  *
- * v0.30.x: stripped all speed-management complexity. The v0.29.x
- * controller's isSteady + desiredClosing thresholds locked the ship
- * into "turn without thrusting" for the majority of ticks (analysis
- * showed only 45% thrust in powerup mode, 15% in asteroid mode).
+ * v0.33.x: added coast-in heuristic. The v0.30.x fly-by pattern
+ * (always thrust when aligned) caused the ship to fly through
+ * pickup radii at 100+ u/s. The coast-in lets drag do the braking
+ * without adding complex speed-management (which caused the v0.28.x
+ * paralysis).
  *
  * @param {{x:number,z:number}} aiPos
  * @param {number} aiYaw
- * @param {{x:number,z:number}} aiVel  kept for backward compat, unused
+ * @param {{x:number,z:number}} aiVel  used for closing-speed coast-in check
  * @param {{x:number,z:number}} targetPos
  * @param {number} [aiAngularVel=0]  for spin-brake prediction
- * @param {number} [thrustGate=0.52] heading gate for thrust
+ * @param {number} [thrustGate=0.50] heading gate for thrust
+ * @param {number} [coastDist=60]    coast-in distance
  * @returns {{ yaw: number, thrust: boolean, diff: number, dist: number }}
  */
-export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, thrustGate = DEFAULTS.thrustHeadingGate) {
+export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, thrustGate = DEFAULTS.thrustHeadingGate, coastDist = DEFAULTS.coastDist) {
   const dx = targetPos.x - aiPos.x;
   const dz = targetPos.z - aiPos.z;
   const dist = Math.hypot(dx, dz);
   if (dist < 0.01) return { yaw: 0, thrust: false, diff: 0, dist: 0 };
 
-  // Face toward target (no braking — always approach)
+  // Face toward target
   const faceAngle = Math.atan2(dz, dx);
   const targetDiff = wrapAngle(faceAngle - facingAngle(aiYaw));
   const angVel = (typeof aiAngularVel === 'number') ? aiAngularVel : 0;
@@ -255,10 +269,18 @@ export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, t
     : predictedDiff < -YAW_DEADBAND ? 1
     : 0;
 
-  // Thrust: fire engines whenever roughly aligned (no coasting, no speed cap).
-  // The ship naturally flies past targets → engines cut → turns around while
-  // LINEAR_DRAG decelerates → clean fly-by attack pattern.
-  const thrust = Math.abs(targetDiff) < thrustGate;
+  // Thrust: fire engines when aligned AND either beyond coast-in
+  // distance OR not closing fast. Within coastDist at HIGH closing
+  // speed, engines cut — LINEAR_DRAG decelerates naturally. This
+  // prevents fly-through at high speed. Uses CLOSING speed
+  // (projection of velocity onto line-of-sight) so perpendicular
+  // motion doesn't trigger coast-in.
+  const vel = aiVel || { x: 0, z: 0 };
+  const closingSpeed = dist > 0.01 ? (vel.x * dx + vel.z * dz) / dist : 0;
+  const COAST_SPEED_THRESHOLD = 30; // only coast when closing fast
+  const shouldCoast = dist < coastDist && closingSpeed > COAST_SPEED_THRESHOLD;
+  const isAligned = Math.abs(targetDiff) < thrustGate;
+  const thrust = isAligned && !shouldCoast;
 
   return { yaw, thrust, diff: targetDiff, dist };
 }
@@ -337,6 +359,7 @@ export function aiBrainTick({
   fireHeadingGate = DEFAULTS.fireHeadingGate,
   activeWeapon = 'bullet',
   laserFireHeadingGate = DEFAULTS.laserFireHeadingGate,
+  coastDist = DEFAULTS.coastDist,
   // Legacy param accepted for backward compat (treated as evadeDist alias)
   panicDist = undefined,
 }) {
@@ -368,7 +391,7 @@ export function aiBrainTick({
   // ---- 2. ENGAGE (pick target + approach) -----------------------------
   const target = pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU });
   if (target) {
-    const ec = engageTarget(aiPos, aiYaw, aiVel, target.pos, aiAngularVel, thrustHeadingGate);
+    const ec = engageTarget(aiPos, aiYaw, aiVel, target.pos, aiAngularVel, thrustHeadingGate, coastDist);
 
     // Fire discipline: fire when ANY asteroid is in the fire cone
     // AND within the fire distance range. Matches "feuer bis split,
@@ -469,6 +492,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       fireHeadingGate: opts.fireHeadingGate,
       activeWeapon: getActiveWeapon ? getActiveWeapon() : 'bullet',
       laserFireHeadingGate: opts.laserFireHeadingGate,
+      coastDist: opts.coastDist,
     };
   }
 

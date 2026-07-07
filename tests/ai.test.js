@@ -5,13 +5,11 @@
  *   (ship position + yaw + angular velocity + asteroid list + powerup)
  * to a 4-tuple `{ yaw, thrust, mode, fire }`.
  *
- * Three modes: EVADE (emergency, 8u) → ENGAGE (turn + thrust, wide gate)
- * → IDLE (no targets).
+ * Four modes: EVADE (12u) → POWERUP (always priority) → ASTEROID → IDLE.
  *
- * `engageTarget` is simple: turn toward target (spin-brake prediction),
- * thrust when within thrustGate=0.30. No coasting, no speed management.
- * Fly-by attack pattern: ship naturally flies past targets → engines cut
- * → turns around while LINEAR_DRAG decelerates.
+ * `engageTarget` uses coast-in: turn toward target (spin-brake prediction),
+ * thrust when aligned AND closingSpeed is low OR beyond coastDist.
+ * Prevents fly-through at high speed.
  */
 
 import { test } from 'node:test';
@@ -257,7 +255,9 @@ test('aiBrainTick: aligned + high speed + far target → still thrusts (no coast
     'fly-by: thrust when aligned regardless of speed');
 });
 
-test('aiBrainTick: close target still thrusts when aligned (v0.30.x)', () => {
+test('aiBrainTick: close target + stationary → thrusts (low closing speed, no coast)', () => {
+  // v0.33.x: ship is stationary at 4u from target. closingSpeed=0
+  // which is < 30 threshold → no coast-in, thrust normally.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -267,12 +267,12 @@ test('aiBrainTick: close target still thrusts when aligned (v0.30.x)', () => {
     evadeDist: 2,
   });
   assert.equal(result.mode, 'asteroid');
-  assert.equal(result.thrust, true, 'v0.30.x: thrust when aligned, simple controller');
+  assert.equal(result.thrust, true, 'stationary → no coast-in, thrust to accelerate');
 });
 
-test('aiBrainTick: high speed + close target → still thrusts (fly-by: no coasting)', () => {
-  // Ship at origin, facing +X toward target at (40, 0).
-  // Fly-by controller: no coasting. Always thrust when aligned.
+test('aiBrainTick: high speed + close target → coast-in (no thrust)', () => {
+  // v0.33.x coast-in: ship at 150 u/s closing speed toward target
+  // at 40u. dist=40 < coastDist=60 && closingSpeed=150 > 30 → coast.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -282,12 +282,12 @@ test('aiBrainTick: high speed + close target → still thrusts (fly-by: no coast
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0);
-  assert.equal(result.thrust, true, 'fly-by: always thrust when aligned');
+  assert.equal(result.thrust, false, 'v0.33.x: coast-in when closing fast within coastDist');
 });
 
 test('aiBrainTick: perpendicular velocity → turn + thrust toward target', () => {
-  // Ship moving fast perpendicular to target. Still turns toward
-  // target and thrusts (no speed management blocks).
+  // Ship moving fast perpendicular to target. Closing speed ≈ 0
+  // (perpendicular motion) → no coast-in → thrust normally.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2, // facing +X, toward target at (40,0)
@@ -297,7 +297,34 @@ test('aiBrainTick: perpendicular velocity → turn + thrust toward target', () =
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0, 'already facing target → yaw=0');
-  assert.equal(result.thrust, true, 'aligned → thrust');
+  assert.equal(result.thrust, true, 'perpendicular → closingSpeed≈0 → thrust');
+});
+
+test('aiBrainTick: receding velocity within coastDist → still thrusts', () => {
+  // Ship at 30u from target, moving AWAY (closingSpeed < 0).
+  // Should NOT coast — closing speed is negative.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2, // facing +X
+    aiVel: { x: -50, z: 0 }, // moving AWAY from target
+    asteroids: [mockAsteroid(30, 0)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.thrust, true, 'receding closingSpeed<0 → no coast → thrust');
+});
+
+test('aiBrainTick: closing speed exactly at threshold (30) → no coast (strict >)', () => {
+  // Ship closing at exactly 30 u/s. Strict > means 30 is NOT coasting.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 30, z: 0 },
+    asteroids: [mockAsteroid(40, 0)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.thrust, true, 'closingSpeed=30 is NOT >30 → no coast → thrust');
 });
 
 // --------------------------------------------------------------------------
