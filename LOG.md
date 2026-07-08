@@ -7,136 +7,109 @@
 
 ---
 
-## Current State: v0.34.3 — Early Aggressive Brake
+## Current State: v0.37.2 — Powerup Coast-In + Smarter Collection
 
-**Status:** ✅ Validated — ~3.55 asteroids/sec, efficient powerup collection
+**Status:** ✅ 114 tests pass. Powerup collection is now smooth: the AI decelerates
+when approaching a powerup (coast-in), and collects nearby powerups even when an
+asteroid is also close.
 
-### v0.34.3 Changes
-- **BRAKE_DIST widened**: 30 → 40. Ship starts braking earlier, reducing fly-through.
-- **BRAKE_ENTER_SPEED lowered**: 35 → 25. Brake fires at lower closing speeds.
-- **BRAKE_EXIT_SPEED lowered**: 15 → 10. Ship commits to longer braking episodes.
-- **coastDist tightened**: 50 → 40. More thrust = faster approach = more asteroids/min.
+### v0.37.2 Changes
 
-### v0.34.1 Changes
-- **Brake hysteresis**: Entry 35 u/s, exit 15 u/s. Prevents yaw oscillation.
-- **Evade distance**: 12 → 8u. Less evasion time, more attack time.
-- **Factory brake state tracking**: `isBraking` tracked across ticks, reset on spawn.
+**Three fixes for powerup collection:**
 
-### v0.34.0 Changes
-- **Active brake branch**: Flip 180° + thrust backward when `dist < 30 && closingSpeed > 35`. LINEAR_DRAG=0.4 cannot decelerate 200→20 u/s alone (~450u needed).
-- **Coast-in**: `coastDist` 15→50, threshold 30→5.
-- **Fire range**: `fireMaxDist` 40→120.
-- **Adaptive cone floor**: 0.06→0.12 rad.
+1. **`engageTarget` — `allowCoast` parameter** separated from `allowBrake`. Powerups now
+   coast (cut thrust when close + closing fast, decelerate via LINEAR_DRAG) without
+   the aggressive 180° flip brake. Asteroids unchanged (both brake + coast as before).
+   - `shouldCoast = allowCoast && dist < coastDist && closingSpeed > COAST_SPEED_THRESHOLD`
+   - `allowCoast` defaults to `allowBrake` for full backward compat
 
-### DEFAULTS
-```javascript
-const DEFAULTS = Object.freeze({
-  resetDist: 220,
-  spawnRadius: 30,
-  spawnJitterY: 0,
-  spawnYaw: 0,
-  evadeDist: 8,            // v0.34.1: sweet spot (6 collides, 12 too passive)
-  powerupBiasU: 9999,      // v0.34.0: absolute powerup priority
-  thrustHeadingGate: 0.50, // wide for fast repositioning
-  fireHeadingGate: 0.25,   // tight accuracy + adaptive widening at close range
-  fireMinDist: 0,
-  fireMaxDist: 120,
-  hysteresisU: 8,          // target stickiness
-  laserFireHeadingGate: 0.20,
-  coastDist: 40,           // v0.34.3: tighter for more thrust
-  brakeExitSpeed: 10,      // v0.34.3: longer braking
-});
-```
+2. **`pickTarget` — `powerupIsClose`** increased from 18u to 25u. Powerups within 25u
+   are always collected regardless of asteroid proximity.
 
-### Controller Logic (engageTarget)
-```
-face target → spin-brake prediction (YAW_INERTIA_TAU=0.2) → yaw command
-if (wasBraking && closingSpeed > 10) || (dist < 40 && closingSpeed > 25)
-  → BRAKE (flip 180°, thrust backward, braking=true)
-else if dist < 40 && closingSpeed > 5 → COAST (thrust=false)
-else if aligned (|diff| < 0.50) → THRUST
-```
+3. **`pickTarget` — Smarter urgency check** (`|| pDist < best.dist`). Powerups now win
+   over an urgent asteroid (dist < 35u) when the powerup is CLOSER than the asteroid.
+   Example: powerup at 20u, asteroid at 30u → powerup wins (old: blocked).
+   Example: powerup at 30u, asteroid at 10u → asteroid wins (correct).
 
 ### Architecture
-- **4 modes (priority):** EVADE (8u) → POWERUP → ASTEROID → IDLE
-- **Coast-in:** thrust when aligned AND (dist >= 40 OR closingSpeed <= 5). Perpendicular motion doesn't trigger coast.
-- **Active brake with hysteresis:** Entry 25 u/s, exit 10 u/s. Prevents oscillation.
-- **Powerup always priority:** `powerupBiasU: 9999`.
-- **Distance-adaptive fire cone:** `max(0.12, 0.25 * (1 - dist/180))`. Wide at close, tight at far.
-- **No fire minimum:** `fireMinDist: 0` — shoots point-blank.
+- **5 levels (priority):** EVADE → PREDICTIVE EVADE → POWERUP → ASTEROID → IDLE
+- **Powerup approach:** coast-in (no brake), aligned thrust, smooth deceleration
+- **Powerup detection:** always collect < 25u, collect > 25u if closer than nearest asteroid
 
 ---
 
 ## Iteration History
 
-### v0.34.2 — WIDER CONE (REVERTED)
-- `fireHeadingGate: 0.25 → 0.35`, `evadeDist: 8 → 6`, adaptive min 0.12→0.18
-- **Result:** Score DROPPED from ~2.8 to ~2.0 asteroids/sec. Wide cone caused excessive misses at medium range.
-- **Lesson:** Tight cone + high fire rate beats wide cone + low accuracy.
+### v0.37.2 — Powerup Coast-In + Smarter Collection
+- **engageTarget allowCoast:** separated from allowBrake so powerups coast without braking.
+- **pickTarget powerupIsClose:** 18→25u.
+- **pickTarget urgency:** `|| pDist < best.dist` for powerup-vs-asteroid priority.
+- **Tests:** 114 pass (+1 new regression test for low-speed powerup approach).
 
-### v0.34.1 — BRAKE HYSTERESIS
-- Entry 35, exit 15. `evadeDist: 12 → 8`.
-- **Result:** Reduced yaw oscillation, more attack time.
+### v0.36.0 — Stop-Turn-Thrust Pattern
+- **thrustHeadingGate:** 0.50→0.10 rad. Turn without thrust, fly straight when aligned.
+- **Score:** +5870/25s (2.6× improvement vs v0.35.0).
+- **Tests:** 90 pass (was 89). Browser verified clean linear approaches.
 
-### v0.34.0 — ACTIVE BRAKE
-- Flip 180° + thrust backward at high closing speed.
-- **Result:** Eliminated fly-through on powerup approach.
+### v0.35.0 — Brake Hysteresis Fix + Fire Cone Tuning
+- **Brake hysteresis:** `closingSpeed → speed` based. Fixes powerup orbiting.
+- **Fire range:** 120→60u. Fire cone: 0.25→0.30 rad.
 
-### v0.33.x — POWERUP-PRIORITY + COAST-IN
+### v0.34.3 — Early Aggressive Brake
+- BRAKE_DIST 30→40, entry 35→25, exit 15→10, coastDist 50→40.
+
+### v0.34.2 — Wider Cone (REVERTED)
+- fireHeadingGate 0.25→0.35, evadeDist 8→6. Score dropped.
+
+### v0.34.1 — Brake Hysteresis
+- Entry 35, exit 15. evadeDist 12→8.
+
+### v0.34.0 — Active Brake
+- Flip 180° + thrust backward. Eliminated fly-through.
+
+### v0.33.x — Powerup-Priority + Coast-In
 - Absolute powerup priority, coast-in controller, adaptive fire cone.
-- **Result:** Powerup collection fixed, but fly-through remained until v0.34.0 brake.
-
-### v0.30.x–v0.32.x: Fly-by Controller
-- **Problems:** No powerup collection, tight fire cone, always nearest target.
-
-### v0.28.x–v0.29.x: Speed-Aware Controller (ABANDONED)
-- Complex speed management paralyzed the ship.
-- **Lesson:** Speed management must be simple.
 
 ---
 
-## Protocol for Future Agents
+## Tools & Automation
 
-1. Read this file + `src/entities/ai.js` + `tests/ai.test.js`
-2. Change ONE constant at a time
-3. Run `npm test` after each change
-4. Test in browser for 30+ seconds of DEMO gameplay
+### Video Analysis Pipeline (v0.37.2)
 
-### Success Criteria
-1. **Powerup collection:** ≥90% of spawned powerups collected
-2. **Asteroid clearing:** Score increases steadily, no idle periods
-3. **No overshoot loops:** Doesn't repeatedly fly past targets
-4. **Smooth movement:** No visible zigzag or wobble
-5. **Fire discipline:** Fires when targets are in range
+Drei Scripts für automatisierte Game-Analyse ohne manuelles Eingreifen:
 
-### Key Metrics (via AI Debug Overlay)
-- **Mode:** Mostly `asteroid` or `powerup`, minimal `idle`/`evade`
-- **Thrust:** >60% of time
-- **Fire:** >30% when asteroids in range
+| Script | Beschreibung |
+|--------|--------------|
+| `scripts/ai_video_loop.py` | ffmpeg screen capture → GIF + summary.json (brightness, motion). macOS screen recording permission benötigt. |
+| `scripts/ai_browser_capture.py` | Playwright headless browser capture → GIF + frames. `pip install playwright` benötigt. |
+| `scripts/run-ai-loop.sh` | **Orchestrator**: Vite start → capture → stop → analyse. `--mode browser` funktioniert vollständig handsoff. |
 
-### Architecture Constraints
-- Brain MUST be pure + deterministic + testable
-- Max 4 modes (EVADE/POWERUP/ASTEROID/IDLE)
-- LINEAR_DRAG handles routine deceleration; active brake only supplements
+**Bugfix (v0.37.2):** `ai_video_loop.py` captured nur 1 Frame (wiederholt) — ffmpeg schrieb alle Frames in dieselbe Datei `frame.png`. Gefixt: `-t seconds -vf fps=N` mit nummeriertem Output-Pattern `frame_%03d.png`. Zusätzlich: `shutil_which` → `shutil.which()`, `Image.fromarray()` für PIL last-resort, `import imageio` statt `.v2`.
+
+**Test (Stand 2026-07):** 11/12 Frames pro Capture (90%-Threshold). GIF-Export funktioniert (MP4 via imageio hat TiffWriter-Warning, fällt auf GIF zurück).
 
 ---
 
-## Tuning Knobs
+## Previous State: v0.37.1
 
 | Parameter | Default | Effect | Tune When... |
 |-----------|---------|--------|--------------|
 | `evadeDist` | 8 | Evasion trigger | Ship collides → increase; too passive → decrease |
+| `interceptLookaheadS` | **2.0** | Intercept horizon v0.37.0 | Over-leads at distance → decrease |
+| `predictiveEvadeLookahead` | **3.0** | Collision prediction horizon v0.37.0 | False dodges → decrease; missed collisions → increase |
+| `predictiveEvadeMargin` | **12.0** | Collision margin v0.37.0 | Too twitchy → decrease; too late → increase |
+| `bulletSpeed` | **400** | Bullet speed for lead fire v0.37.0 | Laser/hitscan → set to 0 |
 | `powerupBiasU` | 9999 | Powerup priority | Misses powerups → increase |
-| `thrustHeadingGate` | 0.50 | Align threshold | Turns too slow → increase |
-| `fireHeadingGate` | 0.25 | Fire cone width | Misses shots → increase; wastes ammo → decrease |
+| `thrustHeadingGate` | 0.10 | Align threshold | v0.36.0: tight stop-turn-thrust |
+| `fireHeadingGate` | 0.30 | Fire cone width | Misses shots → increase; wastes ammo → decrease |
 | `fireMinDist` | 0 | Min fire distance | Friendly fire → increase |
-| `fireMaxDist` | 120 | Max fire distance | Wasted far shots → decrease |
+| `fireMaxDist` | 60 | Max fire distance | Wasted far shots → decrease |
 | `coastDist` | 40 | Coast-in distance | Overshoots → increase; too slow → decrease |
 | `BRAKE_DIST` | 40 | Brake trigger distance | Fly-through → decrease |
-| `BRAKE_ENTER_SPEED` | 25 | Brake entry speed | Fly-through → decrease |
-| `BRAKE_EXIT_SPEED` | 10 | Brake exit speed | Oscillation → increase |
+| `BRAKE_ENTER_SPEED` | 20 | Brake entry speed (closing) | Oscillation → increase; fly-through → decrease |
+| `BRAKE_EXIT_SPEED` | 10 | Brake exit speed (absolute) | Oscillation → increase |
 | `laserFireHeadingGate` | 0.20 | Laser cone | Laser misses → increase |
 
 ---
 
-*Last updated: v0.34.3 — Early Aggressive Brake*
+*Last updated: v0.37.2 — Powerup Coast-In + Video Analysis Pipeline (handsoff ready)*

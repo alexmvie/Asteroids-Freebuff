@@ -40,6 +40,7 @@ These rules are set by the project owner and are **standing** — they apply to 
 
 ### Rule 6: Don't surprise the user
 - Do not modify files the user did not implicitly ask you to modify.
+- If the user indicates they are switching to another LLM model, treat the current session as a handoff: document the current state clearly, make no further expansive changes, and leave the workspace in a clean, consistent state.
 - On the `refine-coded-ai` branch, **unattended `git push` IS SANCTIONED** -- `.githooks/post-commit` runs `git push` after every commit, so you never have to type `git push` manually. Other commands (commit, `npm install`, `pip install --user`, `./scripts/install-hooks.sh`) are also fine without explicit approval. (Standing rule updated 2026-07-04 at the user's explicit request: push is auto on `refine-coded-ai`.)
 - If you need to make a significant change beyond the user's clear ask, **ask first**.
 
@@ -117,9 +118,14 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
 │   │       └── unwrap-result.js          ← applyUnwrapResult (shared helper for 3 unwrap tools)
 │   └── ui/                   ← (planned) hud.js, overlay.js
 │
-├── scripts/                  ← visual smoke tests (Node-only)
+├── scripts/                  ← visual smoke tests + AI analysis
 │   ├── dump-field.js         ← ASCII density + asteroid map
-│   └── dump-field-svg.js     ← writes field.svg
+│   ├── dump-field-svg.js     ← writes field.svg
+│   ├── ai_video_loop.py      ← ffmpeg screen capture → GIF + summary.json
+│   ├── ai_browser_capture.py ← Playwright canvas capture → GIF + frames
+│   ├── run-ai-loop.sh        ← **Hands-off orchestrator**: Vite → capture → stop → analyze (ein Befehl)
+│   ├── run-ai-tuning.mjs     ← AI parameter tuning via simulation (requires ai-tuning.js module)
+│   └── tune-predictive-evade.mjs ← Grid-Search für predictiveEvade parameter
 │
 ├── tests/
 │   └── world.test.js         ← node:test suite (21 tests)
@@ -343,19 +349,25 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
 ### ⏳ Next Steps (priority order)
 
 1. **Spatial hash** — `src/systems/collision.js` (broad-phase): uniform grid keyed by world position. The narrow-phase step is already in place; this is the O(1) candidate-selection layer above it.
-2. **Occlusion culling** — skip asteroids that are hidden behind other asteroids or behind the player ship, on top of the default frustum cull. The cheapest implementation is a per-frame coarse depth-prepass (render the asteroid bounding spheres to a 1-channel target, then skip the fragments whose depth is less than the prepass depth). A more accurate option is a BVH (`three-mesh-bvh`) and an occlusion query per object. Three.js's built-in `Object3D.frustumCulled` already does the frustum half — this is the additional "hidden by another object" half. Worth it once the streaming field has hundreds of asteroids.
+2. **Occlusion culling** — skip asteroids hidden behind other geometry. Three.js's built-in `frustumCulled` does the frustum half; this is the "hidden by another object" half (BVH or depth-prepass). Worth it once the streaming field hits hundreds of asteroids.
 3. **Hyperspace stub** — `src/systems/hyperspace.js`: `requestJump(systemId)` no-op seam for Elite expansion.
-4. **Particles + visual polish** — explosions, thrust glow, screen shake.
-5. **Final polish** — restart flow, edge cases, manual smoke test.
+4. **Particles + visual polish** — explosions, thrust glow, screen shake, hit effects.
+5. **Powerup audio** — Web Audio API ping when collecting a powerup.
+6. **Final polish** — edge cases, manual smoke test, README clean-up.
 
-### 🛠 Current Ship Tunables (extract to `src/entities/constants.js` later)
+### ✅ Tools available
 
-- `THRUST_ACCEL = 60` u/s²
-- `MAX_SPEED = 200` u/s
-- `LINEAR_DRAG = 0.4` (exp decay coefficient)
-- `YAW_SPEED = 4.0` rad/s
-- `PLAY_PLANE_Y = 0`
-- Camera `CHASE_DAMP = 6.0` (in `src/scene.js`)
+| Tool | Path | Usage |
+|------|------|-------|
+| AI video capture (ffmpeg) | `scripts/ai_video_loop.py` | `python3 scripts/ai_video_loop.py --seconds 10 --fps 8` -> GIF + summary.json |
+| AI video capture (Playwright) | `scripts/ai_browser_capture.py` | `python3 scripts/ai_browser_capture.py --seconds 10 --fps 8` -> browser-capture.gif |
+| Hands-off orchestrator | `scripts/run-ai-loop.sh` | `./scripts/run-ai-loop.sh --mode browser --seconds 15 --fps 6` - Vite one command |
+| AI parameter tuning (simulation) | `scripts/run-ai-tuning.mjs` | `node scripts/run-ai-tuning.mjs compare` - compare presets |
+| Predictive evade grid-search | `scripts/tune-predictive-evade.mjs` | `node scripts/tune-predictive-evade.mjs` - sweep params |
+
+### 🛠 Tunables SSOT locations
+
+Ship and camera tunables are extracted to dedicated constant files. See `src/entities/ship-constants.js` and `src/scene/camera-constants.js`.
 
 ## Architecture
 
@@ -473,6 +485,7 @@ See `SPEC.md` §11 for the live list. Currently:
 | UV editor config | `src/systems/uv-tools/config.js` |
 | UV editor pure geometry math | `src/systems/uv-tools/geometry-utils.js` |
 | Visual smoke tests | `scripts/dump-field.js`, `scripts/dump-field-svg.js` |
+| Video analysis (hands-off) | `scripts/run-ai-loop.sh` (orchestrator), `scripts/ai_video_loop.py` (ffmpeg), `scripts/ai_browser_capture.py` (Playwright) |
 | Unit tests | `tests/world.test.js` |
 | Data-model design | `SPEC.md` |
 | Project state / rules | `AGENTS.md` (this file) |

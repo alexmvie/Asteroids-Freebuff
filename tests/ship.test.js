@@ -113,3 +113,12 @@ test('Ship: setYaw clamps out-of-range inputs to [-1, +1]', () => {
   assert.equal(ship.rotation.roll, 0,
     `setYaw(5) should have been clamped to 0; roll is ${ship.rotation.roll}`);
 });
+
+test('Ship: credits buff doubles score gain', () => {
+  const ship = newShip();
+  assert.equal(ship.getScoreMultiplier(), 1);
+  ship.addBuff('credits', 5);
+  assert.equal(ship.getScoreMultiplier(), 2);
+  ship.removeBuff('credits');
+  assert.equal(ship.getScoreMultiplier(), 1);
+});

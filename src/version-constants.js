@@ -31,6 +31,6 @@
  * - BRANCH + COMMIT: auto-resolved from git at Vite config-load.
  *   No edits needed; no amend-chain, no off-by-one.
  */
-const VERSION = 'v0.34.3';
+const VERSION = 'v0.37.2';
 
 export { VERSION };

@@ -21,7 +21,24 @@ Then open http://localhost:5173/.
 | `npm run build` | Production build into `dist/`. |
 | `npm test` | Unit tests for the data model (21 tests). |
 | `npm run dump:field` | ASCII visualization of the world to the terminal. |
-| `npm run dump:field:svg` | SVG visualization of the world (writes `field.svg`). |
+| `npm run dump:field:svg` | SVG visualization of the world (writes `field.svg`).
+| `python3 scripts/ai_video_loop.py --seconds 10 --fps 8` | ffmpeg screen capture → GIF + brightness/motion analysis (`artifacts/ai-video/`).
+| `python3 scripts/ai_browser_capture.py --seconds 10 --fps 8` | Playwright canvas capture → GIF + frame sequence (`artifacts/ai-browser/`).
+| `./scripts/run-ai-loop.sh --mode browser --seconds 15 --fps 6` | **Hands-off loop**: start Vite → capture → stop → analyze. Ein Befehl, kein manuelles Eingreifen.
+
+## Video Analysis (hands-off)
+
+Zwei Scripts für automatisierte Game-Analyse:
+
+- **`scripts/ai_video_loop.py`** — ffmpeg captured den ganzen Bildschirm (benötigt macOS screen recording permission). Erzeugt GIF + `summary.json` mit Helligkeits-/Motion-Metriken.
+- **`scripts/ai_browser_capture.py`** — Playwright captured das Canvas-Element direkt im headless Browser. Sauberer (nur das Game, kein Desktop-Chrome), aber erfordert `pip install playwright`.
+- **`scripts/run-ai-loop.sh`** — Orchestrator: startet Vite, wartet, captured, stoppt Vite. Der `browser`-mode funktioniert vollständig ohne manuelles Eingreifen.
+
+Typischer AI-Tuning-Loop:
+```bash
+./scripts/run-ai-loop.sh --mode browser --seconds 15 --fps 6
+cat artifacts/ai-loop/summary.json
+``` |
 
 ## Documentation
 

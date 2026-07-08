@@ -572,7 +572,8 @@ function processCollisions() {
     activePool.despawn(hit.bulletIndex);
     if (asteroidsToRemove.has(hit.asteroidIndex)) continue;
     asteroidsToRemove.add(hit.asteroidIndex);
-    score += scoreForSize(asteroids[hit.asteroidIndex].spec.size);
+    const asteroidScore = scoreForSize(asteroids[hit.asteroidIndex].spec.size);
+    score += asteroidScore * ship.getScoreMultiplier();
   }
 
   // ---- Laser ↔ asteroid (piercing hits, run in DEMO + PLAYING) -------
@@ -594,7 +595,8 @@ function processCollisions() {
         continue;
       }
       asteroidsToRemove.add(idx);
-      score += scoreForSize(asteroid.spec.size);
+      const asteroidScore = scoreForSize(asteroid.spec.size);
+      score += asteroidScore * ship.getScoreMultiplier();
       laser.consumeHit(asteroid); // consumed this frame
     }
   }

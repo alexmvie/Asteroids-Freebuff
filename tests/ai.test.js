@@ -24,16 +24,21 @@ import {
   shouldResetAi,
   pickAiSpawn,
   createDemoAi,
+  predictInterceptPoint,
+  findCollisionThreat,
 } from '../src/entities/ai.js';
 
 // --------------------------------------------------------------------------
 // Mock helpers
 // --------------------------------------------------------------------------
 
-function mockAsteroid(x, z) {
+function mockAsteroid(x, z, vel, radius = 3) {
+  const v = vel || { x: 0, z: 0 };
   return {
-    spec: { position: { x, y: 0, z } },
+    spec: { position: { x, y: 0, z }, radius },
     getPosition: () => ({ x, y: 0, z }),
+    getVelocity: () => ({ x: v.x, z: v.z }),
+    getRadius: () => radius,
   };
 }
 
@@ -208,8 +213,22 @@ test('aiBrainTick: ENGAGE picks the NEAREST asteroid', () => {
   assert.equal(result.thrust, true);
 });
 
-test('aiBrainTick: 0.20 rad off → within thrustGate=0.30 → thrust during turn', () => {
-  // Ship 0.20 rad off target — within thrustGate=0.30, still turning.
+test('aiBrainTick: powerup target suppresses stray fire while collecting a pickup', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(20, 0)],
+    time: 0,
+    powerupPos: { x: 10, z: 0 },
+    powerupBiasU: 25,
+  });
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.fire, false);
+});
+
+test('aiBrainTick: 0.20 rad off → outside tight thrustGate=0.10 → thrust OFF while turning', () => {
+  // Ship 0.20 rad off target — outside thrustGate=0.10.
+  // Stop-turn-thrust: turn first, thrust only when aligned.
   const targetX = Math.sin(0.20) * 40;
   const targetZ = -Math.cos(0.20) * 40;
   const result = aiBrainTick({
@@ -220,8 +239,24 @@ test('aiBrainTick: 0.20 rad off → within thrustGate=0.30 → thrust during tur
   });
   assert.equal(result.mode, 'asteroid');
   assert.notEqual(result.yaw, 0, 'still turning toward target');
+  assert.equal(result.thrust, false,
+    '0.20 > thrustGate=0.10 → thrust OFF while turning');
+});
+
+test('aiBrainTick: 0.05 rad off → within tight thrustGate=0.10 → thrust ON', () => {
+  // Ship 0.05 rad off target — within thrustGate=0.10, aligned enough.
+  const targetX = Math.sin(0.05) * 40;
+  const targetZ = -Math.cos(0.05) * 40;
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [mockAsteroid(targetX, targetZ)],
+    time: 0,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.yaw, 0, 'within YAW_DEADBAND=0.08 → no yaw');
   assert.equal(result.thrust, true,
-    '0.20 < thrustGate=0.30 → thrust during turn');
+    '0.05 < thrustGate=0.10 → thrust ON when nearly aligned');
 });
 
 test('aiBrainTick: thrust ON when aligned (simple controller)', () => {
@@ -249,6 +284,7 @@ test('aiBrainTick: aligned + high speed + far target → still thrusts (no coast
     aiVel: { x: 80, z: 0 },
     asteroids: [mockAsteroid(200, 0)],
     time: 0,
+    predictiveEvadeLookahead: 0, // disable predictive evade for this legacy test
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0);
@@ -263,12 +299,51 @@ test('aiBrainTick: close target + stationary → thrusts (low closing speed, no 
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
     aiVel: { x: 0, z: 0 },
-    asteroids: [mockAsteroid(4, 0)],
+    // Use radius=0 so the radius-aware EVADE threshold stays at
+    // max(2, 1.4+0+2) = 3.4, below the asteroid's 4u distance.
+    asteroids: [mockAsteroid(4, 0, undefined, 0)],
     time: 0,
     evadeDist: 2,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.thrust, true, 'stationary → no coast-in, thrust to accelerate');
+});
+
+test('aiBrainTick: powerup target near the ship coasts instead of braking or full thrust', () => {
+  // v0.37.2: powerups now have coast-in enabled (allowCoast=true) so the ship
+  // decelerates naturally when approaching a pickup at speed, preventing overshoot.
+  // At 15u with 30 u/s closing speed, dist < coastDist=20 && closingSpeed > 5 → coast.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 30, z: 0 },
+    asteroids: [],
+    time: 0,
+    powerupPos: { x: 15, z: 0 },
+    coastDist: 20,
+    powerupBiasU: 9999,
+  });
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.thrust, false, 'powerup with coast-in: coast (no thrust) when closing fast within coastDist');
+  assert.equal(result.braking, false, 'powerup intercept should NOT engage the high-speed brake (180\u00b0 flip)');
+});
+
+// v0.37.2 regression: powerup with low closing speed within coastDist should still thrust
+// (ship crawling toward a close powerup should keep moving)
+test('aiBrainTick: powerup with low closing speed within coastDist still thrusts', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 3, z: 0 },
+    asteroids: [],
+    time: 0,
+    powerupPos: { x: 15, z: 0 },
+    coastDist: 20,
+    powerupBiasU: 9999,
+  });
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.thrust, true, 'low closing speed (3 < 5) → no coast → thrust');
+  assert.equal(result.braking, false);
 });
 
 test('aiBrainTick: high speed + close target → active brake (flip and thrust backward)', () => {
@@ -281,6 +356,7 @@ test('aiBrainTick: high speed + close target → active brake (flip and thrust b
     asteroids: [mockAsteroid(10, 0)],
     time: 0,
     evadeDist: 5,  // avoid triggering EVADE at 10u
+    predictiveEvadeLookahead: 0, // disable predictive evade for this legacy test
   });
   assert.equal(result.mode, 'asteroid');
   assert.notEqual(result.yaw, 0, 'v0.34.3: active brake flips ship to face opposite velocity');
@@ -318,7 +394,7 @@ test('aiBrainTick: receding velocity within coastDist → still thrusts', () => 
 });
 
 test('aiBrainTick: brake does NOT fire when closingSpeed below entry threshold', () => {
-  // dist=20 < BRAKE_DIST=40, but closingSpeed=10 < 25 → no brake, normal coast
+  // dist=20 < BRAKE_DIST=40, but closingSpeed=10 < 20 → no brake, normal coast
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -326,6 +402,7 @@ test('aiBrainTick: brake does NOT fire when closingSpeed below entry threshold',
     asteroids: [mockAsteroid(20, 0)],
     time: 0,
     evadeDist: 5,
+    predictiveEvadeLookahead: 0,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.thrust, false, 'slow approach → coast, no brake');
@@ -333,7 +410,7 @@ test('aiBrainTick: brake does NOT fire when closingSpeed below entry threshold',
 });
 
 test('aiBrainTick: brake does NOT fire when beyond BRAKE_DIST', () => {
-  // dist=35 < BRAKE_DIST=40, but closingSpeed=20 < 25 → no brake
+  // dist=35 < BRAKE_DIST=40, but closingSpeed=20 < 20 → no brake (strict >)
   // dist=35 < coastDist=40, closingSpeed=20 > 5 → coast → no thrust
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
@@ -342,9 +419,10 @@ test('aiBrainTick: brake does NOT fire when beyond BRAKE_DIST', () => {
     asteroids: [mockAsteroid(35, 0)],
     time: 0,
     evadeDist: 5,
+    predictiveEvadeLookahead: 0,
   });
   assert.equal(result.mode, 'asteroid');
-  assert.equal(result.thrust, false, 'no brake (closingSpeed<25) → coast (dist<40) → no thrust');
+  assert.equal(result.thrust, false, 'no brake (closingSpeed=20 not > 20) → coast (dist<40) → no thrust');
   assert.equal(result.braking, false);
 });
 
@@ -370,6 +448,7 @@ test('aiBrainTick: coast boundary — dist=40 exactly does NOT coast (strict <)'
     aiVel: { x: 20, z: 0 },
     asteroids: [mockAsteroid(40, 0)],
     time: 0,
+    predictiveEvadeLookahead: 0,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.thrust, true, 'dist=40 is NOT < coastDist=40 → no coast');
@@ -382,9 +461,9 @@ test('aiBrainTick: beyond coastDist → thrust even when closing fast', () => {
     aiVel: { x: 100, z: 0 },
     asteroids: [mockAsteroid(55, 0)],
     time: 0,
+    predictiveEvadeLookahead: 0,
   });
-  assert.equal(result.mode, 'asteroid');
-  assert.equal(result.thrust, true, 'dist=55 > coastDist=50 → no coast → thrust');
+  assert.equal(result.mode, 'asteroid');    assert.equal(result.thrust, true, 'dist=55 > coastDist=40 → no coast → thrust');
 });
 
 test('aiBrainTick: moderate closing speed within coastDist → coast (no thrust)', () => {
@@ -398,6 +477,7 @@ test('aiBrainTick: moderate closing speed within coastDist → coast (no thrust)
     aiVel: { x: 20, z: 0 },
     asteroids: [mockAsteroid(35, 0)],
     time: 0,
+    predictiveEvadeLookahead: 0,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.thrust, false, 'v0.34.3: coast-in when closing within coastDist=40');
@@ -448,6 +528,7 @@ test('aiBrainTick: brake hysteresis — continues braking until closingSpeed < 1
     time: 0,
     evadeDist: 5,
     wasBraking: true,
+    predictiveEvadeLookahead: 0,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.braking, true, 'hysteresis: keep braking while closingSpeed=20 > exit=10');
@@ -465,9 +546,36 @@ test('aiBrainTick: brake hysteresis — releases when closingSpeed drops below 1
     time: 0,
     evadeDist: 5,
     wasBraking: true,
+    predictiveEvadeLookahead: 0,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.braking, false, 'hysteresis: release brake when closingSpeed=8 < exit=10');
+});
+
+test('aiBrainTick: brake hysteresis — speed-based exit keeps braking when closingSpeed is negative', () => {
+  // v0.35.0 REGRESSION TEST: the exact bug scenario.
+  // Ship is moving away from target (closingSpeed < 0) but still at
+  // high absolute speed (> 10). The brake should KEEP FIRING because
+  // the hysteresis uses speed (absolute magnitude), not closingSpeed.
+  // Without this fix, the brake would release on the first tick after
+  // the 180° flip, producing the visible orbiting oscillation.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: Math.PI, // facing away from target
+    aiVel: { x: -50, z: 0 }, // moving away from target at 50 u/s
+    asteroids: [mockAsteroid(20, 0)],
+    time: 0,
+    evadeDist: 5,
+    wasBraking: true,
+  });
+  // closingSpeed is negative (ship moving away from target), but
+  // speed=50 > 10 → hysteresis keeps braking.
+  assert.equal(result.braking, true,
+    'speed-based hysteresis: brake KEEPS firing even with closingSpeed < 0');
+  assert.notEqual(result.yaw, 0,
+    'brake continues turning to face opposite velocity');
+  assert.equal(result.thrust, true,
+    'brake thrusts backward during speed-based hysteresis');
 });
 
 test('aiBrainTick: brake hysteresis — does NOT start braking at closingSpeed=20', () => {
@@ -481,6 +589,7 @@ test('aiBrainTick: brake hysteresis — does NOT start braking at closingSpeed=2
     time: 0,
     evadeDist: 5,
     wasBraking: false,
+    predictiveEvadeLookahead: 0,
   });
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.braking, false, 'no hysteresis: do not start braking at closingSpeed=20 (entry=25)');
@@ -672,34 +781,35 @@ test('engageTarget: aligned + slow → yaw=0, thrust=true', () => {
 });
 
 test('engageTarget: 90° off → yaw=-1, thrust=false (outside thrustGate)', () => {
-  // Ship facing +X, target at +Z. diff = π/2 ≈ 1.57 > thrustGate=0.52.
+  // Ship facing +X, target at +Z. diff = π/2 ≈ 1.57 > thrustGate=0.10.
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 }, { x: 0, z: 60 },
   );
   assert.equal(r.yaw, -1);
-  assert.equal(r.thrust, false, '1.57 rad > 0.52 thrustGate → thrust OFF');
+  assert.equal(r.thrust, false, '1.57 rad > 0.10 thrustGate → thrust OFF');
 });
 
-test('engageTarget: 0.20 rad off → thrust during turn (within thrustGate=0.30)', () => {
+test('engageTarget: 0.20 rad off → thrust OFF while turning (outside tight thrustGate=0.10)', () => {
   const angle = 0.20;
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 },
     { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
   );
   assert.equal(r.yaw, -1, 'still turning toward target');
-  assert.equal(r.thrust, true,
-    '0.20 < thrustGate=0.30 → thrust during turn');
+  assert.equal(r.thrust, false,
+    '0.20 > thrustGate=0.10 → thrust OFF while turning');
 });
 
-test('engageTarget: within deadband (0.07 rad) → yaw=0', () => {
+test('engageTarget: within deadband (0.07 rad) → yaw=0, thrust=true', () => {
   // YAW_DEADBAND=0.08. 0.07 < 0.08 → yaw=0.
+  // thrustGate=0.10. 0.07 < 0.10 → thrust=true.
   const angle = 0.07;
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 },
     { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
   );
   assert.equal(r.yaw, 0, '0.07 < YAW_DEADBAND=0.08 → yaw=0');
-  assert.equal(r.thrust, true);
+  assert.equal(r.thrust, true, '0.07 < thrustGate=0.10 → thrust=true');
 });
 
 test('engageTarget: spin-brake fires counter-yaw at alignment with negative angVel', () => {
@@ -909,6 +1019,17 @@ test('pickTarget: asteroid wins when powerup not biased closer', () => {
     powerupBiasU: 60,
   });
   assert.equal(result.mode, 'asteroid');
+});
+
+test('pickTarget: asteroid stays preferred when the powerup is only a detour', () => {
+  const result = pickTarget({
+    aiPos: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(20, 0)],
+    powerupPos: { x: 35, z: 0 },
+    powerupBiasU: 25,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.dist, 20);
 });
 
 test('pickTarget: committedPos preferred over slightly-closer asteroid (stickiness)', () => {
@@ -1176,4 +1297,403 @@ test('createDemoAi: evade mode in getMode()', () => {
   ai.getShip().position.x = 0;
   ai.getShip().position.z = 0;
   assert.equal(ai.getMode(), 'evade');
+});
+
+// ==========================================================================
+// v0.37.0 — PredictInterceptPoint
+// ==========================================================================
+
+test('predictInterceptPoint: stationary target returns current position', () => {
+  const result = predictInterceptPoint(
+    { x: 0, z: 0 }, { x: 50, z: 0 },
+    { x: 100, z: 0 }, { x: 0, z: 0 },
+    2.0,
+  );
+  assert.equal(result.point.x, 100);
+  assert.equal(result.point.z, 0);
+  assert.ok(result.time > 0);
+});
+
+test('predictInterceptPoint: moving target leads ahead', () => {
+  // Ship at (0,0) moving +X at 50 u/s. Target at (100, 0) moving -X at 10 u/s.
+  // Intercept point should be closer than 100 (they're approaching each other).
+  const result = predictInterceptPoint(
+    { x: 0, z: 0 }, { x: 50, z: 0 },
+    { x: 100, z: 0 }, { x: -10, z: 0 },
+    2.0,
+  );
+  assert.ok(result.point.x < 100, 'intercept point should be closer than target current position');
+  assert.ok(result.point.x > 80, 'intercept point should be between ship and target (head-on)');
+  assert.ok(result.time > 0);
+});
+
+test('predictInterceptPoint: stationary ship falls back to current pos', () => {
+  const result = predictInterceptPoint(
+    { x: 0, z: 0 }, { x: 0, z: 0 },
+    { x: 100, z: 0 }, { x: 10, z: 0 },
+    2.0,
+  );
+  assert.equal(result.point.x, 100);
+  assert.equal(result.point.z, 0);
+  assert.equal(result.time, 0);
+});
+
+test('predictInterceptPoint: very close target returns current pos', () => {
+  const result = predictInterceptPoint(
+    { x: 0, z: 0 }, { x: 50, z: 0 },
+    { x: 0.5, z: 0 }, { x: 0, z: 0 },
+    2.0,
+  );
+  assert.equal(result.point.x, 0.5);
+  assert.equal(result.time, 0);
+});
+
+test('predictInterceptPoint: respects maxLookaheadS cap', () => {
+  // Target is at (1000, 0), ship at (0, 0) moving 1 u/s. Time to target ≈ 1000s.
+  // maxLookaheadS=2.0 caps the prediction.
+  const result = predictInterceptPoint(
+    { x: 0, z: 0 }, { x: 1, z: 0 },
+    { x: 1000, z: 0 }, { x: 0, z: 0 },
+    2.0,
+  );
+  assert.equal(result.time, 2.0);
+  assert.equal(result.point.x, 1000);
+});
+
+// ==========================================================================
+// v0.37.0 — FindCollisionThreat
+// ==========================================================================
+
+test('findCollisionThreat: head-on collision detected', () => {
+  // Ship at (0,0) moving +X at 50 u/s. Asteroid at (100, 0) moving -X at 5 u/s.
+  // Relative velocity = 55 u/s. tStar = -((100*0)*-55)/(55²) = 100/55 ≈ 1.82s.
+  const asteroids = [mockAsteroid(100, 0, { x: -5, z: 0 })];
+  const result = findCollisionThreat(
+    { x: 0, z: 0 }, { x: 50, z: 0 },
+    asteroids, 3.0,
+  );
+  assert.notEqual(result, null, 'head-on should be detected');
+  assert.ok(result.tStar > 1.5, 'closest approach ~1.82s in future');
+  assert.ok(result.tStar < 2.5, 'closest approach ~1.82s');
+  // v0.37.1: effectiveMargin = SHIP_RADIUS (1.4) + astRadius (3) + PREDICTIVE_EVADE_BUFFER (3.0) = 7.4
+  assert.ok(result.closestDist < 7.4, 'should be within collision margin');
+});
+
+test('findCollisionThreat: clear miss returns null', () => {
+  // Ship at (0,0) moving +X at 50 u/s. Asteroid at (100, 50) stationary.
+  // Closest approach will be 50 units away → not within radius-aware margin.
+  const asteroids = [mockAsteroid(100, 50)];
+  const result = findCollisionThreat(
+    { x: 0, z: 0 }, { x: 50, z: 0 },
+    asteroids, 3.0,
+  );
+  assert.equal(result, null, 'miss by 50u should not be a threat');
+});
+
+test('findCollisionThreat: stationary ship returns null', () => {
+  const asteroids = [mockAsteroid(10, 0)];
+  const result = findCollisionThreat(
+    { x: 0, z: 0 }, { x: 0, z: 0 },
+    asteroids, 3.0,
+  );
+  assert.equal(result, null, 'stationary ship cannot predict');
+});
+
+test('findCollisionThreat: receding asteroid (tStar<0) returns null', () => {
+  const asteroids = [mockAsteroid(50, 0, { x: 60, z: 0 })];
+  const result = findCollisionThreat(
+    { x: 0, z: 0 }, { x: 50, z: 0 },
+    asteroids, 3.0,
+  );
+  assert.equal(result, null, 'receding asteroid should not be a threat');
+});
+
+test('findCollisionThreat: picks closest threat among multiple', () => {
+  const asteroids = [
+    mockAsteroid(100, 0, { x: -5, z: 0 }),
+    mockAsteroid(60, 1),
+  ];
+  const result = findCollisionThreat(
+    { x: 0, z: 0 }, { x: 50, z: 0 },
+    asteroids, 3.0,
+  );
+  assert.notEqual(result, null);
+  assert.ok(result.closestDist < 7.4, 'should detect threat');
+});
+
+test('findCollisionThreat: asteroid beyond lookahead horizon returns null', () => {
+  const asteroids = [mockAsteroid(500, 0)];
+  const result = findCollisionThreat(
+    { x: 0, z: 0 }, { x: 50, z: 0 },
+    asteroids, 3.0,
+  );
+  assert.equal(result, null, 'beyond lookahead horizon');
+});
+
+// ==========================================================================
+// v0.37.0 — aiBrainTick: Predictive Evade
+// ==========================================================================
+
+test('aiBrainTick: predictive evade fires when trajectory intersects asteroid', () => {
+  // Ship at (0,0) facing +X, moving +X at 50 u/s. Asteroid at (100, 0) ahead.
+  // Head-on course → predictive evade should fire BEFORE emergency EVADE.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 50, z: 0 },
+    asteroids: [mockAsteroid(100, 0)],
+    time: 0,
+    evadeDist: 5, // wide evade means >5 triggers emergency EVADE
+    predictiveEvadeLookahead: 3.0,
+  });
+  // v0.37.1: effective margin = 1.4 (ship) + 3 (ast radius) + 3.0 (buffer) = 7.4.
+  // closestDist ≈ 0 (head-on) < 7.4 → detected.
+  // Predictive evade should fire (asteroid at 100u, 50 u/s → tStar=2s, within 3s)
+  assert.equal(result.mode, 'evade', 'predictive evade should fire');
+  assert.equal(result.thrust, true, 'evade always thrusts');
+  assert.equal(result.fire, false, 'no fire during evade');
+});
+
+test('aiBrainTick: predictive evade skips when ship is stationary', () => {
+  // Ship stationary at (0,0). Asteroid at (10, 0) → emergency EVADE at <8u.
+  // Ship at (0,0) stationary. Asteroid at (100, 0). speed=0 → skip predictive.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(100, 0)],
+    time: 0,
+    predictiveEvadeLookahead: 3.0,
+  });
+  // Stationary → no predictive evade → should engage target
+  assert.equal(result.mode, 'asteroid', 'stationary ship should engage, not evade');
+});
+
+test('aiBrainTick: predictive evade disabled when lookahead=0', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 50, z: 0 },
+    asteroids: [mockAsteroid(100, 0)],
+    time: 0,
+    predictiveEvadeLookahead: 0,
+  });
+  // predictive disabled → should engage asteroid
+  assert.equal(result.mode, 'asteroid', 'disabled predictive evade → engage normally');
+});
+
+// ==========================================================================
+// v0.37.0 — aiBrainTick: Lead Fire
+// ==========================================================================
+
+test('aiBrainTick: lead fire predicts ahead for fast-moving asteroid', () => {
+  // Ship at (0,0) facing +X. Asteroid at (40, 0) moving +X at 20 u/s.
+  // Without lead: aim at (40,0) → bullet arrives in 40/400 = 0.1s → asteroid
+  // moves to (42, 0). With lead: aim at (42, 0). Both should be in cone.
+  // This test just verifies lead fire doesn't break normal firing.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2, // facing +X
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(40, 0, { x: 20, z: 0 })],
+    time: 0,
+    bulletSpeed: 400,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.fire, true,
+    'lead fire: moving asteroid at 40u in cone → fire=true');
+});
+
+test('aiBrainTick: lead fire with fast-moving asteroid that would be missed without lead', () => {
+  // Ship at (0,0) facing +X. Asteroid at (40, 10) moving +X at 50 u/s.
+  // Without lead: aim at (40, 10), 0.25 rad off-axis. fireHeadingGate=0.30 → adaptive cone
+  // at 40u ≈ max(0.14, 0.30*(1-40/90)) = max(0.14, 0.167) = 0.167.
+  // 0.25 > 0.167 → without lead: would NOT fire.
+  // With lead: bullet flight time = 50/400 = 0.125s. Predicted pos = (46.25, 10).
+  // New angle = atan2(10, 46.25) ≈ 0.213 rad. 0.213 > 0.167 → still out.
+  // Let me make a case where lead actually helps:
+  // Asteroid at (40, 5) moving +X at 100 u/s.
+  // Without lead: angle = atan2(5, 40) ≈ 0.124 rad. 0.124 < 0.167 → fires. Too easy.
+  //
+  // Better test: asteroid moving perpendicular to line of sight.
+  // Ship at (0,0) facing +X. Asteroid at (40, 0) moving +Z at 50 u/s.
+  // Without lead: aim at (40, 0). Bullet flight = 0.1s. In 0.1s asteroid moves to (40, 5).
+  // Predicted angle = atan2(5, 40) = 0.124 rad. Adaptive cone at 40u ≈ 0.167.
+  // 0.124 < 0.167 → fires with lead.
+  // Without lead: angle = atan2(0, 40) = 0 < 0.167 → fires too.
+  // Hmm, both fire. Let me try asteroid at edge of cone where lead makes the difference.
+  //
+  // Asteroid at (40, 7.5) moving -Z at 100 u/s.
+  // Without lead: angle = atan2(7.5, 40) = 0.185 rad > 0.167 → NO fire.
+  // With lead: flight time = sqrt(40²+7.5²)/400 ≈ 40.7/400 = 0.102s.
+  // Predicted pos = (40, 7.5 - 100*0.102) = (40, -2.7).
+  // angle = atan2(-2.7, 40) = -0.067 rad → |diff| = 0.067 < 0.167 → fires!
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2, // facing +X
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(40, 7.5, { x: 0, z: -100 })],
+    time: 0,
+    bulletSpeed: 400,
+  });
+  assert.equal(result.fire, true,
+    'lead fire: predicted position brings moving asteroid into cone');
+});
+
+test('aiBrainTick: lead fire disabled when bulletSpeed=0', () => {
+  // Same setup as above but bulletSpeed=0 → no lead, use current position.
+  // Current position (40, 7.5) → angle = 0.185 > 0.167 → no fire.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(40, 7.5, { x: 0, z: -100 })],
+    time: 0,
+    bulletSpeed: 0,
+  });
+  assert.equal(result.fire, false,
+    'bulletSpeed=0 disables lead → no fire (uses current pos)');
+});
+
+test('aiBrainTick: lead fire works for far asteroid with large drift', () => {
+  // Asteroid at (55, 0) moving +X at 20 u/s within fireMaxDist=60.
+  // Distance = 55u, flight time = 55/400 = 0.1375s.
+  // Predicted pos = (55 + 20*0.1375, 0) = (57.75, 0) — still in cone.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(55, 0, { x: 20, z: 0 })],
+    time: 0,
+    bulletSpeed: 400,
+    fireMaxDist: 60,
+  });
+  assert.equal(result.fire, true,
+    'lead fire: far asteroid with drift should still fire');
+});
+
+// ==========================================================================
+// v0.37.0 — aiBrainTick: intercept prediction in engage
+// ==========================================================================
+
+test('aiBrainTick: engage uses intercept prediction for moving asteroid', () => {
+  // Ship at (0,0) facing +X, moving +X at 50 u/s.
+  // engageTarget passes targetVel → predictInterceptPoint aims ahead.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 50, z: 0 },
+    asteroids: [mockAsteroid(60, 0, { x: 5, z: 0 })],
+    time: 0,
+    interceptLookaheadS: 2.0,
+    predictiveEvadeLookahead: 0, // disable predictive evade for this test
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.thrust, true, 'intercept: should thrust when aligned');
+});
+
+test('aiBrainTick: intercept prediction with stationary target has same behavior', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 50, z: 0 },
+    asteroids: [mockAsteroid(60, 0)],
+    time: 0,
+    interceptLookaheadS: 2.0,
+    predictiveEvadeLookahead: 0, // disable predictive evade
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.thrust, true, 'stationary target → same behavior');
+});
+
+// ==========================================================================
+// v0.37.0 — factory wiring: predictive params threaded
+// ==========================================================================
+
+test('createDemoAi: threads predictive params into brain args', () => {
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(40, 0)];
+  const mock = mockShipFactory();
+  let seenArgs = null;
+  const mockBrain = {
+    tick: (args) => {
+      seenArgs = args;
+      return { yaw: 0, thrust: false, mode: 'asteroid', fire: false, braking: false };
+    },
+  };
+  createDemoAi({
+    scene,
+    asteroids,
+    options: {
+      shipFactory: mock.build,
+      brain: mockBrain,
+      predictiveEvadeLookahead: 2.0,
+      interceptLookaheadS: 3.0,
+      bulletSpeed: 500,
+    },
+  }).update(0.1);
+
+  assert.equal(seenArgs.predictiveEvadeLookahead, 2.0);
+  assert.equal(seenArgs.interceptLookaheadS, 3.0);
+  assert.equal(seenArgs.bulletSpeed, 500);
+});
+
+test('createDemoAi: bulletSpeed defaults to 400 via DEFAULTS', () => {
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(40, 0)];
+  const mock = mockShipFactory();
+  let seenArgs = null;
+  const mockBrain = {
+    tick: (args) => {
+      seenArgs = args;
+      return { yaw: 0, thrust: false, mode: 'asteroid', fire: false, braking: false };
+    },
+  };
+  createDemoAi({
+    scene,
+    asteroids,
+    options: { shipFactory: mock.build, brain: mockBrain },
+  }).update(0.1);
+
+  assert.equal(seenArgs.bulletSpeed, 400, 'default bulletSpeed should be 400');
+});
+
+test('createDemoAi: intercept prediction enabled by default (interceptLookaheadS>0)', () => {
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(40, 0)];
+  const mock = mockShipFactory();
+  let seenArgs = null;
+  const mockBrain = {
+    tick: (args) => {
+      seenArgs = args;
+      return { yaw: 0, thrust: false, mode: 'asteroid', fire: false, braking: false };
+    },
+  };
+  createDemoAi({
+    scene,
+    asteroids,
+    options: { shipFactory: mock.build, brain: mockBrain },
+  }).update(0.1);
+
+  assert.equal(seenArgs.interceptLookaheadS, 2.0, 'default interceptLookaheadS should be 2.0');
+});
+
+test('createDemoAi: predictive evade enabled by default (predictiveEvadeLookahead>0)', () => {
+  const scene = mockScene();
+  const asteroids = [mockAsteroid(40, 0)];
+  const mock = mockShipFactory();
+  let seenArgs = null;
+  const mockBrain = {
+    tick: (args) => {
+      seenArgs = args;
+      return { yaw: 0, thrust: false, mode: 'asteroid', fire: false, braking: false };
+    },
+  };
+  createDemoAi({
+    scene,
+    asteroids,
+    options: { shipFactory: mock.build, brain: mockBrain },
+  }).update(0.1);
+
+  assert.equal(seenArgs.predictiveEvadeLookahead, 3.0, 'default predictiveEvadeLookahead should be 3.0');
 });

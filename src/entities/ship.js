@@ -283,6 +283,14 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
   }
 
   /**
+   * Read the score multiplier (1.0 baseline; 2.0 if credits buff is active).
+   * @returns {number}
+   */
+  function getScoreMultiplier() {
+    return state.buffs.has('credits') ? 2.0 : 1.0;
+  }
+
+  /**
    * Advance physics. `dt` in seconds.
    * @param {number} dt
    */
@@ -497,6 +505,7 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
     isDead,
     getDamageMultiplier,
     getThrustMultiplier,
+    getScoreMultiplier,
   };
 }
 
