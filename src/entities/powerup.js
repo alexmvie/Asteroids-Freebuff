@@ -312,6 +312,8 @@ export function createPowerUp({ scene, spec } = {}) {
   // ---- Per-frame state -----------------------------------------------
   let age = 0;
   let rotation = 0;
+  let _pushVx = 0;
+  let _pushVz = 0;
   // Bob phase offset so two power-ups spawned at the same moment don't
   // bob in lockstep. `spec.spawnTime` is optional; default 0.
   const phase = ((spec.spawnTime ?? 0) * BOB_FREQUENCY * Math.PI * 2) % (Math.PI * 2);
@@ -321,6 +323,18 @@ export function createPowerUp({ scene, spec } = {}) {
    * Advance the spin + bob animation. `dt` in seconds.
    * @param {number} dt
    */
+  /**
+   * Push the power-up away from a point (e.g. an asteroid collision).
+   * The push velocity decays exponentially each frame so the power-up
+   * drifts to a stop after a second or two.
+   * @param {number} vx
+   * @param {number} vz
+   */
+  function pushAway(vx, vz) {
+    _pushVx += vx;
+    _pushVz += vz;
+  }
+
   function update(dt) {
     if (dt <= 0) return;
     age += dt;
@@ -328,6 +342,14 @@ export function createPowerUp({ scene, spec } = {}) {
     group.rotation.y = rotation;
     const bob = Math.sin(age * Math.PI * 2 * BOB_FREQUENCY + phase) * BOB_AMPLITUDE;
     group.position.y = baseY + bob;
+    // Apply push velocity with exponential decay (asteroid collisions).
+    if (_pushVx !== 0 || _pushVz !== 0) {
+      group.position.x += _pushVx * dt;
+      group.position.z += _pushVz * dt;
+      const drag = Math.exp(-3.0 * dt);
+      _pushVx *= drag;
+      _pushVz *= drag;
+    }
   }
 
   /** True if the power-up has been in the world for >= its lifetime. */
@@ -353,6 +375,8 @@ export function createPowerUp({ scene, spec } = {}) {
     /** @returns {{x:number,y:number,z:number}} live world position (mutated) */
     getPosition() { return group.position; },
     isExpired,
+    /** Push the power-up away (e.g. from an asteroid collision). */
+    pushAway,
   };
 }
 

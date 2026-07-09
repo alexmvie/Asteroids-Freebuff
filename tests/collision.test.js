@@ -19,6 +19,10 @@ import {
   SCORE_BY_SIZE,
   BULLET_RADIUS,
   SHIP_RADIUS,
+  findAsteroidPairs,
+  resolveAsteroidCollision,
+  findAsteroidPowerupIndex,
+  resolveAsteroidPowerupCollision,
 } from '../src/systems/collision.js';
 
 // ---- Helpers ------------------------------------------------------------
@@ -29,11 +33,16 @@ import {
  * @param {number} y
  * @param {number} z
  * @param {number} r
+ * @param {{x:number,z:number}} [vel]
  */
-function fakeAsteroid(x, y, z, r) {
+function fakeAsteroid(x, y, z, r, vel) {
+  const v = vel || { x: 0, z: 0 };
+  const pos = { x, y, z };
   return {
-    getPosition: () => ({ x, y, z }),
+    getPosition: () => pos,
     getRadius: () => r,
+    getVelocity: () => ({ x: v.x, z: v.z }),
+    setVelocity(vx, vz) { v.x = vx; v.z = vz; },
   };
 }
 
@@ -45,6 +54,26 @@ function fakeAsteroid(x, y, z, r) {
  */
 function fakeBullet(x, y, z) {
   return { position: { x, y, z } };
+}
+
+/**
+ * Build a fake powerup with the duck-typed API for collision + push.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} z
+ * @param {number} r
+ */
+function fakePowerup(x, y, z, r) {
+  const pos = { x, y, z };
+  let _pushVx = 0;
+  let _pushVz = 0;
+  return {
+    getPosition: () => pos,
+    getRadius: () => r,
+    getPushVx: () => _pushVx,
+    getPushVz: () => _pushVz,
+    pushAway(vx, vz) { _pushVx += vx; _pushVz += vz; },
+  };
 }
 
 /**
@@ -279,9 +308,191 @@ test('scoreForSize: returns 0 for unknown sizes', () => {
   assert.equal(scoreForSize(undefined), 0);
 });
 
+// ---- findAsteroidPairs -------------------------------------------------
+
+test('findAsteroidPairs: empty list → []', () => {
+  assert.deepEqual(findAsteroidPairs([]), []);
+});
+
+test('findAsteroidPairs: single asteroid → []', () => {
+  assert.deepEqual(findAsteroidPairs([fakeAsteroid(0, 0, 0, 5)]), []);
+});
+
+test('findAsteroidPairs: two overlapping asteroids → one pair', () => {
+  const asteroids = [
+    fakeAsteroid(0, 0, 0, 5),
+    fakeAsteroid(3, 0, 0, 5), // centers 3 apart, radii 5+5=10 → overlap
+  ];
+  const pairs = findAsteroidPairs(asteroids);
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].i, 0);
+  assert.equal(pairs[0].j, 1);
+});
+
+test('findAsteroidPairs: two far apart → []', () => {
+  const asteroids = [
+    fakeAsteroid(0, 0, 0, 5),
+    fakeAsteroid(100, 0, 0, 5),
+  ];
+  assert.deepEqual(findAsteroidPairs(asteroids), []);
+});
+
+test('findAsteroidPairs: three overlapping all pairs', () => {
+  // All three at origin with r=10 → all overlap each other → 3 pairs
+  const asteroids = [
+    fakeAsteroid(0, 0, 0, 10),
+    fakeAsteroid(0, 0, 0, 10),
+    fakeAsteroid(0, 0, 0, 10),
+  ];
+  const pairs = findAsteroidPairs(asteroids);
+  assert.equal(pairs.length, 3);
+  // Each pair i<j
+  for (const { i, j } of pairs) {
+    assert.ok(i < j);
+  }
+});
+
+test('findAsteroidPairs: null/undefined → []', () => {
+  assert.deepEqual(findAsteroidPairs(null), []);
+  assert.deepEqual(findAsteroidPairs(undefined), []);
+});
+
+// ---- resolveAsteroidCollision -------------------------------------------
+
+test('resolveAsteroidCollision: separates overlapping asteroids', () => {
+  const a = fakeAsteroid(0, 0, 0, 5, { x: 0, z: 0 });
+  const b = fakeAsteroid(2, 0, 0, 5, { x: 0, z: 0 }); // overlap by 8 units
+  resolveAsteroidCollision(a, b);
+  const ap = a.getPosition();
+  const bp = b.getPosition();
+  const dist = Math.hypot(bp.x - ap.x, bp.z - ap.z);
+  assert.ok(dist >= 9.99); // minDist = 10, pushed apart
+});
+
+test('resolveAsteroidCollision: equal masses push apart equally', () => {
+  const a = fakeAsteroid(0, 0, 0, 5, { x: 0, z: 0 });
+  const b = fakeAsteroid(2, 0, 0, 5, { x: 0, z: 0 });
+  resolveAsteroidCollision(a, b);
+  const ap = a.getPosition();
+  const bp = b.getPosition();
+  // Equal masses: both move equally. Center stayed at 1.
+  const centerX = (ap.x + bp.x) / 2;
+  assert.ok(Math.abs(centerX - 1) < 0.01, 'center of mass preserved');
+});
+
+test('resolveAsteroidCollision: transfers momentum (equal mass, A moving toward B)', () => {
+  const a = fakeAsteroid(0, 0, 0, 5, { x: 10, z: 0 }); // moving right
+  const b = fakeAsteroid(8, 0, 0, 5, { x: 0, z: 0 });  // stationary
+  resolveAsteroidCollision(a, b);
+  const av = a.getVelocity();
+  const bv = b.getVelocity();
+  // A lost some speed to B (both now moving right, but B got a kick)
+  assert.ok(av.x < 10, 'A lost speed');
+  assert.ok(bv.x > 0, 'B gained speed');
+});
+
+test('resolveAsteroidCollision: larger mass barely moves', () => {
+  const big = fakeAsteroid(0, 0, 0, 10, { x: 0, z: 0 }); // r=10, mass=1000
+  const small = fakeAsteroid(3, 0, 0, 1, { x: 5, z: 0 }); // r=1, mass=1
+  const bigPosBefore = { ...big.getPosition() };
+  resolveAsteroidCollision(big, small);
+  const bigPos = big.getPosition();
+  // Big asteroid barely moved
+  assert.ok(Math.abs(bigPos.x - bigPosBefore.x) < 1, 'big barely moved');
+});
+
+test('resolveAsteroidCollision: non-overlapping does nothing', () => {
+  const a = fakeAsteroid(0, 0, 0, 5, { x: 10, z: 0 });
+  const b = fakeAsteroid(30, 0, 0, 5, { x: 0, z: 0 });
+  const aVelBefore = { ...a.getVelocity() };
+  const aPosBefore = { ...a.getPosition() };
+  resolveAsteroidCollision(a, b);
+  assert.equal(a.getVelocity().x, aVelBefore.x);
+  assert.equal(a.getPosition().x, aPosBefore.x);
+});
+
+test('resolveAsteroidCollision: already separating does nothing', () => {
+  const a = fakeAsteroid(0, 0, 0, 5, { x: -5, z: 0 }); // moving left
+  const b = fakeAsteroid(2, 0, 0, 5, { x: 5, z: 0 });  // moving right (away from A)
+  const avBefore = a.getVelocity().x;
+  const bvBefore = b.getVelocity().x;
+  resolveAsteroidCollision(a, b);
+  // Relative velocity along normal (B→A direction) is positive → already separating
+  assert.equal(a.getVelocity().x, avBefore);
+  assert.equal(b.getVelocity().x, bvBefore);
+});
+
+// ---- findAsteroidPowerupIndex -------------------------------------------
+
+test('findAsteroidPowerupIndex: no asteroids → -1', () => {
+  const pu = fakePowerup(0, 0, 0, 1.5);
+  assert.equal(findAsteroidPowerupIndex({ asteroids: [], powerup: pu }), -1);
+});
+
+test('findAsteroidPowerupIndex: no powerup → -1', () => {
+  const asteroids = [fakeAsteroid(0, 0, 0, 5)];
+  assert.equal(findAsteroidPowerupIndex({ asteroids }), -1);
+});
+
+test('findAsteroidPowerupIndex: overlapping → returns index', () => {
+  const asteroids = [
+    fakeAsteroid(100, 0, 0, 5),
+    fakeAsteroid(0, 0, 0, 5), // this one overlaps the powerup at (2,0,0)
+  ];
+  const pu = fakePowerup(2, 0, 0, 1.5); // asteroid r=5, powerup r=1.5, sum=6.5
+  // centers 2 apart, 2 < 6.5 → overlap
+  assert.equal(findAsteroidPowerupIndex({ asteroids, powerup: pu }), 1);
+});
+
+test('findAsteroidPowerupIndex: not overlapping → -1', () => {
+  const asteroids = [fakeAsteroid(0, 0, 0, 5)];
+  const pu = fakePowerup(100, 0, 0, 1.5);
+  assert.equal(findAsteroidPowerupIndex({ asteroids, powerup: pu }), -1);
+});
+
+// ---- resolveAsteroidPowerupCollision -------------------------------------
+
+test('resolveAsteroidPowerupCollision: pushes powerup out and kicks away', () => {
+  const ast = fakeAsteroid(0, 0, 0, 5);
+  const pu = fakePowerup(2, 0, 0, 1.5); // overlapping (2 < 6.5)
+  const originalPuX = pu.getPosition().x;
+  resolveAsteroidPowerupCollision(ast, pu);
+  // Powerup pushed out (further from origin)
+  assert.ok(pu.getPosition().x > originalPuX, 'powerup pushed away');
+  // Distance between centers >= minDist
+  const dist = Math.hypot(
+    pu.getPosition().x - ast.getPosition().x,
+    pu.getPosition().z - ast.getPosition().z,
+  );
+  assert.ok(dist >= 6.5 - 0.01, 'powerup outside asteroid radius');
+  // Push velocity set (positive X = away from asteroid)
+  assert.ok(pu.getPushVx() > 0, 'kick velocity in X');
+});
+
+test('resolveAsteroidPowerupCollision: not overlapping does nothing', () => {
+  const ast = fakeAsteroid(0, 0, 0, 5);
+  const pu = fakePowerup(100, 0, 0, 1.5);
+  const puX = pu.getPosition().x;
+  resolveAsteroidPowerupCollision(ast, pu);
+  assert.equal(pu.getPosition().x, puX);
+  assert.equal(pu.getPushVx(), 0);
+});
+
+test('resolveAsteroidPowerupCollision: null/undefined is no-op', () => {
+  // Should not throw
+  resolveAsteroidPowerupCollision(null, null);
+  resolveAsteroidPowerupCollision(undefined, undefined);
+  resolveAsteroidPowerupCollision(fakeAsteroid(0, 0, 0, 5), null);
+  resolveAsteroidPowerupCollision(null, fakePowerup(0, 0, 0, 1.5));
+});
+
 // ---- Constants sanity ---------------------------------------------------
 
 test('BULLET_RADIUS and SHIP_RADIUS are positive scalars', () => {
   assert.ok(typeof BULLET_RADIUS === 'number' && BULLET_RADIUS > 0);
   assert.ok(typeof SHIP_RADIUS === 'number' && SHIP_RADIUS > 0);
+});
+
+test('SHIP_RADIUS is 2.0 (v0.40.x increase from 1.4)', () => {
+  assert.equal(SHIP_RADIUS, 2.0);
 });

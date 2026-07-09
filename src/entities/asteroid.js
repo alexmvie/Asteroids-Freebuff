@@ -667,5 +667,18 @@ export function createAsteroidFromSpec({ spec, scene, uvDebugOverlay }) {
      *   because asteroids stay on the play plane).
      */
     getVelocity() { return { x: spec.velocity.x, z: spec.velocity.z }; },
+    /**
+     * v0.40.x — Set asteroid velocity. Mutates the spec's velocity
+     * in place so the next `update(dt)` call reads the new value.
+     * Used by the asteroid-asteroid collision resolution to make
+     * asteroids bounce off each other.
+     *
+     * @param {number} vx
+     * @param {number} vz
+     */
+    setVelocity(vx, vz) {
+      spec.velocity.x = vx;
+      spec.velocity.z = vz;
+    },
   };
 }

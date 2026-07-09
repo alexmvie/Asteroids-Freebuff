@@ -18,6 +18,10 @@ import {
   findBulletHits,
   findShipHit,
   scoreForSize,
+  findAsteroidPairs,
+  resolveAsteroidCollision,
+  findAsteroidPowerupIndex,
+  resolveAsteroidPowerupCollision,
 } from './systems/collision.js';
 import { createEventBus } from './systems/events.js';
 import { createStateMachine, State } from './systems/state.js';
@@ -560,6 +564,30 @@ function processCollisions() {
 
   // Cache the entity array reference — used many times below.
   const asteroids = field.getEntities();
+
+  // ---- Asteroid ↔ asteroid (push apart + elastic bounce) ------------
+  // O(n²) but cheap for ~300 asteroids (~45K checks, <0.1ms). Runs in
+  // EVERY non-GAME_OVER state so the AI's demo field looks dynamic.
+  // Resolved BEFORE bullet/laser checks so the new positions are
+  // settled before the destruction pass.
+  {
+    const pairs = findAsteroidPairs(asteroids);
+    for (const { i, j } of pairs) {
+      resolveAsteroidCollision(asteroids[i], asteroids[j]);
+    }
+  }
+
+  // ---- Asteroid ↔ powerup (push powerup out of overlapping asteroid) --
+  // Keeps the pending power-up from being buried inside an asteroid.
+  {
+    const pending = powerupSystem.getPendingSpawn();
+    if (pending) {
+      const pidx = findAsteroidPowerupIndex({ asteroids, powerup: pending });
+      if (pidx >= 0) {
+        resolveAsteroidPowerupCollision(asteroids[pidx], pending);
+      }
+    }
+  }
 
   // ---- Bullet ↔ asteroid (state-scoped to the correct pool) ----------
   // DEMO:   only the AI shoots (its bullets go to aiBullets).
