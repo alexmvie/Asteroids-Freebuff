@@ -226,9 +226,9 @@ test('aiBrainTick: powerup target suppresses stray fire while collecting a picku
   assert.equal(result.fire, false);
 });
 
-test('aiBrainTick: 0.20 rad off → outside tight thrustGate=0.10 → thrust OFF while turning', () => {
-  // Ship 0.20 rad off target — outside thrustGate=0.10.
-  // Stop-turn-thrust: turn first, thrust only when aligned.
+test('aiBrainTick: 0.20 rad off → outside tightened thrustGate=0.15 → thrust OFF while turning', () => {
+  // Ship 0.20 rad off target — outside thrustGate=0.15 (v0.38.2: reduced from 0.25).
+  // Pure stop-turn-thrust: ship turns without accelerating until nearly aligned.
   const targetX = Math.sin(0.20) * 40;
   const targetZ = -Math.cos(0.20) * 40;
   const result = aiBrainTick({
@@ -240,11 +240,11 @@ test('aiBrainTick: 0.20 rad off → outside tight thrustGate=0.10 → thrust OFF
   assert.equal(result.mode, 'asteroid');
   assert.notEqual(result.yaw, 0, 'still turning toward target');
   assert.equal(result.thrust, false,
-    '0.20 > thrustGate=0.10 → thrust OFF while turning');
+    '0.20 > thrustGate=0.15 → thrust OFF while turning (stop-turn-thrust)');
 });
 
-test('aiBrainTick: 0.05 rad off → within tight thrustGate=0.10 → thrust ON', () => {
-  // Ship 0.05 rad off target — within thrustGate=0.10, aligned enough.
+test('aiBrainTick: 0.05 rad off → within tightened thrustGate=0.15 → thrust ON', () => {
+  // Ship 0.05 rad off target — well within thrustGate=0.15 (v0.38.2).
   const targetX = Math.sin(0.05) * 40;
   const targetZ = -Math.cos(0.05) * 40;
   const result = aiBrainTick({
@@ -256,7 +256,7 @@ test('aiBrainTick: 0.05 rad off → within tight thrustGate=0.10 → thrust ON',
   assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0, 'within YAW_DEADBAND=0.08 → no yaw');
   assert.equal(result.thrust, true,
-    '0.05 < thrustGate=0.10 → thrust ON when nearly aligned');
+    '0.05 < thrustGate=0.15 → thrust ON when nearly aligned');
 });
 
 test('aiBrainTick: thrust ON when aligned (simple controller)', () => {
@@ -347,8 +347,7 @@ test('aiBrainTick: powerup with low closing speed within coastDist still thrusts
 });
 
 test('aiBrainTick: high speed + close target → active brake (flip and thrust backward)', () => {
-  // v0.34.3 active brake: ship at 150 u/s closing speed toward target
-  // at 10u. dist=10 < BRAKE_DIST=40 && closingSpeed=150 > 25 → brake.
+  // v0.38.0: BRAKE_DIST=30. dist=10 < BRAKE_DIST=30 && closingSpeed=150 > 25 → brake.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -394,7 +393,7 @@ test('aiBrainTick: receding velocity within coastDist → still thrusts', () => 
 });
 
 test('aiBrainTick: brake does NOT fire when closingSpeed below entry threshold', () => {
-  // dist=20 < BRAKE_DIST=40, but closingSpeed=10 < 20 → no brake, normal coast
+  // dist=20 < BRAKE_DIST=30, but closingSpeed=10 < 20 → no brake, normal coast
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -410,8 +409,8 @@ test('aiBrainTick: brake does NOT fire when closingSpeed below entry threshold',
 });
 
 test('aiBrainTick: brake does NOT fire when beyond BRAKE_DIST', () => {
-  // dist=35 < BRAKE_DIST=40, but closingSpeed=20 < 20 → no brake (strict >)
-  // dist=35 < coastDist=40, closingSpeed=20 > 5 → coast → no thrust
+  // dist=35 > BRAKE_DIST=30 → no brake (beyond threshold)
+  // dist=35 < coastDist=40, closingSpeed=20 > 5 → coast → no thrust (also beyond BRAKE_DIST=30)
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -789,7 +788,7 @@ test('engageTarget: 90° off → yaw=-1, thrust=false (outside thrustGate)', () 
   assert.equal(r.thrust, false, '1.57 rad > 0.10 thrustGate → thrust OFF');
 });
 
-test('engageTarget: 0.20 rad off → thrust OFF while turning (outside tight thrustGate=0.10)', () => {
+test('engageTarget: 0.20 rad off → thrust OFF while turning (outside tightened thrustGate=0.15)', () => {
   const angle = 0.20;
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 },
@@ -797,19 +796,19 @@ test('engageTarget: 0.20 rad off → thrust OFF while turning (outside tight thr
   );
   assert.equal(r.yaw, -1, 'still turning toward target');
   assert.equal(r.thrust, false,
-    '0.20 > thrustGate=0.10 → thrust OFF while turning');
+    'v0.38.2: 0.20 > thrustGate=0.15 → thrust OFF while turning (stop-turn-thrust)');
 });
 
 test('engageTarget: within deadband (0.07 rad) → yaw=0, thrust=true', () => {
   // YAW_DEADBAND=0.08. 0.07 < 0.08 → yaw=0.
-  // thrustGate=0.10. 0.07 < 0.10 → thrust=true.
+  // thrustGate=0.15. 0.07 < 0.15 → thrust=true.
   const angle = 0.07;
   const r = engageTarget(
     { x: 0, z: 0 }, -Math.PI / 2, { x: 0, z: 0 },
     { x: Math.cos(angle) * 60, z: Math.sin(angle) * 60 },
   );
   assert.equal(r.yaw, 0, '0.07 < YAW_DEADBAND=0.08 → yaw=0');
-  assert.equal(r.thrust, true, '0.07 < thrustGate=0.10 → thrust=true');
+  assert.equal(r.thrust, true, '0.07 < thrustGate=0.15 → thrust=true');
 });
 
 test('engageTarget: spin-brake fires counter-yaw at alignment with negative angVel', () => {
@@ -1541,13 +1540,15 @@ test('aiBrainTick: lead fire with fast-moving asteroid that would be missed with
 });
 
 test('aiBrainTick: lead fire disabled when bulletSpeed=0', () => {
-  // Same setup as above but bulletSpeed=0 → no lead, use current position.
-  // Current position (40, 7.5) → angle = 0.185 > 0.167 → no fire.
+  // bulletSpeed=0 → no lead, use current position.
+  // Asteroid at (40, 12): angle = atan2(12, 40) ≈ 0.292 rad.
+  // Adaptive cone at 40u with fireMaxDist=90: max(0.14, 0.30*(1-40/135)) = 0.211.
+  // 0.292 > 0.211 → outside cone → no fire.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
     aiVel: { x: 0, z: 0 },
-    asteroids: [mockAsteroid(40, 7.5, { x: 0, z: -100 })],
+    asteroids: [mockAsteroid(40, 12, { x: 0, z: -100 })],
     time: 0,
     bulletSpeed: 0,
   });
@@ -1695,5 +1696,5 @@ test('createDemoAi: predictive evade enabled by default (predictiveEvadeLookahea
     options: { shipFactory: mock.build, brain: mockBrain },
   }).update(0.1);
 
-  assert.equal(seenArgs.predictiveEvadeLookahead, 3.0, 'default predictiveEvadeLookahead should be 3.0');
+  assert.equal(seenArgs.predictiveEvadeLookahead, 0.8, 'default predictiveEvadeLookahead should be 0.8 (v0.38.1)');
 });

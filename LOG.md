@@ -7,34 +7,42 @@
 
 ---
 
-## Current State: v0.37.2 — Powerup Coast-In + Smarter Collection
+## Current State: v0.38.1 — Predictive Evade Tuning (Lookahead 0.8s + Buffer 1.5u)
 
-**Status:** ✅ 114 tests pass. Powerup collection is now smooth: the AI decelerates
-when approaching a powerup (coast-in), and collects nearby powerups even when an
-asteroid is also close.
+**Status:** ✅ 519 tests pass, build succeeds. Frame analysis showed 88% high-motion
+(84% in v0.38.0) — the problem shifted: wider thrustHeadingGate (0.10→0.25) makes
+the ship thrust more constantly, producing more motion regardless of evade behavior.
 
-### v0.37.2 Changes
+### v0.38.1 Changes
 
-**Three fixes for powerup collection:**
+**Two tuning adjustments based on 13.5s frame analysis (81 frames @ 6fps):**
 
-1. **`engageTarget` — `allowCoast` parameter** separated from `allowBrake`. Powerups now
-   coast (cut thrust when close + closing fast, decelerate via LINEAR_DRAG) without
-   the aggressive 180° flip brake. Asteroids unchanged (both brake + coast as before).
-   - `shouldCoast = allowCoast && dist < coastDist && closingSpeed > COAST_SPEED_THRESHOLD`
-   - `allowCoast` defaults to `allowBrake` for full backward compat
+1. **`predictiveEvadeLookahead`**: 1.5→0.8s. Reduces collision detection corridor
+   from 60-120u to ~40-64u at cruise speed. Combined with tighter buffer, eliminates
+   grazing-pass false positives.
 
-2. **`pickTarget` — `powerupIsClose`** increased from 18u to 25u. Powerups within 25u
-   are always collected regardless of asteroid proximity.
+2. **`PREDICTIVE_EVADE_BUFFER`**: 3.0→1.5u. Tightens the collision margin so that
+   only asteroids within 3.9u (small) to 8.9u (large) of the flight path trigger
+   predictive evade. Old values (5.4u-10.4u) were too conservative in dense field.
 
-3. **`pickTarget` — Smarter urgency check** (`|| pDist < best.dist`). Powerups now win
-   over an urgent asteroid (dist < 35u) when the powerup is CLOSER than the asteroid.
-   Example: powerup at 20u, asteroid at 30u → powerup wins (old: blocked).
-   Example: powerup at 30u, asteroid at 10u → asteroid wins (correct).
+### Key Finding from v0.38.0→v0.38.1
+
+**The high motion isn't caused by predictive evade** — it's caused by the wider
+`thrustHeadingGate: 0.25`. The ship now thrusts while slightly off-heading,
+maintaining higher average speed and producing more camera motion. 88% high-motion
+(up from 84%) confirms this: tighter evade parameters didn't reduce motion because
+thrust gate is the real driver.
+
+### Open Question
+
+Should `thrustHeadingGate` be reduced (0.15-0.18) to reduce constant-thrust behavior?
+A tighter gate means pure stop-turn-thrust: ship clears its turn, THEN accelerates.
+Less motion, but slower engagement. Tradeoff depends on user preference.
 
 ### Architecture
-- **5 levels (priority):** EVADE → PREDICTIVE EVADE → POWERUP → ASTEROID → IDLE
-- **Powerup approach:** coast-in (no brake), aligned thrust, smooth deceleration
-- **Powerup detection:** always collect < 25u, collect > 25u if closer than nearest asteroid
+- **5 levels (priority):** EVADE → PREDICTIVE EVADE (0.8s) → POWERUP → ASTEROID → IDLE
+- **Engagement:** ship thrusts while turning (0.25 rad gate), fires up to 90u
+- **Brake:** triggers at 30u with closingSpeed > 20, releases at speed < 10
 
 ---
 

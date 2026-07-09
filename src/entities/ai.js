@@ -10,7 +10,7 @@
  *      If a collision is projected, dodge early (before emergency EVADE).
  *   3. LEAD FIRE: predict asteroid position at bullet arrival time.
  *
- * Mode priority: EVADE (<8u) → PREDICTIVE EVADE (3s lookahead) →
+ * Mode priority: EVADE (<8u) → PREDICTIVE EVADE (0.8s lookahead) →
  *                ENGAGE (asteroid/powerup) → IDLE
  *
  * See LOG.md for the full performance protocol.
@@ -32,9 +32,14 @@ const SHIP_RADIUS = 1.4;
 /**
  * Predictive evade buffer (world units). Added to ship + asteroid radius
  * to compute the collision margin. Replaces the old fixed margin.
- * v0.37.1: 3.0u buffer beyond ship+asteroid combined radius.
+ * v0.38.1: 1.5u — reduced from 3.0u after frame analysis showed 84%
+ * high-motion frames. The 3.0u buffer was too conservative in the dense
+ * field (~300 asteroids in 440u bubble), triggering false-positive
+ * collision detection on grazing passes at 60-120u range. At 1.5u,
+ * a large asteroid (r=6) has margin 1.4+6+1.5=8.9u — still safe at
+ * 40-80 u/s combined closing speed, but eliminates most grazing passes.
  */
-const PREDICTIVE_EVADE_BUFFER = 3.0;
+const PREDICTIVE_EVADE_BUFFER = 1.5;
 
 /**
  * Emergency evade buffer (world units). Added to ship + asteroid radius
@@ -74,15 +79,23 @@ const DEFAULTS = Object.freeze({  /** Reset the AI ship if it drifts beyond this
    * Predictive evade look-ahead (seconds). The AI checks its current
    * flight path for collisions this far into the future. If a collision
    * is projected, it dodges perpendicular to its velocity vector.
-   * v0.37.0: 3.0s — early enough to avoid clusters, short enough to
-   * not over-dodge on curved approaches.
+   * v0.38.1: 0.8s — reduced from 1.5s after frame analysis showed 84%
+   * high-motion frames. 1.5s at 50-80 u/s scans 75-120u, still too wide
+   * in a 300-asteroid field. At 0.8s the corridor is ~40-64u, roughly
+   * 1/3 of the streaming bubble width. Combined with the tightened
+   * PREDICTIVE_EVADE_BUFFER (3.0→1.5), this eliminates most grazing-pass
+   * false positives while keeping real collision protection.
    */
-  predictiveEvadeLookahead: 3.0,
+  predictiveEvadeLookahead: 0.8,
 
   /**
    * Predictive evade margin is now computed per-asteroid as:
-   *   SHIP_RADIUS (1.4) + asteroid.getRadius() + PREDICTIVE_EVADE_BUFFER (3.0)
-   * This constant is no longer a tunable default — see findCollisionThreat.
+   *   SHIP_RADIUS (1.4) + asteroid.getRadius() + PREDICTIVE_EVADE_BUFFER (1.5)
+
+  /**
+   * Predictive evade margin is now computed per-asteroid as:
+ *   SHIP_RADIUS (1.4) + asteroid.getRadius() + PREDICTIVE_EVADE_BUFFER (1.5)
+ * This constant is no longer a tunable default — see findCollisionThreat.
    * Retained as a no-op alias for backward compat in external callers.
    */
   predictiveEvadeMargin: 0,
@@ -107,16 +120,25 @@ const DEFAULTS = Object.freeze({  /** Reset the AI ship if it drifts beyond this
   /**
    * Thrust heading gate (radians). Ship thrusts when |heading diff|
    * is within this angle AND the target is beyond coastDist.
-   * v0.36.0: 0.10 rad ≈ 5.7° — tight stop-turn-thrust.
+   * v0.38.2: 0.15 rad ≈ 8.6° — reduced from 0.25 rad (14°). Frame
+   * analysis showed the wider gate caused constant high-speed motion
+   * (88% high-motion frames). 0.15 enforces stop-turn-thrust behavior:
+   * the ship turns toward target without thrusting, then accelerates
+   * once nearly aligned. This keeps speed in check and prevents
+   * perpetual orbiting at high velocity.
    */
-  thrustHeadingGate: 0.10,
+  thrustHeadingGate: 0.15,
 
   /** Fire heading gate (radians). v0.35.0: 0.30 rad ≈ 17.2°. */
   fireHeadingGate: 0.30,
 
-  /** Fire distance range (world units). v0.35.0: reduced to 60u. */
+  /**
+   * Fire distance range (world units). v0.38.0: increased upper bound to 90u
+   * from 60u. 90u matches ~1/3 of the streaming bubble radius, letting the
+   * AI engage targets earlier instead of cruising silently toward them.
+   */
   fireMinDist: 0,
-  fireMaxDist: 60,
+  fireMaxDist: 90,
 
   /** Target stickiness hysteresis (world units). */
   hysteresisU: 8,
@@ -213,14 +235,14 @@ export function predictInterceptPoint(aiPos, aiVel, targetPos, targetVel, maxLoo
  * Returns the asteroid with the smallest projected miss distance, or
  * null if no asteroid is on a collision course within the horizon.
  *
- * v0.37.1: Uses asteroid radius + SHIP_RADIUS + buffer instead of fixed
- * margin. Small asteroids (r=1) get smaller margin (5.4u), large ones
- * (r=6) get larger margin (10.4u).
+ * v0.38.1: Uses asteroid radius + SHIP_RADIUS + PREDICTIVE_EVADE_BUFFER (1.5).
+ * Small asteroids (r=1) get smaller margin (3.9u), large ones
+ * (r=6) get larger margin (8.9u).
  *
  * @param {{x:number,z:number}} aiPos
  * @param {{x:number,z:number}} aiVel
  * @param {Array<{getPosition: () => any, getVelocity?: () => any, getRadius?: () => number}>} asteroids
- * @param {number} [lookaheadS=3.0]
+ * @param {number} [lookaheadS=0.8]
  * @returns {{ asteroid: any, tStar: number, closestDist: number } | null}
  */
 export function findCollisionThreat(aiPos, aiVel, asteroids, lookaheadS = DEFAULTS.predictiveEvadeLookahead) {
@@ -412,7 +434,7 @@ export function pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU, committ
  * @param {{x:number,z:number}} targetPos
  * @param {{x:number,z:number}} [targetVel] for intercept prediction
  * @param {number} [aiAngularVel=0]  for spin-brake prediction
- * @param {number} [thrustGate=0.10] heading gate for thrust
+ * @param {number} [thrustGate=0.15] heading gate for thrust
  * @param {number} [coastDist=40]    coast-in distance (center-to-center)
  * @param {boolean} [wasBraking=false] hysteresis: already braking
  * @param {boolean} [allowBrake=true] allow brake logic (flip 180° and thrust backward)
@@ -460,7 +482,7 @@ export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, t
   // Brake and coast use center-to-center distance (not surface distance),
   // because the ship flies toward the center point. The radius-aware
   // EVADE and findCollisionThreat handle collision avoidance separately.
-  const BRAKE_DIST = 40;
+  const BRAKE_DIST = 30;
   const BRAKE_ENTER_SPEED = 20;
   const BRAKE_EXIT_SPEED = 10;
   const shouldStartBrake = allowBrake && dist < BRAKE_DIST && closingSpeed > BRAKE_ENTER_SPEED;

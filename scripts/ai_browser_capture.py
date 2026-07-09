@@ -7,6 +7,8 @@ import sys
 import time
 from pathlib import Path
 
+import imageio
+import numpy as np
 from PIL import Image
 from playwright.sync_api import sync_playwright
 
@@ -74,13 +76,13 @@ def main():
                 time.sleep(1 / args.fps)
             browser.close()
 
-        # Create a simple GIF from the captured frames.
-        frames = [Image.open(p).convert('RGB') for p in shots]
-        out_gif = out_dir / 'browser-capture.gif'
-        frames[0].save(out_gif, save_all=True, append_images=frames[1:], duration=1000 // args.fps, loop=0)
+        # Export as MP4 (no GIF fallback).
+        frames_np = [np.array(Image.open(p).convert('RGB')) for p in shots]
+        out_video = out_dir / 'capture.mp4'
+        imageio.mimsave(out_video, frames_np, fps=args.fps)
         summary = {
             'captured': len(shots),
-            'gif': str(out_gif),
+            'video': str(out_video),
             'url': args.url,
         }
         (out_dir / 'summary.json').write_text(json.dumps(summary, indent=2))

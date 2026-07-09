@@ -21,51 +21,41 @@ def run(cmd, cwd=None):
 def capture_frames(out_dir: Path, seconds: int = 8, fps: int = 12):
     """Capture *seconds × fps* individual frames from the main display.
 
-    Uses ffmpeg (avfoundation on macOS) if available; falls back to
-    placeholder frames of uniform colour.
+    Uses ffmpeg (avfoundation on macOS). Raises SystemExit on failure —
+    no placeholder fallback, no silent degradation.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     n_frames = seconds * fps
 
     ffmpeg = shutil.which('ffmpeg')
-    if ffmpeg:
-        pattern = str(out_dir / 'frame_%03d.png')
-        # Use -t (wall-clock duration) + -vf fps= (filter) instead of -frames:v + -r.
-        # -frames:v + -r with a live avfoundation input can produce fewer frames
-        # than expected because the -r decimation interacts unpredictably with
-        # the real-time capture start-up.  -t gives a clean wall-clock window.
-        cmd = [
-            ffmpeg, '-y',
-            '-f', 'avfoundation',
-            '-i', '1:none',                # screen 1, no audio
-            '-t', str(seconds),
-            '-vf', f'fps={fps}',
-            pattern,
-        ]
-        proc = run(cmd)
-        if proc.returncode == 0:
-            frames = []
-            for i in range(n_frames):
-                p = out_dir / f'frame_{i:03d}.png'
-                if p.exists():
-                    frames.append(np.array(Image.open(p).convert('RGB')))
-                    p.unlink()
-            # Accept within 90% of target — live capture may drop 1-2 frames
-            # on avfoundation start-up.
-            if len(frames) >= n_frames * 0.9:
-                return frames
-            print(f'  ffmpeg: expected ~{n_frames} frames, got {len(frames)} — using placeholder fallback')
-        else:
-            print('  ffmpeg capture failed, using placeholder frames')
+    if not ffmpeg:
+        raise SystemExit('ffmpeg not found — install ffmpeg or check PATH')
 
-    # Fallback: solid-colour placeholders (no screen-capture available)
+    pattern = str(out_dir / 'frame_%03d.png')
+    cmd = [
+        ffmpeg, '-y',
+        '-f', 'avfoundation',
+        '-i', '1:none',                # screen 1, no audio
+        '-t', str(seconds),
+        '-vf', f'fps={fps}',
+        pattern,
+    ]
+    proc = run(cmd)
+    if proc.returncode != 0:
+        print(proc.stderr or proc.stdout)
+        raise SystemExit(f'ffmpeg exited with code {proc.returncode}')
+
     frames = []
-    img = np.zeros((180, 320, 3), dtype=np.uint8)
-    img[:] = (20, 20, 30)
-    # Draw a small cyan rectangle so placeholder frames are visually distinct
-    img[20:60, 20:120] = (80, 220, 255)
-    for _ in range(n_frames):
-        frames.append(img.copy())
+    for i in range(n_frames):
+        p = out_dir / f'frame_{i:03d}.png'
+        if p.exists():
+            frames.append(np.array(Image.open(p).convert('RGB')))
+            p.unlink()
+
+    # Accept within 90% of target — live capture may drop 1-2 frames
+    if len(frames) < n_frames * 0.9:
+        raise SystemExit(f'ffmpeg: expected ~{n_frames} frames, got {len(frames)} — aborting')
+
     return frames
 
 
@@ -104,18 +94,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     frames = capture_frames(out_dir, seconds=args.seconds, fps=args.fps)
     video_path = out_dir / 'capture.mp4'
-    try:
-        imageio.mimsave(video_path, frames, fps=args.fps)
-    except Exception as exc:
-        print('video export warning:', exc)
-        video_path = out_dir / 'capture.gif'
-        try:
-            imageio.mimsave(video_path, frames, fps=args.fps, loop=0)
-        except Exception:
-            # Last resort: PIL fromarray + save
-            pil_frames = [Image.fromarray(f) for f in frames]
-            pil_frames[0].save(video_path, save_all=True, append_images=pil_frames[1:],
-                               duration=1000 // args.fps, loop=0)
+    imageio.mimsave(video_path, frames, fps=args.fps)
     metrics = analyze_frames(frames)
     write_summary(metrics, out_dir / 'summary.json')
     print(f'frames: {len(frames)}')
