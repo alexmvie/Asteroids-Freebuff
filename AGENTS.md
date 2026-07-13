@@ -29,7 +29,7 @@ These rules are set by the project owner and are **standing** — they apply to 
 - When adding a new gameplay feature, check whether there's an existing system/entity/script to extend before creating a new one.
 
 ### Rule 4: Validate before declaring done
-- `npm test` — must pass (currently 21 tests, all green).
+- `npm test` — must pass (currently 539 tests, all green).
 - `npm run build` — must succeed.
 - If you touched anything visual, also `npm run dev` and use a browser tool to confirm the scene renders.
 - If you added tests, run them.
@@ -154,7 +154,17 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
 - [x] **`Capsule` geometry** — `src/geometry/capsule.js`: custom `Capsule` class extending `THREE.BufferGeometry`. **Rewritten from scratch** with a clean merged-vertex (indexed) topology. Includes a `computeUVs()` instance method for cylindrical unwrap (`U = atan2(z, x) / (2π) + 0.5`, `V = (y - yMin) / (yMax - yMin)`) — called after `jitter()` so the UVs align with the displaced surface. Built from a cylindrical body + two hemispherical caps, all in one indexed mesh. Body = 2 rings × (radialSegments+1) vertices; each cap = (capSegments-1) intermediate rings × (radialSegments+1) + 1 pole (the first cap ring is shared with the body's end ring). For default params (`radius=1, length=1, capSegments=4, radialSegments=8`) that's 74 unique vertices and 128 triangles. CCW outward-facing winding for body and both caps (top cap and bottom cap have opposite windings because they're on opposite sides — hand-verified cross-product check). DRY ring-quad helper (`pushRingQuads(ringLoStart, ringHiStart, flipWinding)`) handles both caps with a single function. **The "local z axis" at any surface vertex is the outward surface normal** — body vertices are purely radial, cap-ring vertices have a Y component (positive at the top cap, negative at the bottom cap, growing toward the pole), poles point straight up/down. `.jitter(amount, rng)` instance method offsets each vertex **along its local z axis (the vertex normal)** by `(rng()*2-1)*amount` and re-computes vertex normals so the new surface lighting stays correct. The index buffer is never modified, so the shared-vertex topology is preserved — no holes by construction. **17 unit tests in `tests/capsule.test.js`**. The "no back-facing triangles" test asserts `backFacing === 0` out of 128 triangles at the production 15% jitter amount (empirically verified: 0 at 15–30%, 5/128 at 50%). The 6× tripwire test (90% jitter) documents the upper limit and catches regressions. The previous "no severe holes (<=15)" threshold-based test was a band-aid for an old cap-geometry vulnerability — the clean normal-direction displacement doesn't have that vulnerability, so a strict `=== 0` assertion is the right check.
 - [x] **Input system** — `src/systems/input.js`: `createInputSystem({ ship, onFire, onStart, getGameState })` returns `{ state, update, dispose }`. W/A/D + Arrow keys for ship movement (held-key model). Space → `onFire` rising edge. Any key → `onStart` rising edge in DEMO only. Architecture is split for testability: `createInputState()` (pure), `bindKeyboard()` (thin DOM wrapper, no-op in Node), `tickInput()` (pure per-frame application). 20 unit tests in `tests/input.test.js` (41 tests total, all green). `onFire`/`onStart` log for now; will be wired to bullets + state machine in their respective steps.
 - [x] **Bullets** — `src/entities/bullet.js`: `createBulletPool({ scene, capacity? })` returns a fixed-size object pool of pre-allocated Three.js meshes (shared `SphereGeometry` + `MeshBasicMaterial`, `toneMapped: false` for that bright pop). `fire({ origin, direction, speed? })` returns the bullet index, or `-1` on cooldown / pool exhausted / missing args / zero-length direction. Default speed 400 u/s, fire cooldown 0.18s (≈5.5 shots/sec), lifetime 1.5s. `update(dt)` integrates + despawns; `dispose()` releases geometry + material. 18 unit tests in `tests/bullet.test.js` (59 tests total, all green). Wired into `src/main.js`: `onFire` is now `fireFromShip()` that uses the ship's yaw to compute the forward direction, and `bullets.update(dt)` runs in the render loop.
-- [x] **Narrow-phase collision** — `src/systems/collision.js`: pure sphere-sphere overlap (`spheresOverlap` — squared-distance compare, strict `<`). `findBulletHits` returns `{ bulletIndex, asteroidIndex }` pairs; one bullet → at most one asteroid, but multiple bullets can hit the same asteroid (caller de-dups with a `Set`). `findShipHit` returns the first asteroid index that hits the ship, or `-1`. `scoreForSize` looks up `SCORE_BY_SIZE` (frozen: large=20, medium=50, small=100). `BULLET_RADIUS=0.15`, `SHIP_RADIUS=1.4`. **27 unit tests** in `tests/collision.test.js` (86 tests total, all green). Wired into `src/main.js` `processCollisions()`: de-dupes asteroid removals, applies them in reverse order, despawns parent + spawns children for each bullet hit, scores, handles ship hits (lives--, reset ship, game over at 0). `onStart` restarts after game over. `bullets.despawn(index)` added to the pool so the collision layer can mark bullets as hit.
+- [x] **Collision system** — `src/systems/collision.js`: pure sphere-sphere overlap (`spheresOverlap` — squared-distance compare, strict `<`). `findBulletHits` returns `{ bulletIndex, asteroidIndex }` pairs; one bullet → at most one asteroid, but multiple bullets can hit the same asteroid (caller de-dups with a `Set`). `findShipHit` returns the first asteroid index that hits the ship, or `-1`. `scoreForSize` looks up `SCORE_BY_SIZE` (frozen: large=20, medium=50, small=100). `BULLET_RADIUS=0.15`, `SHIP_RADIUS=2.0` (increased from 1.4 in v0.40.0 to match the 3×-scaled ship mesh). 
+
+  **v0.40.x — asteroid↔asteroid + asteroid↔powerup collision:**
+  - `findAsteroidPairs(asteroids)` → `[{i,j}]` — O(n²) overlap pairs.
+  - `resolveAsteroidCollision(a,b)` — mass-weighted separation (pushA = overlap × massB/totalMass) + elastic bounce along collision normal (restitution 0.5). Early-exit for already-separating pairs.
+  - `findAsteroidPowerupIndex({asteroids, powerup})` → first overlapping index or -1.
+  - `resolveAsteroidPowerupCollision(asteroid, powerup)` — push powerup out of overlapping asteroid with 0.5u buffer + velocity kick (`8 + overlap × 3`).
+  - `asteroid.setVelocity(vx, vz)` mutates spec.velocity for the bounce.
+  - `powerup.pushAway(vx, vz)` accumulates kick velocity with exponential decay (drag=3.0) in `update()`.
+  - **18 new tests** for pair detection, separation, momentum transfer, large/small mass, powerup push.
+  - Wired into `main.js` `processCollisions()`: runs asteroid-asteroid + asteroid-powerup resolution **before** bullet/laser checks so settled positions don't affect the destruction pass.
 - [x] **Event bus + state machine** — `src/systems/events.js` (pure pub/sub: `on`/`off`/`emit`/`clear`, snapshot iteration for in-dispatch removal safety, argument validation). `src/systems/state-types.js` (frozen `State` enum: DEMO / PLAYING / GAME_OVER). `src/systems/state.js` (`createStateMachine({ initial, events? })` with allowed-transition table DEMO↔PLAYING↔GAME_OVER, illegal transitions return `false` silently, `subscribe` returns unsubscribe, `serialize`/`deserialize` round-trip the state name). **44 unit tests** across `tests/events.test.js` and `tests/state.test.js` (131 tests total, all green). Wired into `src/main.js`: real `getGameState` from the machine, `onStart` triggers DEMO→PLAYING (start) or GAME_OVER→PLAYING (restart via `resetRunState`), `processCollisions` calls `machine.transition(GAME_OVER)` on player death, emits `score:changed` / `lives:changed` / `game:over` / `state:changed` events. State-change log subscriber for dev visibility. The upcoming HUD layer will subscribe to `score:changed` + `lives:changed`. **`tickInput` in `src/systems/input.js` gates `onStart` to fire in DEMO *or* GAME_OVER** (start / restart) — the original "DEMO only" gate was a bug that swallowed the restart keypress.
 - [x] **HUD** — `src/ui/hud.js`: `createHud({ bus, initialState? })` returns `{ mount(rootEl), dispose() }`. Subscribes to `score:changed`, `lives:changed`, `state:changed`, `game:over` on the event bus. The optional `initialState` seed is applied at mount time (runs the same `onStateChanged` handler with `{ from: null, to: initialState }`) — required because the state machine doesn't fire a `state:changed` event for its initial state, so without the seed the message keeps the bare `.hud-message` class (centered, no flash) until the first transition out and back. `main.js` passes `initialState: stateMachine.getState()`. State-aware messaging: DEMO → **bottom-anchored**, **arcade-blinking** cyan `PRESS ANY KEY TO START` (500ms on / 500ms off = 1Hz blink, `step-end` hard transition — like an old-school attract screen). The `.hud-message--demo` modifier overrides the centered base with `align-items: flex-end; padding-bottom: var(--space-5)` so the start prompt sits at the bottom of the screen; the GAME_OVER message, which shares the base class, stays centered via the unmodified base rule. PLAYING → hidden; GAME_OVER → centered red `GAME OVER — PRESS ANY KEY TO RESTART` (plus `game:over` event → message with final score). Pure DOM (no framework, no Three.js). `formatScore(n)` helper pads to 6 digits, handles negatives / NaN / Infinity / non-numbers safely. `index.html` adds `data-hud` elements inside the existing `#hud` and `#overlay` containers. `src/styles.css` adds `.hud-score` / `.hud-lives` (top bar, monospace uppercase), `.hud-message` (centered, 32px), `.hud-message--demo` (cyan, bottom-anchored, 1Hz blink driven by JS in `src/ui/hud.js`), `.hud-message--gameover` (red, centered, no animation), `.hud-message--hidden` (`display:none`). Wired into `src/main.js` via a combined root that `querySelector`s both `#hud` and `#overlay`. **23 unit tests in `tests/hud.test.js` (182/182 green total)**. Two test-helper bugs were found and fixed: (1) mock `querySelector` used `Object.prototype.hasOwnProperty.call(map, sel)` which is always false for `Map` (Maps don't expose entries as own properties) — replaced with `map.has(sel)`; (2) the dispose-test asserted `LIVES: 1` post-dispose but never emitted `lives:changed` before dispose (so the value stayed at the initial `LIVES: 3`) — added a pre-dispose emit to make the assertion meaningful. The 4 new `initialState` tests cover the DEMO/PLAYING/GAME_OVER seed paths + the no-seed backward-compat path.
 
@@ -302,6 +312,47 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
 
   **Total: 491 tests pass** (was 450 at end of v0.22.x, +41 net), Vite build OK.
 
+- [x] **v0.41.x — AI Powerup Collection Fix** — `src/entities/ai.js` + `src/main.js` + `tests/ai.test.js`. The demo AI was ignoring powerups because `pickTarget`'s `asteroidIsUrgent` check (<35u) blocked powerup selection whenever any asteroid was nearby — almost always true in the dense field. Fixed by making powerups absolute-priority targets within chase range:
+  - `DEFAULTS.powerupBiasU`: 25 → 9999 (absolute priority within `powerupMaxChaseDist`).
+  - `DEFAULTS.powerupMaxChaseDist`: added, set to 250u (covers the whole streaming bubble).
+  - `pickTarget` restructured: powerup priority is evaluated against the **nearest asteroid**, not the committed target, so a distant committed asteroid cannot block a reachable powerup.
+  - Powerup approach tuning: `allowBrake=true`, `brakeDist=60` (early braking because the ship's linear drag is shallow; stopping distance at 60 u/s is ~60u), `coastDist=8` (tight creep into the 2u pickup radius).
+  - `main.js`: DEMO powerup lifetime 12s → 20s so the AI has time to navigate the dense field.
+  - New regression tests: powerup wins over committed asteroid, `powerupMaxChaseDist` respected, powerup braking behavior.
+  - Validation: 543 tests pass, build succeeds, 60s browser capture shows **3 of 4 powerups collected** (was 0 of 2 before).
+
+- [x] **Particle system (smoke + debris)** — `src/systems/particles.js`. Complete overhaul with performance optimization and visual upgrade:
+
+  **Performance (free-list + active-list, pool 2100→720):**
+  - `acquire()`: O(1) pop from `freeSmoke`/`freeDebris` arrays (was O(n) pool scan).
+  - `update()`: iterates only `active` array (live particles, ~50-200), not entire pool.
+  - Death path: O(1) via `p.poolIndex` (was O(n) `pool.indexOf(p)`).
+  - Pool size: 720 = (8 smoke + 40 debris) × 15 concurrent explosions (was 2100).
+
+  **Smoke texture (domain-warped FBM noise, 128×128):**
+  - Shape is NOISE-driven, not radial-gradient-driven. 2-level domain warping (warpStrength 1.2) distorts sampling coordinates for organic, wispy clouds.
+  - 4-octave FBM with cosine interpolation. Three noise layers blended (billow 40% + wisp 35% + fine detail 25%).
+  - Edge fade at pow(dist, 6) — barely affects shape, just prevents hard canvas edges.
+
+  **Smoke dynamics:**
+  - Growth: `Math.pow(t, 0.3)` — explosive (at t=0.1 → 50% grown, at t=0.3 → 70%).
+  - Opacity: `Math.exp(-t * 5)` — rapid fade (at t=0.2 → ~0.37, at t=0.4 → ~0.14).
+  - Start size: 1.2u × scale. End size: 30× start (screen-filling).
+  - Count: 8 puffs per explosion (was 30). Spawn offset: `* 5.0` for wide scatter.
+
+  **4 debris texture variants:**
+  | Variant | Shape | Color |
+  |---------|-------|-------|
+  | 0 Angular Shard | Sharp polygon, 4-5 vertices | Dark (baseBright 0.45) |
+  | 1 Chunky Fragment | Rounded, 7-9 verts + quadraticCurveTo | Medium (0.55) |
+  | 2 Elongated Splinter | Stretched via scale(0.6, 1.4) | Medium (0.50) |
+  | 3 Porous Crumb | Per-pixel noise-based with holes | Light (0.60) |
+  - Round-robin distribution across pool, random rotation per sprite, non-uniform stretch (0.6–1.4) to break square-plane look.
+  - DEBRIS_SIZE_START: 0.08 → 0.40 (5× larger). DEBRIS_SIZE_END_MULT: 1.0 (constant size, no shrink).
+  - DEBRIS_SPEED: 5 → 20 u/s. Size random: 1–10× base. Spawn offset: `* 4.0`.
+
+  **Total: 539 tests pass, build OK.**
+
 - [x] **v0.24.x (Target Commitment + LOOKAHEAD-DODGE tuning)** — `src/entities/ai.js` + `tests/ai.test.js`. Two fixes for the user-reported "still moving around without a plan" symptom:
 
   **Fix 1: LOOKAHEAD-DODGE reduced aggression.** The v0.22.x defaults (`lookaheadTime=3.5`, `lookaheadMinRadius=6.0`) were too trigger-happy: at ~40 u/s cruise the bot scanned a ~140u corridor, and in a dense field (~300 asteroids) there was almost always an asteroid in that corridor. The bot spent most of its time in DODGE mode (thrust-perpendicular-to-velocity) instead of pursuing targets. Fixed: `lookaheadTime` 3.5 → 1.5 (still ~60u of warning at cruise), `lookaheadMinRadius` 6.0 → 8.0 (wider clearing margin for the shorter window). All 5 existing LOOKAHEAD-DODGE tests pass explicit values and are unaffected.
@@ -442,13 +493,13 @@ The orchestrator exposes the public API as thin one-liner forwards to factory me
 
 | Command | Purpose |
 |---|---|
-| `npm test` | Unit tests for the data model (21 tests, all green). |
-| `node --test tests/` | Run the full test suite (209 tests across all modules). |
+| `npm test` | Unit tests across all modules (539 tests, all green). |
+| `node --test tests/*.test.js` | Run the full test suite (539 tests across all modules). |
 | `npm run build` | Vite production build. |
 | `npm run dev` | Vite dev server on http://localhost:5173/. |
 | `npm run dump:field` | ASCII visualization of the world to the terminal. |
 | `npm run dump:field:svg` | SVG visualization (writes `field.svg` to project root). |
-| `node --test tests/` | Same as `npm test`. |
+| `node --test tests/*.test.js` | Same as `npm test`. |
 
 Always run `npm test` and `npm run build` after changes. Use the browser to confirm visual changes.
 

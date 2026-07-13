@@ -14,6 +14,22 @@
  *                ENGAGE (asteroid/powerup) → IDLE
  *
  * See LOG.md for the full performance protocol.
+ *
+ * --------------------------------------------------------------------------
+ * How this AI is tuned with video + frame analysis
+ * --------------------------------------------------------------------------
+ * 1. Capture gameplay video (hands-off):
+ *      ./scripts/run-ai-loop.sh --mode browser --seconds 180 --fps 3
+ *    This starts a Vite dev server, opens a headless browser, records the
+ *    canvas at 3 fps, and writes frames to artifacts/ai-tuning-run/.
+ * 2. Analyze the captured frames:
+ *      python3 scripts/analyze_frames.py artifacts/ai-tuning-run --fps 3
+ *    The script computes per-frame brightness + motion, detects idle
+ *    streaks, and writes artifacts/ai-tuning-run/analysis.json.
+ * 3. Inspect the metrics (idle %, high-motion %, max idle streak) to
+ *    decide which behavior is failing (e.g. powerup collection, aiming,
+ *    evasive wobble). Adjust the constants / controllers below, then
+ *    re-capture. The loop is fully automated and repeatable.
  */
 
 import { createShip } from './ship.js';
@@ -49,7 +65,8 @@ const PREDICTIVE_EVADE_BUFFER = 1.5;
  */
 const EVADE_BUFFER = 1.0;
 
-const DEFAULTS = Object.freeze({  /** Reset the AI ship if it drifts beyond this radius from origin. */
+const DEFAULTS = Object.freeze({
+  /** Reset the AI ship if it drifts beyond this radius from origin. */
   resetDist: 220,
   /** Spawn radius (XZ) for the initial position + on-reset placement. */
   spawnRadius: 30,
@@ -91,11 +108,7 @@ const DEFAULTS = Object.freeze({  /** Reset the AI ship if it drifts beyond this
   /**
    * Predictive evade margin is now computed per-asteroid as:
    *   SHIP_RADIUS (1.4) + asteroid.getRadius() + PREDICTIVE_EVADE_BUFFER (1.5)
-
-  /**
-   * Predictive evade margin is now computed per-asteroid as:
- *   SHIP_RADIUS (1.4) + asteroid.getRadius() + PREDICTIVE_EVADE_BUFFER (1.5)
- * This constant is no longer a tunable default — see findCollisionThreat.
+   * This constant is no longer a tunable default — see findCollisionThreat.
    * Retained as a no-op alias for backward compat in external callers.
    */
   predictiveEvadeMargin: 0,
@@ -110,12 +123,26 @@ const DEFAULTS = Object.freeze({  /** Reset the AI ship if it drifts beyond this
   bulletSpeed: 400,
 
   /**
-   * Powerup detour bias (world units). Powerups only win over an
-   * asteroid when they are genuinely nearby or the asteroid is not
-   * already in an attackable range. This keeps the demo AI focused
-   * on actual combat instead of constantly detouring for pickups.
+   * Powerup detour bias (world units). Powerups are high-value
+   * targets, so the AI should go out of its way to collect them.
+   * A powerup wins over the nearest asteroid when it is within
+   * `best.dist + powerupBiasU`. v0.41.0: raised from 25 to 80 so
+   * the AI actually chases powerups without abandoning combat for
+   * pickups that are far across the field.
+   * v0.41.1: raised to 9999 to make powerups absolute priority
+   * within powerupMaxChaseDist (they still lose to emergency evade).
    */
-  powerupBiasU: 25,
+  powerupBiasU: 9999,
+
+  /**
+   * Maximum distance (world units) at which the AI will chase a
+   * powerup. Prevents the AI from flying 200u across the bubble
+   * for a single pickup while ignoring all asteroids.
+   * v0.41.0: added to cap powerup pursuit.
+   * v0.41.1: raised to 250 so the AI can reach powerups anywhere
+   * in the streaming bubble (~220u radius).
+   */
+  powerupMaxChaseDist: 250,
 
   /**
    * Thrust heading gate (radians). Ship thrusts when |heading diff|
@@ -210,21 +237,55 @@ export function predictInterceptPoint(aiPos, aiVel, targetPos, targetVel, maxLoo
   const dz = targetPos.z - aiPos.z;
   const dist = Math.hypot(dx, dz);
   const speed = Math.hypot(aiVel.x, aiVel.z);
-  if (speed < 1 || dist < 1) {
+  if (dist < 1) {
     return { point: { x: targetPos.x, z: targetPos.z }, time: 0 };
   }
 
+  // v0.39.0: Always predict the target's future position, even when the
+  // ship is currently slow. Without this, a stationary or slow ship
+  // chasing a moving powerup aims at the powerup's current position and
+  // misses the pickup. The prediction horizon is capped so the AI does not
+  // over-lead distant targets.
+  const targetSpeed = Math.hypot(targetVel.x, targetVel.z);
+  if (targetSpeed < 0.01) {
+    // Stationary target: aim at current position, but still report the
+    // travel time (capped by the lookahead horizon) so callers can use
+    // the time value consistently.
+    const t = speed < 1 ? maxLookaheadS : Math.min(dist / speed, maxLookaheadS);
+    return { point: { x: targetPos.x, z: targetPos.z }, time: t };
+  }
+
   // Iterative intercept: start with time = dist / speed, refine twice.
-  let t = Math.min(dist / speed, maxLookaheadS);
+  // If the ship is almost stationary, use a small effective speed so the
+  // prediction stays bounded and doesn't snap to the far horizon.
+  const effectiveSpeed = speed < 1 ? 1 : speed;
+  let t = Math.min(dist / effectiveSpeed, maxLookaheadS);
   for (let i = 0; i < 2; i++) {
     const px = targetPos.x + targetVel.x * t;
     const pz = targetPos.z + targetVel.z * t;
     const newDist = Math.hypot(px - aiPos.x, pz - aiPos.z);
-    t = Math.min(newDist / speed, maxLookaheadS);
+    t = Math.min(newDist / effectiveSpeed, maxLookaheadS);
   }
   return {
     point: { x: targetPos.x + targetVel.x * t, z: targetPos.z + targetVel.z * t },
     time: t,
+  };
+}
+
+/**
+ * Predict where a pushed powerup will come to rest.
+ * Powerup push velocity decays exponentially (`drag = exp(-3 * dt)`),
+ * so its final XZ position is `pos + vel / 3`. Aiming at the resting
+ * point prevents the AI from over-leading a powerup that stops quickly.
+ *
+ * @param {{x:number,z:number}} pos
+ * @param {{x:number,z:number}} vel
+ * @returns {{x:number,z:number}}
+ */
+export function predictPowerupRestingPoint(pos, vel) {
+  return {
+    x: pos.x + vel.x / 3,
+    z: pos.z + vel.z / 3,
   };
 }
 
@@ -347,19 +408,22 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
  * Returns `{ pos, vel, mode, dist, radius }` where:
  *   - `vel` is the target's velocity (intercept prediction).
  *   - `radius` is the target's physical radius (0 for powerups).
- *   Powerups have velocity (0,0) and radius 0.
+ *   Powerups have a velocity (read from getVelocity if available) and radius 0.
  *
  * @param {{
  *   aiPos: {x:number,z:number},
  *   asteroids: Array<{getPosition: () => any, getVelocity?: () => any, getRadius?: () => number}>,
  *   powerupPos: {x:number,z:number} | null,
+ *   powerupVel?: {x:number,z:number},
  *   powerupBiasU: number,
+ *   powerupMaxChaseDist?: number,
  *   committedPos?: {x:number,z:number} | null,
  *   hysteresisU?: number,
+ *   evadeDist?: number,
  * }} args
  * @returns {{ pos: {x:number,z:number}, vel: {x:number,z:number}, mode: 'asteroid'|'powerup', dist: number, radius?: number } | null}
  */
-export function pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU, committedPos = null, hysteresisU = 8 }) {
+export function pickTarget({ aiPos, asteroids, powerupPos, powerupVel = { x: 0, z: 0 }, powerupBiasU, powerupMaxChaseDist = DEFAULTS.powerupMaxChaseDist, committedPos = null, hysteresisU = 8, evadeDist = DEFAULTS.evadeDist }) {
   const nearest = findNearestAsteroid(aiPos, asteroids);
   let best = null;
   if (nearest) {
@@ -378,10 +442,40 @@ export function pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU, committ
     };
   }
 
+  // v0.41.1: Evaluate powerup priority against the NEAREST asteroid,
+  // NOT the committed target. Committed-target stickiness is applied
+  // AFTER the powerup decision so a distant committed asteroid cannot
+  // block a reachable powerup.
+  if (powerupPos && typeof powerupPos.x === 'number') {
+    const pDist = Math.hypot(powerupPos.x - aiPos.x, powerupPos.z - aiPos.z);
+    // Powerups are absolute-priority targets. They win over asteroids
+    // unless the nearest asteroid is an immediate collision threat (inside
+    // the evade radius) or the powerup is too far away to chase. The old
+    // "urgent asteroid" check (<35u) blocked powerup collection whenever
+    // any asteroid was nearby, which is almost always true in the dense field.
+    const asteroidIsThreat = best && best.mode === 'asteroid' && best.dist < evadeDist;
+    const withinChaseRange = pDist <= powerupMaxChaseDist;
+    if (best === null && withinChaseRange) {
+      return { pos: powerupPos, vel: powerupVel, mode: 'powerup', dist: pDist, radius: 0 };
+    }
+    // Always collect close powerups.
+    if (pDist < 25) {
+      return { pos: powerupPos, vel: powerupVel, mode: 'powerup', dist: pDist, radius: 0 };
+    }
+    // Powerup wins if it's within the maximum chase distance and no
+    // asteroid is an immediate collision threat. With powerupBiasU=9999,
+    // the bias check is effectively "always win within range".
+    if (!asteroidIsThreat && withinChaseRange && pDist < best.dist + powerupBiasU) {
+      return { pos: powerupPos, vel: powerupVel, mode: 'powerup', dist: pDist, radius: 0 };
+    }
+  }
+
   // Target stickiness: if the committed target is still in the asteroid
   // list and the nearest alternative is only slightly closer, keep the
   // committed target. Reduces zigzag in dense fields — the AI finishes
   // what it started instead of constantly switching.
+  // Applied AFTER the powerup decision so committed asteroids never
+  // block powerup collection.
   if (committedPos && typeof committedPos.x === 'number' && best) {
     const cDist = Math.hypot(committedPos.x - aiPos.x, committedPos.z - aiPos.z);
     if (cDist < best.dist + hysteresisU) {
@@ -391,70 +485,42 @@ export function pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU, committ
     }
   }
 
-  if (powerupPos && typeof powerupPos.x === 'number') {
-    const pDist = Math.hypot(powerupPos.x - aiPos.x, powerupPos.z - aiPos.z);
-    const asteroidIsUrgent = best && best.mode === 'asteroid' && best.dist < 35;
-    // Collect powerups that are very close (<25u) regardless of asteroid urgency.
-    // v0.37.2: increased from 18 to 25 for more reliable nearby pickup.
-    const powerupIsClose = pDist < 25;
-    if (best === null) {
-      return { pos: powerupPos, vel: { x: 0, z: 0 }, mode: 'powerup', dist: pDist, radius: 0 };
-    }
-    if (powerupIsClose) {
-      return { pos: powerupPos, vel: { x: 0, z: 0 }, mode: 'powerup', dist: pDist, radius: 0 };
-    }
-    // v0.37.2: powerup wins over an urgent asteroid if it's CLOSER than the asteroid.
-    // Previously asteroidIsUrgent blocked ALL powerup collection below 35u, even
-    // when the powerup was right next to the ship (e.g. powerup at 20u, asteroid at 30u).
-    if ((!asteroidIsUrgent || pDist < best.dist) && pDist < best.dist + powerupBiasU) {
-      return { pos: powerupPos, vel: { x: 0, z: 0 }, mode: 'powerup', dist: pDist, radius: 0 };
-    }
-  }
-
   return best;
 }
 
 /**
- * Engagement controller: turn toward target (with intercept prediction),
- * thrust when aligned AND beyond coast-in distance. Within coastDist,
- * engines cut and LINEAR_DRAG decelerates the ship naturally.
+ * Engagement controller: turn toward an aim point (e.g. bullet lead or
+ * intercept point), thrust when aligned. The distance used for braking /
+ * coasting is measured to the navigation point (the physical target), so
+ * the ship can face one direction while decelerating based on the actual
+ * target range.
  *
  * v0.37.0: intercept prediction — the `targetVel` parameter enables
  * aiming at the predicted future position of moving targets.
- * v0.37.1: `targetRadius` parameter for surface-distance brake/coast.
- *   Brake and coast decisions use SURFACE distance (center distance minus
- *   target radius) instead of center-to-center distance. This ensures
- *   consistent braking behavior regardless of target size: the ship
- *   starts braking at the same surface distance for large and small
- *   asteroids.
+ * v0.39.1: `aimPos` parameter added so the ship can face the bullet-lead
+ * point while braking/coasting based on the physical target position.
  *
  * @param {{x:number,z:number}} aiPos
  * @param {number} aiYaw
  * @param {{x:number,z:number}} aiVel
- * @param {{x:number,z:number}} targetPos
- * @param {{x:number,z:number}} [targetVel] for intercept prediction
+ * @param {{x:number,z:number}} targetPos  physical target (used for distance/brake/coast)
  * @param {number} [aiAngularVel=0]  for spin-brake prediction
  * @param {number} [thrustGate=0.15] heading gate for thrust
  * @param {number} [coastDist=40]    coast-in distance (center-to-center)
  * @param {boolean} [wasBraking=false] hysteresis: already braking
  * @param {boolean} [allowBrake=true] allow brake logic (flip 180° and thrust backward)
- * @param {number} [interceptLookaheadS=2.0] intercept horizon
+ * @param {number} [interceptLookaheadS=2.0] intercept horizon (unused when aimPos provided)
+ * @param {number} [brakeDist=30] distance at which active braking starts.
+ * @param {number} [interceptLookaheadS=2.0] intercept horizon (unused when aimPos provided)
  * @param {boolean} [allowCoast] allow coast-in (cut thrust when close + closing fast).
  *   Defaults to `allowBrake` for backward compat. Separated so powerups can
  *   coast without braking.
+ * @param {{x:number,z:number}} [aimPos] point the ship should face (defaults to targetPos)
  * @returns {{ yaw: number, thrust: boolean, diff: number, dist: number, braking: boolean }}
  */
-export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, thrustGate = DEFAULTS.thrustHeadingGate, coastDist = DEFAULTS.coastDist, wasBraking = false, allowBrake = true, targetVel = null, interceptLookaheadS = DEFAULTS.interceptLookaheadS, allowCoast) {
+export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, thrustGate = DEFAULTS.thrustHeadingGate, coastDist = DEFAULTS.coastDist, wasBraking = false, allowBrake = true, brakeDist = 30, interceptLookaheadS = DEFAULTS.interceptLookaheadS, allowCoast, aimPos = targetPos) {
   // Default allowCoast to allowBrake for backward compat.
   if (typeof allowCoast !== 'boolean') allowCoast = allowBrake;
-
-  // v0.37.0: Intercept prediction — aim at where the target WILL BE.
-  // For stationary targets (powerups, or no vel data) this is a no-op.
-  let aimPos = targetPos;
-  if (targetVel && aiVel) {
-    const intercept = predictInterceptPoint(aiPos, aiVel, targetPos, targetVel, interceptLookaheadS);
-    aimPos = intercept.point;
-  }
 
   const dx = aimPos.x - aiPos.x;
   const dz = aimPos.z - aiPos.z;
@@ -482,10 +548,9 @@ export function engageTarget(aiPos, aiYaw, aiVel, targetPos, aiAngularVel = 0, t
   // Brake and coast use center-to-center distance (not surface distance),
   // because the ship flies toward the center point. The radius-aware
   // EVADE and findCollisionThreat handle collision avoidance separately.
-  const BRAKE_DIST = 30;
   const BRAKE_ENTER_SPEED = 20;
   const BRAKE_EXIT_SPEED = 10;
-  const shouldStartBrake = allowBrake && dist < BRAKE_DIST && closingSpeed > BRAKE_ENTER_SPEED;
+  const shouldStartBrake = allowBrake && dist < brakeDist && closingSpeed > BRAKE_ENTER_SPEED;
   const shouldKeepBraking = allowBrake && wasBraking && speed > BRAKE_EXIT_SPEED;
   if (shouldStartBrake || shouldKeepBraking) {
     const velAngle = Math.atan2(vel.z, vel.x);
@@ -579,8 +644,10 @@ export function aiBrainTick({
   asteroids,
   time,
   powerupPos = null,
+  powerupVel = { x: 0, z: 0 },
   evadeDist = DEFAULTS.evadeDist,
   powerupBiasU = DEFAULTS.powerupBiasU,
+  powerupMaxChaseDist = DEFAULTS.powerupMaxChaseDist,
   fireMinDist = DEFAULTS.fireMinDist,
   fireMaxDist = DEFAULTS.fireMaxDist,
   thrustHeadingGate = DEFAULTS.thrustHeadingGate,
@@ -662,9 +729,44 @@ export function aiBrainTick({
   }
 
   // ---- 2. ENGAGE (pick target + approach with intercept) --------------
-  const target = pickTarget({ aiPos, asteroids, powerupPos, powerupBiasU, committedPos, hysteresisU });
+  const target = pickTarget({ aiPos, asteroids, powerupPos, powerupVel, powerupBiasU, powerupMaxChaseDist, committedPos, hysteresisU, evadeDist: ed });
   if (target) {
-    const ec = engageTarget(aiPos, aiYaw, aiVel, target.pos, aiAngularVel, thrustHeadingGate, coastDist, wasBraking, target.mode !== 'powerup', target.vel, interceptLookaheadS, true);
+    // v0.39.1: aim point is separate from navigation point.
+    //   - Asteroids: face the bullet-lead point so the ship shoots where
+    //     the target will be when bullets arrive.
+    //   - Powerups: face the resting point (powerup velocity decays
+    //     exponentially, so it stops much sooner than linear prediction).
+    // Navigation (brake/coast distance) still uses the physical target pos.
+    let aimPos = target.pos;
+    if (target.mode === 'asteroid') {
+      const dist = Math.hypot(target.pos.x - aiPos.x, target.pos.z - aiPos.z);
+      const flightTime = bulletSpeed > 0 ? dist / bulletSpeed : 0;
+      aimPos = {
+        x: target.pos.x + target.vel.x * flightTime,
+        z: target.pos.z + target.vel.z * flightTime,
+      };
+    } else if (target.mode === 'powerup') {
+      aimPos = predictPowerupRestingPoint(target.pos, target.vel);
+    }
+
+    // v0.41.0: Powerups were allowed to brake (allowBrake=true) to avoid
+    // overshooting the small pickup radius.
+    // v0.41.1: Powerups need much earlier braking because the ship's
+    // linear drag is shallow. At 60 u/s the stopping distance is ~60u,
+    // so brakeDist is raised to 60. coastDist is kept tight (8u) so the
+    // ship creeps into the 2u pickup radius instead of drifting past it.
+    const isPowerup = target.mode === 'powerup';
+    const ec = engageTarget(
+      aiPos, aiYaw, aiVel, target.pos, aiAngularVel,
+      thrustHeadingGate,
+      isPowerup ? 8 : coastDist,
+      wasBraking,
+      true,
+      isPowerup ? 60 : 30,
+      interceptLookaheadS,
+      true,
+      aimPos,
+    );
 
     // Fire discipline: fire when ANY asteroid is in the fire cone
     // within range. v0.37.0: uses LEAD FIRE — predicts asteroid
@@ -729,7 +831,7 @@ export function aiBrainTick({
  *   options?: object,
  * }} opts
  */
-export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = null, getActiveWeapon = null, options = {} } = {}) {
+export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = null, getPowerupVel = null, getActiveWeapon = null, options = {} } = {}) {
   if (!scene) throw new Error('createDemoAi: `scene` is required');
   if (!Array.isArray(asteroids)) throw new Error('createDemoAi: `asteroids` must be an array');
 
@@ -777,8 +879,10 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       asteroids,
       time,
       powerupPos: getPowerupPos ? getPowerupPos() : null,
+      powerupVel: getPowerupVel ? getPowerupVel() : { x: 0, z: 0 },
       evadeDist: opts.evadeDist,
       powerupBiasU: opts.powerupBiasU,
+      powerupMaxChaseDist: opts.powerupMaxChaseDist,
       fireMinDist: opts.fireMinDist,
       fireMaxDist: opts.fireMaxDist,
       thrustHeadingGate: opts.thrustHeadingGate,
@@ -847,7 +951,9 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       aiPos: ship.position,
       asteroids,
       powerupPos: args.powerupPos,
+      powerupVel: args.powerupVel,
       powerupBiasU: opts.powerupBiasU,
+      powerupMaxChaseDist: opts.powerupMaxChaseDist,
     });
     lastDecision = {
       mode: decision.mode,
@@ -865,8 +971,8 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     if (decision.mode === 'asteroid') {
       const brainTarget = pickTarget({
         aiPos: ship.position, asteroids,
-        powerupPos: args.powerupPos, powerupBiasU: opts.powerupBiasU,
-        committedPos, hysteresisU: opts.hysteresisU,
+        powerupPos: args.powerupPos, powerupVel: args.powerupVel, powerupBiasU: opts.powerupBiasU,
+        powerupMaxChaseDist: opts.powerupMaxChaseDist, committedPos, hysteresisU: opts.hysteresisU,
       });
       if (brainTarget) committedPos = { x: brainTarget.pos.x, z: brainTarget.pos.z };
     } else if (decision.mode !== 'powerup') {

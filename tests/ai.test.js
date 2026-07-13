@@ -309,10 +309,9 @@ test('aiBrainTick: close target + stationary → thrusts (low closing speed, no 
   assert.equal(result.thrust, true, 'stationary → no coast-in, thrust to accelerate');
 });
 
-test('aiBrainTick: powerup target near the ship coasts instead of braking or full thrust', () => {
-  // v0.37.2: powerups now have coast-in enabled (allowCoast=true) so the ship
-  // decelerates naturally when approaching a pickup at speed, preventing overshoot.
-  // At 15u with 30 u/s closing speed, dist < coastDist=20 && closingSpeed > 5 → coast.
+test('aiBrainTick: powerup target near the ship brakes to avoid overshoot', () => {
+  // v0.41.0: powerups are allowed to brake. At 15u with 30 u/s closing speed,
+  // dist < BRAKE_DIST=30 && closingSpeed=30 > BRAKE_ENTER_SPEED=25 → brake.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -324,8 +323,8 @@ test('aiBrainTick: powerup target near the ship coasts instead of braking or ful
     powerupBiasU: 9999,
   });
   assert.equal(result.mode, 'powerup');
-  assert.equal(result.thrust, false, 'powerup with coast-in: coast (no thrust) when closing fast within coastDist');
-  assert.equal(result.braking, false, 'powerup intercept should NOT engage the high-speed brake (180\u00b0 flip)');
+  assert.equal(result.braking, true, 'powerup intercept should brake to avoid overshoot');
+  assert.equal(result.thrust, true, 'brake thrusts backward to shed speed');
 });
 
 // v0.37.2 regression: powerup with low closing speed within coastDist should still thrust
@@ -867,6 +866,22 @@ test('engageTarget: returns dist in result', () => {
   assert.ok(typeof r.diff === 'number');
 });
 
+test('engageTarget: custom brakeDist prevents braking until closer', () => {
+  // Ship moving +X at 40 u/s, target at 20u. With brakeDist=30, should brake.
+  // With brakeDist=15, should NOT brake (dist >= brakeDist).
+  const rBrake = engageTarget(
+    { x: 0, z: 0 }, -Math.PI / 2, { x: 40, z: 0 }, { x: 20, z: 0 },
+    0, 0.15, 40, false, true, 30,
+  );
+  assert.equal(rBrake.braking, true, 'brakeDist=30: dist=20 < 30 and closingSpeed=40 > 25 → brake');
+
+  const rNoBrake = engageTarget(
+    { x: 0, z: 0 }, -Math.PI / 2, { x: 40, z: 0 }, { x: 20, z: 0 },
+    0, 0.15, 40, false, true, 15,
+  );
+  assert.equal(rNoBrake.braking, false, 'brakeDist=15: dist=20 >= 15 → no brake');
+});
+
 test('engageTarget: aligned + fast toward close target → thrust (fly-by: no coasting)', () => {
   // Fly-by controller: even at 300 u/s toward a close target, thrust stays on.
   // The ship will fly past → target moves behind → engines cut naturally.
@@ -1020,11 +1035,11 @@ test('pickTarget: asteroid wins when powerup not biased closer', () => {
   assert.equal(result.mode, 'asteroid');
 });
 
-test('pickTarget: asteroid stays preferred when the powerup is only a detour', () => {
+test('pickTarget: asteroid stays preferred when the powerup is far out of the way', () => {
   const result = pickTarget({
     aiPos: { x: 0, z: 0 },
     asteroids: [mockAsteroid(20, 0)],
-    powerupPos: { x: 35, z: 0 },
+    powerupPos: { x: 200, z: 0 },
     powerupBiasU: 25,
   });
   assert.equal(result.mode, 'asteroid');
@@ -1043,6 +1058,22 @@ test('pickTarget: committedPos preferred over slightly-closer asteroid (stickine
     hysteresisU: 8,
   });
   assert.equal(result.pos.x, 37, 'committed target preferred when within hysteresis');
+});
+
+test('pickTarget: powerup wins even when committed asteroid is much closer', () => {
+  // v0.41.1: powerups are evaluated against the nearest asteroid, not the
+  // committed target. A committed asteroid at 10u should not block a
+  // powerup at 80u (within powerupMaxChaseDist=150 default).
+  const result = pickTarget({
+    aiPos: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(10, 0)],
+    powerupPos: { x: 80, z: 0 },
+    powerupBiasU: 9999,
+    powerupMaxChaseDist: 150,
+    committedPos: { x: 10, z: 0 },
+    hysteresisU: 8,
+  });
+  assert.equal(result.mode, 'powerup', 'powerup wins over committed asteroid when within chase range');
 });
 
 test('pickTarget: committedPos loses when nearest is much closer', () => {
@@ -1067,6 +1098,28 @@ test('pickTarget: null when no asteroids and no powerup', () => {
     powerupBiasU: 60,
   });
   assert.equal(result, null);
+});
+
+test('pickTarget: respects powerupMaxChaseDist', () => {
+  const result = pickTarget({
+    aiPos: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(80, 0)],
+    powerupPos: { x: 160, z: 0 },
+    powerupBiasU: 9999,
+    powerupMaxChaseDist: 150,
+  });
+  assert.equal(result.mode, 'asteroid', 'powerup beyond max chase dist is ignored');
+});
+
+test('pickTarget: powerup within powerupMaxChaseDist wins', () => {
+  const result = pickTarget({
+    aiPos: { x: 0, z: 0 },
+    asteroids: [mockAsteroid(80, 0)],
+    powerupPos: { x: 140, z: 0 },
+    powerupBiasU: 9999,
+    powerupMaxChaseDist: 150,
+  });
+  assert.equal(result.mode, 'powerup', 'powerup within max chase dist wins');
 });
 
 // --------------------------------------------------------------------------
@@ -1326,15 +1379,18 @@ test('predictInterceptPoint: moving target leads ahead', () => {
   assert.ok(result.time > 0);
 });
 
-test('predictInterceptPoint: stationary ship falls back to current pos', () => {
+test('predictInterceptPoint: stationary ship still predicts moving target', () => {
+  // v0.39.0: a stationary ship chasing a moving powerup should still aim
+  // at the target's future position (capped by maxLookaheadS), otherwise it
+  // turns toward the current position and misses the pickup.
   const result = predictInterceptPoint(
     { x: 0, z: 0 }, { x: 0, z: 0 },
     { x: 100, z: 0 }, { x: 10, z: 0 },
     2.0,
   );
-  assert.equal(result.point.x, 100);
+  assert.equal(result.point.x, 120);
   assert.equal(result.point.z, 0);
-  assert.equal(result.time, 0);
+  assert.equal(result.time, 2.0);
 });
 
 test('predictInterceptPoint: very close target returns current pos', () => {
@@ -1348,15 +1404,15 @@ test('predictInterceptPoint: very close target returns current pos', () => {
 });
 
 test('predictInterceptPoint: respects maxLookaheadS cap', () => {
-  // Target is at (1000, 0), ship at (0, 0) moving 1 u/s. Time to target ≈ 1000s.
-  // maxLookaheadS=2.0 caps the prediction.
+  // Target is at (1000, 0) moving +X at 10 u/s, ship at (0, 0) moving 1 u/s.
+  // Time to target ≈ 1000s, but maxLookaheadS=2.0 caps the prediction.
   const result = predictInterceptPoint(
     { x: 0, z: 0 }, { x: 1, z: 0 },
-    { x: 1000, z: 0 }, { x: 0, z: 0 },
+    { x: 1000, z: 0 }, { x: 10, z: 0 },
     2.0,
   );
   assert.equal(result.time, 2.0);
-  assert.equal(result.point.x, 1000);
+  assert.equal(result.point.x, 1020);
 });
 
 // ==========================================================================

@@ -401,6 +401,14 @@ const demoAi = createDemoAi({
     const p = powerupSystem.getPendingSpawn();
     return p ? p.getPosition() : null;
   },
+  // Power-ups can be pushed by asteroid collisions (pushAway). The AI
+  // needs the velocity to predict where the power-up will be when the
+  // ship arrives; without it the ship chases the current position and
+  // misses moving pickups.
+  getPowerupVel: () => {
+    const p = powerupSystem.getPendingSpawn();
+    return p && typeof p.getVelocity === 'function' ? p.getVelocity() : { x: 0, z: 0 };
+  },
   // v0.22.x Step 4 (Laser-Awareness): tell the brain whether the
   // laser power-up is currently active. aiBrainTick branches its
   // fire-loop on this: 'bullet' → distance-gated wide-cone fire
@@ -461,11 +469,12 @@ const powerupSystem = createPowerUpSystem({
       }
       return ship;
     },
-    // Shorter lifetime in DEMO so an unclaimed power-up cycles
-    // faster (the user sees a new one every ~15s instead of ~32s).
-    // The AI can still pick one up before expiry if it's in range.
+    // Longer lifetime in DEMO so the AI has enough time to navigate
+    // the dense asteroid field and actually collect the power-up.
+    // v0.41.0: raised from 12s to 20s after the AI was given stronger
+    // powerup priority and braking authority.
     powerupLifetimeByState: {
-      DEMO: 12,
+      DEMO: 20,
       // PLAYING / GAME_OVER: default 30s
     },
     // Faster spawn cadence in DEMO so the laser power-up cycles
@@ -493,6 +502,40 @@ const powerupSystem = createPowerUpSystem({
 // entirely on the ship now and is reflected in the HUD via the events
 // bus — no player-side state mirror needed.
 let score = 0;
+
+// ---- AI tuning metrics (exposed to browser automation) ------------------
+// `window._aiMetrics` is read by the hands-off capture scripts to measure
+// powerup collection, score progression, and other AI behaviors without
+// parsing the screen. See scripts/ai_browser_capture.py.
+const aiMetrics = {
+  powerupsCollected: 0,
+  powerupTypes: [],
+  powerupsSpawned: 0,
+  asteroidsDestroyed: 0,
+  score: 0,
+};
+if (typeof window !== 'undefined') {
+  window._aiMetrics = aiMetrics;
+}
+
+// Subscribe to game events that the tuning loop cares about.
+bus.on('powerup:collected', (e) => {
+  aiMetrics.powerupsCollected += 1;
+  aiMetrics.powerupTypes.push(e.type);
+});
+bus.on('powerup:spawned', () => {
+  aiMetrics.powerupsSpawned += 1;
+});
+// score:changed is emitted on every score change; asteroidsDestroyed is
+// approximated by counting score events where the score actually went up.
+let lastScore = 0;
+bus.on('score:changed', (e) => {
+  aiMetrics.score = e.score;
+  if (e.score > lastScore) {
+    aiMetrics.asteroidsDestroyed += 1;
+  }
+  lastScore = e.score;
+});
 function resetRunState() {
   // Clear both bullet pools so no shots from the previous run linger.
   playerBullets.forEachActive((b, i) => playerBullets.despawn(i));

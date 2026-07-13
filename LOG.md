@@ -120,4 +120,112 @@ Drei Scripts für automatisierte Game-Analyse ohne manuelles Eingreifen:
 
 ---
 
-*Last updated: v0.37.2 — Powerup Coast-In + Video Analysis Pipeline (handsoff ready)*
+---
+
+### v0.38.x — Particle System Overhaul (Smoke + Debris)
+
+**Core rewrite of `src/systems/particles.js`** — performance optimization and visual overhaul:
+
+**Performance (free-list + active-list, pool 2100→720):**
+- `acquire()`: O(1) pop from `freeSmoke`/`freeDebris` arrays (was O(n) pool scan).
+- `update()`: iterates only `active` array (live particles, ~50-200), not entire pool.
+- Death path: O(1) via `p.poolIndex` (was O(n) `pool.indexOf(p)`).
+- Pool size: 720 = (8 smoke + 40 debris) × 15 concurrent explosions (was 2100).
+
+**Smoke texture (domain-warped FBM noise, 128×128):**
+- Shape is NOISE-driven, not radial-gradient. 2-level domain warping (warpStrength 1.2).
+- 4-octave FBM + cosine interpolation. Three noise layers blended (billow 40% + wisp 35% + fine detail 25%).
+- Edge fade at `pow(dist, 6)` — barely affects shape, prevents hard canvas edges.
+- Center boost removed entirely — shape is pure noise, not distance-weighted.
+
+**Smoke dynamics:**
+- Growth: `Math.pow(t, 0.3)` — explosive (at t=0.1 → 50% grown).
+- Opacity: `Math.exp(-t * 5)` — rapid fade (at t=0.4 → ~0.14 alpha in texture).
+- Base opacity: `0.09` per particle (8 puffs × 0.09 = visibly layered).
+- Count: 8 puffs per explosion (was 30, better layering with fewer).
+- Start size: 1.2u × scale. End size: 30× start (screen-filling).
+
+**4 debris texture variants (Canvas2D procedural):**
+| Variant | Shape | Color Base |
+|---------|-------|-----------|
+| 0 Angular Shard | Sharp polygon, 4-5 verts | Dark (0.45) |
+| 1 Chunky Fragment | 7-9 rounder verts with curves | Medium (0.55) |
+| 2 Elongated Splinter | Stretched Y-axis, 5-6 verts | Mid-dark (0.50) |
+| 3 Porous Crumb | Noise-based with holes | Light (0.60) |
+
+- Each variant gets unique color tint (r/g/b per variant).
+- Pool cycles through variants deterministically (poolIndex / 2 % 4).
+- Debris size: 0.4u × scale × (1-10x random) — visible chunks.
+- Debris speed: 5→20 u/s (flies further, 4× increase).
+- Spawn offset: `* 5.0` (smoke), `* 4.0` (debris) — wide scatter.
+
+**Iteration history within v0.38.x (no intermediate commits):**
+- Initial: warpStrength 0.6, center boost, radial gradient fallback
+- Fixed: makeSmokeCanvas(64) → (128) — höhere Auflösung
+- Fixed: variant 3 alpha 180 → 255 (volle Deckkraft für Porous Crumb)
+- warpStrength 0.6→1.2 (doppelte Verzerrung), center boost entfernt
+- Smoke offset: `* 0.6 → * 2.0 → * 5.0` (zunehmend versetzt)
+- Debris offset: `* 0.3 → * 1.5 → * 4.0`
+- Smoke opacity: `0.15 → 0.11 → 0.5` (final)
+- Debris rotation: `Math.random() * Math.PI * 2` (nicht alle gleich)
+- Debris stretch: `0.6-1.4` (bricht perfektes Quadrat)
+
+**Tests:** 519 pass (particles tests + smoke texture + 4 debris variants + pool behavior).
+
+### v0.40.0 — Collision Expansion + Visual Polish
+
+**Debris visual polish:**
+- `DEBRIS_SIZE_END_MULT: 0.1 → 1.0` — debris keeps constant size (no shrink).
+- Size formula separated: smoke uses `pow(t, 0.3)` growth, debris uses constant `p.sizeStart`.
+- Zufalls-Rotation: `material.rotation = random * 2π` — jedes Teil anders ausgerichtet.
+- Nicht-uniforme Skalierung: `set(size * stretch, size / stretch)` — Fläche bleibt erhalten.
+
+**Asteroid↔Asteroid collision — `findAsteroidPairs(asteroids) → [{i,j}]`:**
+- O(n²) overlap detection (acceptable for ~300 asteroids, ~45K checks at <0.1ms).
+- `resolveAsteroidCollision(a, b)`: mass-weighted elastic bounce with restitution 0.5.
+  - `pushA = overlap × (massB / totalMass)` — massengewichtete Separation.
+  - Velocity impulse along collision normal: `-(1 + e) × relVn / totalMass`.
+  - Early-exit for already-separating pairs (relVn > 0) and degenerate cases (dist < 0.001).
+
+**Asteroid↔Powerup collision:**
+- `findAsteroidPowerupIndex({asteroids, powerup})` → first overlapping index or -1.
+- `resolveAsteroidPowerupCollision(asteroid, powerup)`: push powerup out with 0.5u buffer.
+  - Kick velocity: `8 + overlap × 3` (stronger for deeper overlaps).
+  - `powerup.pushAway(vx, vz)`: accumulates kick velocity with exponential decay (drag=3.0).
+
+**Ship-asteroid detection fix:**
+- `SHIP_RADIUS: 1.4 → 2.0` — better matches the 3×-scaled ship mesh.
+  - Ship body cone has radius 1.0 at base × 3 = ~3 units wide; 2.0 covers most of the body.
+  - Previous 1.4 was too tight, causing visible overlaps without detection.
+
+**New entity APIs:**
+- `asteroid.setVelocity(vx, vz)` — mutates spec.velocity for elastic bounce.
+- `powerup.pushAway(vx, vz)` — kick velocity with exponential decay in update().
+
+**Integration:** wired into `main.js` `processCollisions()` — runs asteroid-asteroid + asteroid-powerup resolution **before** bullet/laser checks so settled positions don't affect destruction pass.
+
+**Tests added:** 18 new collision tests (pair detection, separation, momentum transfer, large/small mass, powerup push). Total suite: **539 tests pass**, Vite build OK.
+
+---
+
+### v0.41.x — AI Powerup Collection Fix
+
+**Problem:** The demo AI collected **0 of 2 powerups** in a 60s browser capture. It destroyed asteroids but ignored extras.
+
+**Root cause:** `pickTarget` in `src/entities/ai.js` used an `asteroidIsUrgent` check (`best.dist < 35`) that blocked powerup selection whenever any asteroid was within 35u. In the dense streaming bubble (~300 asteroids) this was almost always true, so the AI never chased powerups unless it happened to wander within 25u of one.
+
+**Fixes:**
+- `DEFAULTS.powerupBiasU`: 25 → 9999 (absolute priority within chase range).
+- `DEFAULTS.powerupMaxChaseDist`: 250u (covers the whole streaming bubble).
+- `pickTarget` restructured: powerup priority evaluated against the **nearest asteroid**, not the committed target.
+- Powerup approach: `allowBrake=true`, `brakeDist=60`, `coastDist=8` (early braking + tight creep-in).
+- `main.js`: DEMO powerup lifetime 12s → 20s.
+
+**Validation:**
+- 543 tests pass, build succeeds.
+- 60s browser capture: **3 of 4 powerups collected** (was 0 of 2).
+- Metrics: 10 asteroids destroyed, score 830.
+
+---
+
+*Last updated: v0.41.x — AI Powerup Collection Fix (543 tests)*

@@ -374,6 +374,8 @@ export function createPowerUp({ scene, spec } = {}) {
     getRadius() { return POWERUP_RADIUS; },
     /** @returns {{x:number,y:number,z:number}} live world position (mutated) */
     getPosition() { return group.position; },
+    /** @returns {{x:number,z:number}} current XZ velocity (push velocity, decays over time) */
+    getVelocity() { return { x: _pushVx, z: _pushVz }; },
     isExpired,
     /** Push the power-up away (e.g. from an asteroid collision). */
     pushAway,

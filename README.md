@@ -19,7 +19,7 @@ Then open http://localhost:5173/.
 |---|---|
 | `npm run dev` | Vite dev server with HMR. |
 | `npm run build` | Production build into `dist/`. |
-| `npm test` | Unit tests for the data model (21 tests). |
+| `npm test` | Unit tests across all modules (539 tests). |
 | `npm run dump:field` | ASCII visualization of the world to the terminal. |
 | `npm run dump:field:svg` | SVG visualization of the world (writes `field.svg`).
 | `python3 scripts/ai_video_loop.py --seconds 10 --fps 8` | ffmpeg screen capture → GIF + brightness/motion analysis (`artifacts/ai-video/`).

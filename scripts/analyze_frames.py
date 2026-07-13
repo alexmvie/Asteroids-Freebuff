@@ -13,15 +13,17 @@ from PIL import Image
 def analyze_frames(frames_dir, fps=3):
     frames_dir = Path(frames_dir)
     pngs = sorted(frames_dir.glob("frame_*.png"))
-    if not pngs:
+    jpgs = sorted(frames_dir.glob("frame_*.jpg"))
+    frames = pngs or jpgs
+    if not frames:
         print(f"No frames found in {frames_dir}")
         return
 
-    print(f"Analyzing {len(pngs)} frames from {frames_dir}")
-    print(f"Duration: {len(pngs)/fps:.1f}s @ {fps}fps\n")
+    print(f"Analyzing {len(frames)} frames from {frames_dir}")
+    print(f"Duration: {len(frames)/fps:.1f}s @ {fps}fps\n")
 
     metrics = []
-    for i, p in enumerate(pngs):
+    for i, p in enumerate(frames):
         img = np.array(Image.open(p).convert("RGB"))
         gray = np.mean(img, axis=2)
 
@@ -110,6 +112,16 @@ def analyze_frames(frames_dir, fps=3):
         sec = i // fps
         print(f"  s{sec:3d}  motion={avg_motion:5.1f}  bright={avg_bright:5.1f}  {bar}")
 
+    # Load game metrics captured by the browser capture script (if present)
+    game_metrics = {}
+    summary_path = frames_dir / "summary.json"
+    if summary_path.exists():
+        try:
+            summary_data = json.loads(summary_path.read_text())
+            game_metrics = summary_data.get("metrics", {}) or {}
+        except Exception:
+            game_metrics = {}
+
     # Save detailed metrics
     out_path = frames_dir / "analysis.json"
     with open(out_path, "w") as f:
@@ -124,8 +136,13 @@ def analyze_frames(frames_dir, fps=3):
             "bright_std": round(bright_std, 2),
             "idle_streaks": len(idle_streaks),
             "max_idle_streak_s": round(max(idle_streaks) / fps, 1) if idle_streaks else 0,
+            "game_metrics": game_metrics,
         }, f, indent=2)
     print(f"\nDetailed analysis saved to {out_path}")
+    if game_metrics:
+        print("\n=== Game Metrics ===")
+        for key, value in game_metrics.items():
+            print(f"  {key}: {value}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
