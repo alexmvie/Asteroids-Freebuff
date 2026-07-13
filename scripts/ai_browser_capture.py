@@ -47,6 +47,10 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={'width': 1440, 'height': 900}, device_scale_factor=1)
+        # Surface JS runtime errors and console messages so a crashed
+        # game loop is immediately visible in the capture logs.
+        page.on('pageerror', lambda err: print(f'PAGE ERROR: {err}', file=sys.stderr))
+        page.on('console', lambda msg: print(f'CONSOLE [{msg.type}]: {msg.text}', file=sys.stderr))
         # Use domcontentloaded + a short settle instead of networkidle.
         # The game canvas renders continuously, so networkidle may never fire.
         page.goto(args.url, wait_until='domcontentloaded', timeout=60000)

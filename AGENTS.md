@@ -321,6 +321,15 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
   - New regression tests: powerup wins over committed asteroid, `powerupMaxChaseDist` respected, powerup braking behavior.
   - Validation: 543 tests pass, build succeeds, 60s browser capture shows **3 of 4 powerups collected** (was 0 of 2 before).
 
+- [x] **v0.42.0 — AI Combat & Capture Stability Fixes** — `src/entities/ai.js` + `src/systems/collision.js` + `src/main.js` + `scripts/ai_browser_capture.py` + `tests/ai.test.js` + `tests/collision.test.js`. Addressed user-reported "massive bugs with collision detection and targeting" plus powerup-collection arcs:
+  - `src/main.js`: Fixed a fatal `ReferenceError` where `processCollisions()` used `dt` but was called without it (`processCollisions()` → `processCollisions(dt)`). This crashed the game loop on the first frame, producing black captures and zero activity.
+  - `src/entities/ai.js`: Re-enabled coasting for powerup targets (`allowCoast: true`) so the AI glides into the pickup radius instead of thrusting continuously, overshooting, and orbiting. Braking remains disabled for powerups (`allowBrake: false`) so the ship does not flip away.
+  - `src/systems/collision.js`: Added swept-sphere bullet collision (`findBulletHits` now accepts `dt`) to prevent fast bullets from tunneling through small asteroids. New helper `distSqToSegment2D` computes point-to-segment distance in the XZ plane.
+  - `src/systems/collision.js`: Raised `SHIP_RADIUS` from 2.0 → 3.0 to match the 3×-scaled ship mesh; mirrored in `src/entities/ai.js` (1.4 → 3.0) so AI evasion and collision checks agree with the visual model.
+  - `scripts/ai_browser_capture.py`: Added Playwright `pageerror` + `console` listeners so future JS runtime crashes are visible in capture logs instead of silently producing black/empty frames.
+  - Tests updated: powerup coast behavior, swept-sphere regression, SHIP_RADIUS assertions.
+  - Validation: **544 tests pass**, build succeeds, 60s browser capture shows score 270, 4 asteroids destroyed, 2/3 powerups collected (was 0/0/0 before the fixes).
+
 - [x] **v0.41.x+ — Frame Capture Fix** — `src/scene.js` + `scripts/analyze_frames.py`. Fixed black frames in AI video captures by adding `preserveDrawingBuffer: true` to the WebGL renderer. WebGL clears its drawing buffer after presentation by default; calling `canvas.toDataURL()` asynchronously from Playwright reads an already-cleared buffer, producing entirely black frames. `preserveDrawingBuffer: true` retains the buffer contents until the next explicit clear. `analyze_frames.py` now detects and warns when all frames are black, pointing to the renderer setting. Validation: 543 tests pass, build succeeds, 30s browser capture shows mean brightness ~28.5 and mean motion 5.4 (27% high-motion frames).
 
 - [x] **Particle system (smoke + debris)** — `src/systems/particles.js`. Complete overhaul with performance optimization and visual upgrade:

@@ -22,13 +22,12 @@
 export const BULLET_RADIUS = 0.15;
 
 /** Ship collision radius (approximate bounding sphere of the ship mesh).
- * Increased from 1.4 to 2.0 in v0.40.x to better match the 3x-scaled
- * visual mesh (the ship body cone has radius 1.0 at the base × 3 =
- * ~3 units wide; 2.0 covers most of the body while still allowing
- * the pointed nose / tail to overlap slightly without feeling unfair).
- * The previous 1.4 was too tight for the 3x-scaled ship, causing
- * visible overlaps without collision detection. */
-export const SHIP_RADIUS = 2.0;
+ * Increased to 3.0 in v0.42.x to match the 3x-scaled visual mesh
+ * (the ship body cone has radius 1.0 at the base × 3 = ~3 units
+ * wide; the full wingspan is ~6 units). The previous 2.0 was still
+ * too tight, causing the visual wings and nose to overlap asteroids
+ * without registering hits. */
+export const SHIP_RADIUS = 3.0;
 
 /** Score table by asteroid size (classic Asteroids convention). */
 export const SCORE_BY_SIZE = Object.freeze({
@@ -58,6 +57,34 @@ export function spheresOverlap(a, b) {
 // ---- Bullet ↔ asteroid --------------------------------------------------
 
 /**
+ * Squared distance from a point to a line segment in 2D (XZ plane).
+ * Used for swept-sphere bullet collision so fast bullets don't tunnel
+ * through small asteroids between frames.
+ *
+ * @param {{x:number,z:number}} p
+ * @param {{x:number,z:number}} a segment start
+ * @param {{x:number,z:number}} b segment end
+ * @returns {number}
+ */
+function distSqToSegment2D(p, a, b) {
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const lenSq = dx * dx + dz * dz;
+  if (lenSq === 0) {
+    const ddx = p.x - a.x;
+    const ddz = p.z - a.z;
+    return ddx * ddx + ddz * ddz;
+  }
+  let t = ((p.x - a.x) * dx + (p.z - a.z) * dz) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const projX = a.x + t * dx;
+  const projZ = a.z + t * dz;
+  const ddx = p.x - projX;
+  const ddz = p.z - projZ;
+  return ddx * ddx + ddz * ddz;
+}
+
+/**
  * Find all bullet↔asteroid collisions in the current frame.
  *
  * Returns an array of `{ bulletIndex, asteroidIndex }` pairs. Each bullet
@@ -65,27 +92,54 @@ export function spheresOverlap(a, b) {
  * the same asteroid may appear in multiple pairs if multiple bullets hit
  * it on the same frame — the caller is expected to de-dup with a `Set`.
  *
+ * v0.42.0: swept-sphere check. Fast bullets (400 u/s) can move ~6.7 units
+ * per frame at 60 FPS, which is larger than small asteroids. We test the
+ * segment from the bullet's previous position to its current position
+ * against each asteroid's sphere in the XZ plane (the game is 2DOF on XZ).
+ *
  * @param {{
  *   asteroids: Array<{ getPosition: () => {x:number,y:number,z:number}, getRadius: () => number }>,
  *   bullets: { forEachActive: (fn: (b: any, i: number) => void) => void },
  *   bulletRadius?: number,
+ *   dt?: number,
  * }} opts
  * @returns {Array<{ bulletIndex: number, asteroidIndex: number }>}
  */
-export function findBulletHits({ asteroids, bullets, bulletRadius = BULLET_RADIUS } = {}) {
+export function findBulletHits({ asteroids, bullets, bulletRadius = BULLET_RADIUS, dt = 0 } = {}) {
   if (!asteroids || !bullets) return [];
   const hits = [];
   bullets.forEachActive((b, bulletIndex) => {
     const bp = b.position;
+    // Previous position: current - velocity * dt. If dt is missing or
+    // zero, fall back to a discrete position check.
+    const useSwept = dt > 0 && b.velocity;
+    const prevX = useSwept ? bp.x - b.velocity.x * dt : bp.x;
+    const prevZ = useSwept ? bp.z - b.velocity.z * dt : bp.z;
+    const prevY = useSwept ? bp.y - b.velocity.y * dt : bp.y;
     for (let i = 0; i < asteroids.length; i++) {
       const a = asteroids[i];
       const ap = a.getPosition();
+      const ar = a.getRadius();
+      // Discrete check first (handles slow/stationary bullets).
       if (spheresOverlap(
         { x: bp.x, y: bp.y, z: bp.z, r: bulletRadius },
-        { x: ap.x, y: ap.y, z: ap.z, r: a.getRadius() },
+        { x: ap.x, y: ap.y, z: ap.z, r: ar },
       )) {
         hits.push({ bulletIndex, asteroidIndex: i });
         break; // one bullet → one asteroid
+      }
+      // Swept-sphere check in XZ plane (2DOF play plane).
+      if (useSwept) {
+        const distSq = distSqToSegment2D(
+          { x: ap.x, z: ap.z },
+          { x: prevX, z: prevZ },
+          { x: bp.x, z: bp.z },
+        );
+        const combinedR = bulletRadius + ar;
+        if (distSq < combinedR * combinedR) {
+          hits.push({ bulletIndex, asteroidIndex: i });
+          break;
+        }
       }
     }
   });

@@ -245,3 +245,21 @@ Drei Scripts für automatisierte Game-Analyse ohne manuelles Eingreifen:
 - 543 tests pass, build succeeds.
 - 30s browser capture: mean brightness ~28.5, mean motion 5.4, 27% high-motion frames.
 
+
+---
+
+### v0.42.0 — AI Combat & Capture Stability Fixes
+
+**Problem:** User reported "massive bugs with collision detection and targeting" plus powerup-collection arcs where the AI would fly toward a powerup, arc around it, and fail to collect it in one pass.
+
+**Root causes & fixes:**
+- `src/main.js`: `processCollisions()` used `dt` but was called without it, causing a `ReferenceError` that crashed the game loop on frame 1. This produced entirely black captures with score/activity at 0. Fixed by passing `dt` into `processCollisions(dt)`.
+- `src/entities/ai.js`: Powerup targets had both braking AND coasting disabled, forcing continuous thrust. The ship overshot the pickup radius and orbited the powerup. Re-enabled coasting (`allowCoast: true`) for powerups so the ship glides into the pickup radius. Braking stays disabled so the ship does not flip away.
+- `src/systems/collision.js`: Fast bullets (400 u/s) could tunnel through small asteroids between frames. Added swept-sphere collision in `findBulletHits` using a new `distSqToSegment2D` helper.
+- `src/systems/collision.js` + `src/entities/ai.js`: Raised `SHIP_RADIUS` from 2.0/1.4 → 3.0 to match the 3×-scaled ship mesh, making AI evasion and collision checks consistent with the visual model.
+- `scripts/ai_browser_capture.py`: Added Playwright `pageerror` and `console` listeners so JS runtime crashes are visible in capture logs instead of silently producing black/empty frames.
+
+**Validation:**
+- 544 tests pass, build succeeds.
+- 60s browser capture: score 270, 4 asteroids destroyed, 2/3 powerups collected (was 0/0/0 before the fixes).
+

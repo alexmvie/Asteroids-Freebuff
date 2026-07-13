@@ -42,8 +42,9 @@ import { YAW_INERTIA_TAU } from './ship-constants.js';
 /**
  * Ship collision radius (matches SHIP_RADIUS in src/systems/collision.js).
  * Used for radius-aware evade and collision threat detection.
+ * v0.42.0: raised from 1.4 to 3.0 to match the 3x-scaled visual mesh.
  */
-const SHIP_RADIUS = 1.4;
+const SHIP_RADIUS = 3.0;
 
 /**
  * Predictive evade buffer (world units). Added to ship + asteroid radius
@@ -749,22 +750,21 @@ export function aiBrainTick({
       aimPos = predictPowerupRestingPoint(target.pos, target.vel);
     }
 
-    // v0.41.0: Powerups were allowed to brake (allowBrake=true) to avoid
-    // overshooting the small pickup radius.
-    // v0.41.1: Powerups need much earlier braking because the ship's
-    // linear drag is shallow. At 60 u/s the stopping distance is ~60u,
-    // so brakeDist is raised to 60. coastDist is kept tight (8u) so the
-    // ship creeps into the 2u pickup radius instead of drifting past it.
+    // v0.42.0: Powerups are non-colliding collectibles. The ship should
+    // fly straight through them at full speed — active braking causes the
+    // ship to flip 180° and arc away from the pickup, which is exactly the
+    // "bogen" the user reported. Disable braking for powerups; rely on
+    // linear drag and a tight coast-in distance to avoid overshoot.
     const isPowerup = target.mode === 'powerup';
     const ec = engageTarget(
       aiPos, aiYaw, aiVel, target.pos, aiAngularVel,
       thrustHeadingGate,
       isPowerup ? 8 : coastDist,
       wasBraking,
-      true,
+      !isPowerup, // allowBrake: false for powerups
       isPowerup ? 60 : 30,
       interceptLookaheadS,
-      true,
+      true, // allowCoast: true for powerups — cut thrust and glide into pickup radius
       aimPos,
     );
 

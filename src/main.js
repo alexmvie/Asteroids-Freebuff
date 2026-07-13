@@ -601,7 +601,7 @@ const input = createInputSystem({
  * Without this split, the AI's bullets would silently pass through
  * asteroids in DEMO (the previous behavior).
  */
-function processCollisions() {
+function processCollisions(dt) {
   const state = stateMachine.getState();
   if (state === State.GAME_OVER) return;
 
@@ -637,7 +637,7 @@ function processCollisions() {
   // PLAYING: only the player shoots (their bullets go to playerBullets).
   // Each pool is independent — no cooldown sharing, no score bleed.
   const activePool = state === State.DEMO ? aiBullets : playerBullets;
-  const bulletHits = findBulletHits({ asteroids, bullets: activePool });
+  const bulletHits = findBulletHits({ asteroids, bullets: activePool, dt });
   const asteroidsToRemove = new Set();
   for (const hit of bulletHits) {
     activePool.despawn(hit.bulletIndex);
@@ -975,7 +975,7 @@ function tick(dt) {
   // src/systems/powerup-system.js.
   powerupSystem.update(dt, field.getEntities());
 
-  processCollisions();
+  processCollisions(dt);
   particles.update(dt);
   updateCamera(dt);
 

@@ -309,9 +309,10 @@ test('aiBrainTick: close target + stationary → thrusts (low closing speed, no 
   assert.equal(result.thrust, true, 'stationary → no coast-in, thrust to accelerate');
 });
 
-test('aiBrainTick: powerup target near the ship brakes to avoid overshoot', () => {
-  // v0.41.0: powerups are allowed to brake. At 15u with 30 u/s closing speed,
-  // dist < BRAKE_DIST=30 && closingSpeed=30 > BRAKE_ENTER_SPEED=25 → brake.
+test('aiBrainTick: powerup target near the ship does NOT brake — fly straight through pickup', () => {
+  // v0.42.0: powerups are non-colliding collectibles. Braking causes the
+  // ship to flip 180° and arc away from the pickup (the reported "bogen").
+  // The ship should fly straight through at full speed.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: -Math.PI / 2,
@@ -323,8 +324,8 @@ test('aiBrainTick: powerup target near the ship brakes to avoid overshoot', () =
     powerupBiasU: 9999,
   });
   assert.equal(result.mode, 'powerup');
-  assert.equal(result.braking, true, 'powerup intercept should brake to avoid overshoot');
-  assert.equal(result.thrust, true, 'brake thrusts backward to shed speed');
+  assert.equal(result.braking, false, 'powerup intercept should NOT brake');
+  assert.equal(result.thrust, true, 'powerup: thrust straight through the pickup');
 });
 
 // v0.37.2 regression: powerup with low closing speed within coastDist should still thrust

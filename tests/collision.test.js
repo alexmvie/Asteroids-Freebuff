@@ -228,6 +228,30 @@ test('findBulletHits: bulletRadius option narrows the hit zone', () => {
   assert.equal(findBulletHits({ asteroids, bullets, bulletRadius: 0.05 }).length, 0);
 });
 
+test('findBulletHits: swept-sphere catches fast bullet passing through small asteroid', () => {
+  // Bullet radius 0.15, asteroid radius 1.5. Bullet crosses the asteroid
+  // during the frame and ends up past it. The discrete position check at
+  // the end point misses; swept-sphere should catch it.
+  const asteroids = [fakeAsteroid(0, 0, 0, 1.5)];
+  const b = {
+    position: { x: -2, y: 0, z: 0 },
+    velocity: { x: -500, y: 0, z: 0 },
+  };
+  const bullets = {
+    forEachActive(fn) { fn(b, 0); },
+  };
+  // Without dt (discrete only) → bullet at (-2,0,0), asteroid r=1.5,
+  // centers 2 apart, sum=1.65 → miss.
+  assert.deepEqual(findBulletHits({ asteroids, bullets }).length, 0);
+  // With dt=0.02 (20ms at 50 FPS): previous pos = (-2 + 10, 0, 0) = (8,0,0).
+  // Path segment from (8,0,0) to (-2,0,0) passes through origin.
+  // Distance from origin to segment = 0 < 0.15 + 1.5 → hit.
+  const hits = findBulletHits({ asteroids, bullets, dt: 0.02 });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].bulletIndex, 0);
+  assert.equal(hits[0].asteroidIndex, 0);
+});
+
 test('findBulletHits: missing args → empty list, no throw', () => {
   assert.deepEqual(findBulletHits({}), []);
   assert.deepEqual(findBulletHits({ asteroids: [] }), []);
@@ -493,6 +517,6 @@ test('BULLET_RADIUS and SHIP_RADIUS are positive scalars', () => {
   assert.ok(typeof SHIP_RADIUS === 'number' && SHIP_RADIUS > 0);
 });
 
-test('SHIP_RADIUS is 2.0 (v0.40.x increase from 1.4)', () => {
-  assert.equal(SHIP_RADIUS, 2.0);
+test('SHIP_RADIUS is 3.0 (v0.42.x matches 3x-scaled visual mesh)', () => {
+  assert.equal(SHIP_RADIUS, 3.0);
 });
