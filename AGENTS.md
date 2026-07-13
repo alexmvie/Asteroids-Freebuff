@@ -321,6 +321,8 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
   - New regression tests: powerup wins over committed asteroid, `powerupMaxChaseDist` respected, powerup braking behavior.
   - Validation: 543 tests pass, build succeeds, 60s browser capture shows **3 of 4 powerups collected** (was 0 of 2 before).
 
+- [x] **v0.41.x+ — Frame Capture Fix** — `src/scene.js` + `scripts/analyze_frames.py`. Fixed black frames in AI video captures by adding `preserveDrawingBuffer: true` to the WebGL renderer. WebGL clears its drawing buffer after presentation by default; calling `canvas.toDataURL()` asynchronously from Playwright reads an already-cleared buffer, producing entirely black frames. `preserveDrawingBuffer: true` retains the buffer contents until the next explicit clear. `analyze_frames.py` now detects and warns when all frames are black, pointing to the renderer setting. Validation: 543 tests pass, build succeeds, 30s browser capture shows mean brightness ~28.5 and mean motion 5.4 (27% high-motion frames).
+
 - [x] **Particle system (smoke + debris)** — `src/systems/particles.js`. Complete overhaul with performance optimization and visual upgrade:
 
   **Performance (free-list + active-list, pool 2100→720):**

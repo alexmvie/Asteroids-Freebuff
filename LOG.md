@@ -229,3 +229,19 @@ Drei Scripts für automatisierte Game-Analyse ohne manuelles Eingreifen:
 ---
 
 *Last updated: v0.41.x — AI Powerup Collection Fix (543 tests)*
+---
+
+### v0.41.x+ — Frame Capture Fix
+
+**Problem:** `scripts/analyze_frames.py` reported `motion=0.0` for all frames in AI video captures. Investigation showed the captured frames were entirely black (mean brightness 0, std 0).
+
+**Root cause:** WebGL clears its drawing buffer after presentation by default. When Playwright asynchronously called `canvas.toDataURL('image/jpeg', 0.92)` from `page.evaluate()`, it read an already-cleared buffer.
+
+**Fix:**
+- `src/scene.js`: Added `preserveDrawingBuffer: true` to the `THREE.WebGLRenderer` constructor. This retains the buffer contents until the next explicit clear, so `toDataURL()` captures the rendered frame.
+- `scripts/analyze_frames.py`: Added a clear warning when all frames are entirely black, pointing to the `preserveDrawingBuffer` setting.
+
+**Validation:**
+- 543 tests pass, build succeeds.
+- 30s browser capture: mean brightness ~28.5, mean motion 5.4, 27% high-motion frames.
+

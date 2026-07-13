@@ -68,6 +68,7 @@ export function createScene({ canvas } = {}) {
     antialias: true,
     canvas,
     powerPreference: 'high-performance',
+    preserveDrawingBuffer: true,
   });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));

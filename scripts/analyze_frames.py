@@ -55,6 +55,13 @@ def analyze_frames(frames_dir, fps=3):
     motions = [m["motion"] for m in metrics]
     center_brights = [m["center_bright"] for m in metrics]
 
+    # Detect completely black frames (common when WebGL preserveDrawingBuffer
+    # is not set and canvas.toDataURL() reads a cleared buffer).
+    black_frames = sum(1 for b in brights if b == 0)
+    if black_frames == len(metrics) and len(metrics) > 0:
+        print("\n[!] WARNING: All frames are entirely black!")
+        print("[!] Ensure WebGL preserveDrawingBuffer: true is set in the renderer.\n")
+
     print("=== Aggregate Metrics ===")
     print(f"Brightness:   mean={np.mean(brights):.1f}  min={min(brights):.1f}  max={max(brights):.1f}")
     print(f"CenterBright: mean={np.mean(center_brights):.1f}  min={min(center_brights):.1f}  max={max(center_brights):.1f}")
