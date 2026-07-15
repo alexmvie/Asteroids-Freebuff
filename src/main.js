@@ -43,6 +43,7 @@ import { VERSION } from './version-constants.js';
 import { createDemoAi } from './entities/ai.js';
 import { createAsteroidField } from './systems/asteroid-field.js';
 import { createPowerUpSystem } from './systems/powerup-system.js';
+import { createPirateTexture, applyPirateTexture } from './systems/pirate-texture.js';
 import { createParticleSystem } from './systems/particles.js';
 import { createCaptureMarkers } from './systems/capture-markers.js';
 import { createAiFlightDebug } from './systems/ai-flight-debug.js';
@@ -289,9 +290,20 @@ const demoAi = createDemoAi({
 // `AI_TUNABLES.aggroDist` is `0` by default; the per-factory override
 // turns the pirate behavior ON for these two ships only). Shared
 // `aiWeapon` bullet pool. Always visible (no state-dependent toggle
-// for v0.56.0 — future work for pirate-mode combat). Tinted red via
-// the `tintShipAs` helper to distinguish from the player + demo AI.
+// for v0.56.0 — future work for pirate-mode combat). Tinted red AND
+// textured with the v0.57.0 procedural hazard pattern so the pirates
+// look visibly distinct from the smooth white/cyan player + demo AI.
 const PIRATE_RED = 0xff3333;
+
+// v0.57.0: generate the shared pirate texture ONCE. Browser-only:
+// `createPirateTexture` throws in Node because it uses
+// `document.createElement('canvas')`. In production this only runs
+// in the page-load path (the bottom of main.js after Vite has set
+// up the DOM). Pixel content: charcoal base + 6 diagonal hazard
+// stripes (dark-red alternating with base) + 4 amber warning
+// triangles at deterministic positions (seed=1337). Tiled 2x2
+// across each ship mesh via `texture.repeat`.
+const pirateTexture = createPirateTexture({ size: 256, seed: 1337, repeat: 2 });
 
 /**
  * Walk a ship's mesh tree and recolor every material to `colorHex`.
@@ -325,6 +337,13 @@ const pirate1 = createDemoAi({
 tintShipAs(pirate1.getShip(), PIRATE_RED);
 pirate1.getShip().reset({ x: 100, y: 0, z: 80 });
 
+// v0.57.0: apply the procedural pirate texture (hazard stripes +
+// warning triangles) so the pirates look visibly distinct from the
+// smooth cyan-winged player/demo AI ships. The texture is generated
+// ONCE and shared between both pirates (canvas paint is the
+// expensive bit; the THREE.CanvasTexture wrapper is reusable).
+applyPirateTexture(pirate1.getShip(), pirateTexture);
+
 // Pirate 2 — spawns at (-100, -80) facing toward origin.
 const pirate2 = createDemoAi({
   scene,
@@ -340,6 +359,7 @@ const pirate2 = createDemoAi({
 });
 tintShipAs(pirate2.getShip(), PIRATE_RED);
 pirate2.getShip().reset({ x: -100, y: 0, z: -80 });
+applyPirateTexture(pirate2.getShip(), pirateTexture);
 
 // Same GLB swap for the AI demo ship, so the player and the NPC match.
 loadShipModel(demoAi.getShip(), '/models/skyfighter.glb', { modelRotationY: -Math.PI / 2 }).then((result) => {

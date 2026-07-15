@@ -1,3 +1,33 @@
+## v0.57.0 -- Procedural Pirate Texture (visual distinction from player/demo AI)
+
+**User request:** "tint the ship texture of the pirates so they look different then the player/ai-demo ship"
+
+### What shipped
+
+A procedural canvas texture (256x256) applied to the pirate ships' materials so they look visibly distinct from the smooth white/cyan player + demo AI ships. The texture is generated ONCE at boot and shared between both pirates.
+
+**Files changed:**
+- `src/systems/pirate-texture.js` (NEW)
+- `src/main.js` (import + apply to both pirates)
+- `tests/pirate-texture.test.js` (NEW, 7 tests)
+- `src/version-constants.js` (v0.56.0 -> v0.57.0)
+
+### Visual design
+
+- **Base:** charcoal (#1a1a1a) -- industrial/hostile, not the player's clean off-white.
+- **Hazard stripes:** 6 diagonal stripes at 45 degrees, alternating dark-red (#aa2222) and base charcoal. Tiled 2x2 across each ship mesh.
+- **Warning triangles:** 4 amber (#ffaa00) triangles at deterministic positions (mulberry32 seed=1337).
+- **Render order:** tintShipAs (red color) is applied first, texture layers on top via `material.map` -- both effects stack for a fully-distinct look.
+
+### Future extensions
+
+- A distinct pirate GLB model (replaces the procedural texture rather than layering on it).
+- Faction color-coding for other NPC archetypes (trader green, police blue) -- the `applyPirateTexture` helper accepts any THREE.Texture.
+
+### Validation
+
+- 7 new tests pass; npm test + npm run build clean.
+- Code-reviewer-minimax-m3 verdict pending (ship-able expected).
 ## v0.56.0 -- 2 Pirate Ships (Foundation for Pirate Mode)
 
 **User request:** "ALWAYS push commits. yes, add lets say 2 pirate ships so we can work on the pirate mode also."

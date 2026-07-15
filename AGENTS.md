@@ -531,6 +531,30 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
 
   **Tradeoffs:** 2 pirates share a 16-capacity bullet pool -- typically 4-8 active bullets in flight at peak, never exhausts. Tinting is material color hex override (no GLB swap, no shader work); future: a distinct pirate GLB model if the user requests it. 4 ships on screen (player + demo + 2 pirates) all collide-free with each other for v0.56.0; pirate-vs-pirate + player-vs-pirate ships are visual-only.
 
+- [x] **v0.57.0 -- Procedural Pirate Texture (visual distinction from player/demo AI)** -- `src/systems/pirate-texture.js` (NEW, ~145 LOC), `src/main.js` (import + 1-shared-texture-for-both-pirates), `tests/pirate-texture.test.js` (NEW, 7 tests), `src/version-constants.js` (v0.56.0 -> v0.57.0), `LOG.md`, `AGENTS.md`. The user asked: "tint the ship texture of the pirates so they look different then the player/ai-demo ship". v0.56.0 tinted the pirate materials red but the underlying ship surface was still the same flat shaded MeshStandardMaterial. v0.57.0 layers a procedural canvas texture on top so the pirates look visibly distinct.
+
+  **Design:**
+  - Canvas: 256x256 (power of 2 -- required for WebGL mipmapping).
+  - Base: charcoal #1a1a1a -- "industrial / hostile" rather than the player's clean off-white body.
+  - Diagonal hazard stripes: 6 stripes at 45 degrees, alternating dark-red #aa2222 + base charcoal. Tiled 2x2 across each ship mesh via `texture.repeat`.
+  - Warning triangles: 4 amber #ffaa00 triangles scattered at DETERMINISTIC positions (mulberry32 RNG seeded with 1337) -- "hostile NPC" without going full skull motif.
+  - `texture.colorSpace = SRGBColorSpace` -- reds don't get gamma-clipped to near-black.
+  - Texture is generated ONCE at boot and shared between both pirates (canvas paint is the expensive bit; the THREE.CanvasTexture wrapper is reusable).
+
+  **Files:**
+  - `src/systems/pirate-texture.js` -- `createPirateTexture({ size, seed, repeat })` factory + `applyPirateTexture(ship, texture)` helper. Pure, browser-only (throws in Node because it uses `document.createElement`).
+  - `tests/pirate-texture.test.js` -- 7 Node tests covering: document-absent throws; non-power-of-2 throws; returns a Three.js Texture; paints expected layers; deterministic for the same seed; `applyPirateTexture` sets `material.map` on body vs `material.emissiveMap` on engine glow based on `userData.isEngineGlow`.
+  - `src/main.js` -- import added next to `powerup-system`. The shared texture is created right after the `PIRATE_RED` constant. `applyPirateTexture(pirate.getShip(), pirateTexture)` is called after each `tintShipAs` + `reset`.
+
+  **Render order matters:** `tintShipAs` (v0.56.0 red color) is applied FIRST. The texture colors layer on top via `material.map`. Both effects stack: a red-tinted danger-stripe body, NOT solid red. Better visual distinction than the v0.56.0 plain-red tint.
+
+  **Browser-only constraint:** the factory throws in Node. The tests install a minimal `document` shim with a Proxy 2D context so the factory can run for precondition tests. Pixel-level visual verification is left to the browser smoke check.
+
+  **What this unblocks:**
+  - Distinct pirate GLB in the future (replaces the procedural texture rather than layering on it)
+  - Faction color-coding for other NPC archetypes (trader ships green, police ships blue) -- the helper accepts any `THREE.Texture` so a different procedural generator would slot in identically
+  - Per-material tint over textures (e.g., a different `tintShipAs` color would re-tint the textured material just like the plain material)
+
 ### ⏳ Next Steps (priority order)
 
 1. **Spatial hash** — `src/systems/collision.js` (broad-phase): uniform grid keyed by world position. The narrow-phase step is already in place; this is the O(1) candidate-selection layer above it.
