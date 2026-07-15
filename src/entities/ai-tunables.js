@@ -50,6 +50,15 @@ export const AI_TUNABLE_DEFAULTS = Object.freeze({
   /** Powerup chase radius (world units). Beyond → ignored. */
   powerupMaxChaseDist: 350,
 
+  /**
+   * Pirate aggression distance (world units). A pirate AI chases +
+   * shoots any ship within this radius. `0` = pacifist (the pirate
+   * behavior never fires — the demo AI default). The factory's
+   * `options.aggroDist` overrides this per-AI; pirates typically pass
+   * `300`. Tunable via the AI Live Tuners panel.
+   */
+  aggroDist: 0,
+
   // ------- Ship feel (owned here for the tuner surface) -------
   /** Ship max flight speed (XZ, u/s). */
   shipMaxSpeed: 200,

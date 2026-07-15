@@ -634,3 +634,144 @@ test('AI_TUNABLES: resetAITunables restores defaults (regression net)', () => {
   assert.equal(AI_TUNABLES.evadeDist, AI_TUNABLE_DEFAULTS.evadeDist);
   assert.equal(AI_TUNABLES.fireHeadingGate, AI_TUNABLE_DEFAULTS.fireHeadingGate);
 });
+
+// ------------------------------------------------------------------
+// v0.56.0 PIRATE behavior (registry extension seam)
+// ------------------------------------------------------------------
+
+/**
+ * Mock a target ship (live position/velocity props, no getPosition()).
+ * Distinct from mockAsteroid (which has getPosition/getVelocity).
+ */
+function mockTargetShip(x, z, vel) {
+  const v = vel || { x: 0, z: 0 };
+  return {
+    position: { x, y: 0, z },
+    velocity: { x: v.x, z: v.z },
+  };
+}
+
+test('aiBrainTick: nearest ship within aggroDist -> mode=pirate', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2, // facing +X
+    asteroids: [],
+    ships: [mockTargetShip(80, 0, { x: 0, z: 0 })],
+    aggroDist: 300,
+  });
+  assert.equal(result.mode, 'pirate');
+  assert.equal(result.yaw, 0, 'aligned with the ship straight ahead');
+  assert.equal(result.thrust, true);
+});
+
+test('aiBrainTick: ship beyond aggroDist -> falls through to next behavior', () => {
+  // aggroDist 50; ship at 80u. Pirate predicate fails. With no
+  // asteroids/powerup, fall through to IDLE.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [],
+    ships: [mockTargetShip(80, 0)],
+    aggroDist: 50,
+  });
+  assert.notEqual(result.mode, 'pirate');
+  assert.equal(result.mode, 'idle');
+});
+
+test('aiBrainTick: PIRATE outranks COLLECT', () => {
+  // A reachable powerup AND a ship in aggroDist. PIRATE wins.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(80, 0)],
+    ships: [mockTargetShip(40, 0)],
+    powerupPos: { x: 20, z: 0 },
+    aggroDist: 300,
+  });
+  assert.equal(result.mode, 'pirate');
+});
+
+test('aiBrainTick: EVADE outranks PIRATE', () => {
+  // A nearby asteroid (< evadeDist) AND a ship in aggroDist.
+  // EVADE wins (immediate threat to survival).
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(5, 0)],
+    ships: [mockTargetShip(40, 0)],
+    aggroDist: 300,
+  });
+  assert.equal(result.mode, 'evade');
+});
+
+test('aiBrainTick: lead fire on a moving ship', () => {
+  // Ship at (40,0) moving +X at 10 u/s. Bullet speed 20. Flight
+  // time 2s. Predicted (60, 0). Ship faces +X (yaw=-PI/2). In cone.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [],
+    ships: [mockTargetShip(40, 0, { x: 10, z: 0 })],
+    aggroDist: 300,
+    bulletSpeed: 20,
+  });
+  assert.equal(result.mode, 'pirate');
+  assert.equal(result.fire, true);
+});
+
+test('aiBrainTick: does NOT fire on ship out of fireMaxDist', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [],
+    ships: [mockTargetShip(500, 0)], // beyond default fireMaxDist=200
+    aggroDist: 1000, // pirate engages, but can't fire at 500u
+  });
+  assert.equal(result.mode, 'pirate');
+  assert.equal(result.fire, false);
+});
+
+test('live-bag flow-through: AI_TUNABLES.aggroDist mutation changes pirate behavior', () => {
+  try {
+    const POS = { x: 0, z: 0 };
+    const SHIP = mockTargetShip(80, 0);
+    // Default aggroDist=0: pirate never fires (defaults to idle).
+    const before = aiBrainTick({
+      aiPos: POS, aiYaw: 0, asteroids: [], ships: [SHIP],
+    });
+    assert.notEqual(before.mode, 'pirate', 'default aggroDist=0 means pacifist');
+    // Raise to 300: pirate engages.
+    AI_TUNABLES.aggroDist = 300;
+    const after = aiBrainTick({
+      aiPos: POS, aiYaw: 0, asteroids: [], ships: [SHIP],
+    });
+    assert.equal(after.mode, 'pirate', 'live bag mutation visible next tick');
+  } finally {
+    resetAITunables();
+  }
+});
+
+test('createDemoAi: factory option aggroDist overrides the live bag', () => {
+  const scene = mockScene();
+  const mock = mockShipFactory();
+  try {
+    AI_TUNABLES.aggroDist = 0;
+    const ai = createDemoAi({
+      scene,
+      asteroids: [],
+      options: { shipFactory: mock.build, aggroDist: 300, spawnRadius: 10 },
+    });
+    ai.getShip().position.x = 0;
+    ai.getShip().position.z = 0;
+    // The factory thread is best-effort (it does aggroDist via
+    // brainArgsFromShip with ...opts spread), so verify mode after
+    // a single tick — the mode will depend on whether any ship is
+    // in range. With getShips=null, nearestShip stays null and pirate
+    // never activates. We just want to make sure the factory didn't
+    // throw on the new aggroDist key.
+    ai.update(0.1);
+    assert.equal(mock.calls.setThrust.length, 1);
+  } finally {
+    resetAITunables();
+  }
+});

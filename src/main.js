@@ -284,6 +284,63 @@ const demoAi = createDemoAi({
   // rule-based brain by default (see createDemoAi in src/entities/ai.js).
 });
 
+// ---- v0.56.0: 2 pirate ships foundation -------------------------
+// Same factory, pirate role via `options.aggroDist: 300` (the live
+// `AI_TUNABLES.aggroDist` is `0` by default; the per-factory override
+// turns the pirate behavior ON for these two ships only). Shared
+// `aiWeapon` bullet pool. Always visible (no state-dependent toggle
+// for v0.56.0 — future work for pirate-mode combat). Tinted red via
+// the `tintShipAs` helper to distinguish from the player + demo AI.
+const PIRATE_RED = 0xff3333;
+
+/**
+ * Walk a ship's mesh tree and recolor every material to `colorHex`.
+ * Applied AFTER `createDemoAi` calls `createShip` inside its factory.
+ * The engine glow (tagged `isEngineGlow`) is recolored too — the
+ * procedural glow's emissive is set to match the body so the pirate
+ * glow looks red during thrust instead of the default cyan.
+ */
+function tintShipAs(ship, colorHex) {
+  ship.mesh.traverse((obj) => {
+    if (obj.isMesh && obj.material) {
+      obj.material.color.setHex(colorHex);
+      if (obj.material.emissive) obj.material.emissive.setHex(colorHex);
+    }
+  });
+}
+
+// Pirate 1 — spawns at (+100, +80) facing toward origin.
+const pirate1 = createDemoAi({
+  scene,
+  asteroids: field.getEntities(),
+  weapon: aiWeapon,
+  getShips: () => [ship], // pirate targets the player ship
+  options: {
+    aggroDist: 300,
+    spawnRadius: 0,
+    spawnYaw: 0,
+    rng: () => 0,
+  },
+});
+tintShipAs(pirate1.getShip(), PIRATE_RED);
+pirate1.getShip().reset({ x: 100, y: 0, z: 80 });
+
+// Pirate 2 — spawns at (-100, -80) facing toward origin.
+const pirate2 = createDemoAi({
+  scene,
+  asteroids: field.getEntities(),
+  weapon: aiWeapon,
+  getShips: () => [ship],
+  options: {
+    aggroDist: 300,
+    spawnRadius: 0,
+    spawnYaw: Math.PI,
+    rng: () => 0.5,
+  },
+});
+tintShipAs(pirate2.getShip(), PIRATE_RED);
+pirate2.getShip().reset({ x: -100, y: 0, z: -80 });
+
 // Same GLB swap for the AI demo ship, so the player and the NPC match.
 loadShipModel(demoAi.getShip(), '/models/skyfighter.glb', { modelRotationY: -Math.PI / 2 }).then((result) => {
   if (result.success && typeof console !== 'undefined') {
@@ -940,6 +997,11 @@ function tick(dt) {
   // AI is self-gating — calls update() every frame; the AI pauses
   // itself when disabled (outside DEMO). See onEnter/onExit above.
   demoAi.update(dt);
+
+  // v0.56.0: pirate ships tick every frame regardless of state.
+  // They're persistent world fixtures, not demo-state NPCs.
+  pirate1.update(dt);
+  pirate2.update(dt);
 
   // ---- Power-up system -----------------------------------------------
   // Updates the active power-up's countdown, the pending power-up's

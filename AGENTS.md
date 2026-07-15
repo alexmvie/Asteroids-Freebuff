@@ -494,6 +494,43 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
   **What this unblocks**: pirate AI (`{ name:'pirate', run: (s, a) => steerTo(a, predictPosition(s.nearestShip, a.aiPos, a.bulletSpeed)) }`), station landing, formation flying, all without touching the core loop.
 
 
+- [x] **v0.56.0 -- 2 Pirate Ships (Foundation for Pirate Mode)** -- `src/entities/ai.js` (extended with pirate behavior + ship targets + fire on ships), `src/entities/ai-tunables.js` (added `aggroDist` key, 10 keys total), `src/main.js` (2 pirates spawned, red-tinted, wired into render loop), `tests/ai.test.js` (8 new tests), `src/version-constants.js`, `LOG.md`, `AGENTS.md`. The user explicitly asked for 2 pirate ships as a foundation for the future pirate mode (combat between AI ships). v0.55.0's BEHAVIORS registry extension seam was built exactly for this -- the pirate behavior drops in as one entry, no other code changes needed.
+
+  **Brain additions:**
+  - `evaluatePerception` adds `nearestShip` (from `args.ships`, duck-typed on `ship.position` / `ship.velocity` -- ships expose these as LIVE objects, not via `getPosition()`).
+  - New `pirateBehavior(snap, args)`: nearest ship within `aggroDist` -> `predictShipPosition` + `steerTo`.
+  - `BEHAVIORS = [evade, pirate, collect, engage, idle]` -- pirates outrank collect (per user intent: aggressive ships prefer combat), evade outranks pirate (immediate threat to survival).
+  - `evaluateFire` scans `args.ships` in addition to asteroids (universal in-cone + in-range check; same code path handles both target types).
+  - `aiBrainTick({...})` accepts `aggroDist = AI_TUNABLES.aggroDist` + `ships = []` (default empty).
+  - Factory `createDemoAi({..., getShips, options: { aggroDist }})`: per-AI aggression control via factory option. `aggroDist: 0` (default) -> pirate behavior never fires (demo AI). `aggroDist: 300` -> pirates chase + shoot any ship within 300u.
+
+  **main.js wiring:**
+  - 2 pirate ships spawned at startup: pirate1 at (+100, +80), pirate2 at (-100, -80). Both share `aiWeapon` bullet pool.
+  - `tintShipAs(ship, 0xff3333)` helper walks mesh tree and recolors every material (body + wings + engine glow) red for clear visual distinction from the white/cyan player + demo AI ships.
+  - Both pirates always visible (no state:changed subscription -- persistent world fixtures).
+  - Render loop: `demoAi.update(dt); pirate1.update(dt); pirate2.update(dt);` every frame.
+  - The user's `getShips: () => [ship]` callback passes the player ship as the attack target. Future: add station + neutral-ship targets to the same list.
+
+  **Tunables:** `aggroDist: 0` default in AI_TUNABLES (demo AI stays pacifist). Per-AI factory override is the cleanest way to set per-role aggression without affecting the demo AI. Future: state-based toggle (aggroDist=0 in DEMO, 300 in PLAYING).
+
+  **Why pirates are visually fixable but bullet-vulnerable:**
+  - Pirates shoot asteroids (existing bullet-vs-asteroid collision does damage; pirates incidentally clean up the field).
+  - Pirates do NOT shoot the player ship (no bullet-vs-ship collision exists yet; that lands with pirate mode in a future commit).
+  - Pirates do NOT die from asteroid impacts (only player ship has asteroid-collision check today; pirates fly THROUGH asteroids).
+  - Pirates do NOT respawn (indestructible visual fixtures for v0.56.0; pirate-mode combat requires ship-vs-ship collision + death flow).
+
+  **Tests** (8 new in `tests/ai.test.js`):
+  - nearest ship within aggroDist -> mode=pirate
+  - ship beyond aggroDist -> falls through (idle)
+  - PIRATE outranks COLLECT (priority regression)
+  - EVADE outranks PIRATE (priority regression)
+  - lead fire on a moving ship (universal prediction)
+  - does NOT fire on ship beyond fireMaxDist (fire gate parity)
+  - live-bag flow-through for AI_TUNABLES.aggroDist
+  - factory option aggroDist thread through brainArgsFromShip
+
+  **Tradeoffs:** 2 pirates share a 16-capacity bullet pool -- typically 4-8 active bullets in flight at peak, never exhausts. Tinting is material color hex override (no GLB swap, no shader work); future: a distinct pirate GLB model if the user requests it. 4 ships on screen (player + demo + 2 pirates) all collide-free with each other for v0.56.0; pirate-vs-pirate + player-vs-pirate ships are visual-only.
+
 ### ⏳ Next Steps (priority order)
 
 1. **Spatial hash** — `src/systems/collision.js` (broad-phase): uniform grid keyed by world position. The narrow-phase step is already in place; this is the O(1) candidate-selection layer above it.

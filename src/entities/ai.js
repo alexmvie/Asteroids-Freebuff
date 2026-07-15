@@ -1,37 +1,45 @@
 /**
- * Demo AI — clean-room rewrite (v0.55.0).
+ * Demo / Pirate AI — v0.55.0 + v0.56.0.
  *
- * The brain is intentionally small. The whole game boils down to four
- * questions:
+ * The brain is intentionally small. The whole game boils down to
+ * five questions:
  *
- *   1. Is anything about to kill me?    → EVADE  (thrust perpendicular)
- *   2. Is there a powerup in range?    → COLLECT (predict + steer; coast-in)
- *   3. Is there an asteroid in range?  → ENGAGE  (predict + steer; fire)
- *   4. Nothing in range?               → IDLE   (do nothing)
+ *   1. Is anything about to kill me?         → EVADE   (thrust perpendicular)
+ *   2. Is there an attackable ship in range?→ PIRATE  (predict + steer + fire)
+ *   3. Is there a powerup in range?         → COLLECT (predict + steer; coast-in)
+ *   4. Is there an asteroid in range?       → ENGAGE  (predict + steer; fire)
+ *   5. Nothing in range?                    → IDLE    (do nothing)
  *
- * The user's spec ("simple Asteroids AI") is exactly this. We
- * deliberately collapsed the v0.46–v0.49 collection into a single
- * steer-toward-predicted-position controller with a one-line coast-in
- * gate, then removed every behavior-specific tunable.
+ * v0.56.0 added the PIRATE behavior — the FIRST extension of the
+ * registry this design was built for. Pirate AI is the foundation
+ * for the future "pirate mode" (combat between AI ships + the
+ * player ship). Future extensions (station landing, formation
+ * flight, etc.) follow the same shape.
  *
  * Architecture
  * ------------
  *   1. Pure helpers (`facingAngle`, `wrapAngle`, `predictPosition`,
  *      `isTargetInFront`) — universal across any moving target.
  *   2. `evaluatePerception(args)` — turns raw world state into a
- *      snapshot `{ nearestAst, nearestPw, nearestShip? }`. Add new
+ *      snapshot `{ nearestAst, nearestPw, nearestShip }`. Add new
  *      fields here when new target types appear.
  *   3. `BEHAVIORS` — open-ended, priority-ordered registry. Each
  *      entry: `{ name, run(snap, args) }` returning a decision or
  *      null. Inserting a behavior at a priority slot is the ONLY
- *      change needed to add a new AI mode (pirate, station lander,
- *      formation flight, etc.).
+ *      change needed to add a new AI mode.
  *   4. `aiBrainTick(args)` — pure decision mapper. Calls perception,
  *      walks BEHAVIORS in order, returns the first non-null decision
  *      with `fire` set by the independent fire loop.
  *
- * Fire is decoupled from chase target — the ship can shoot an
- * asteroid while chasing a powerup. Tests pin this contract.
+ * Fire is decoupled from chase target. The ship can shoot any in-cone
+ * target (asteroid OR ship). Pirate AI shoots ships; demo AI shoots
+ * asteroids — same fire loop.
+ *
+ * Aggression is per-AI, controlled by the factory option
+ * `aggroDist`. Set `aggroDist: 0` for pacifist AIs (the demo AI),
+ * `aggroDist: 300` for aggressive AIs (pirates). Reads
+ * `AI_TUNABLES.aggroDist` as the live fallback so the tuner panel
+ * can adjust at runtime.
  *
  * What was deliberately REMOVED (and why)
  * ---------------------------------------
@@ -45,7 +53,19 @@
  *     range.
  *   - Sticky powerup commitment → re-evaluating every tick fixes the
  *     "stale target" bug.
- *   - 14 of 22 AI_TUNABLES → purged.
+ *   - 13 of 22 AI_TUNABLES → purged.
+ *
+ * v0.56.0 ADDITIONS
+ * ------------------
+ *   - `evaluatePerception` adds `nearestShip` (from `args.ships`,
+ *     duck-typed on `ship.position` / `ship.velocity`).
+ *   - `BEHAVIORS = [evade, pirate, collect, engage, idle]`.
+ *   - `evaluateFire` scans `args.ships` IN ADDITION to asteroids
+ *     (universal in-cone + in-range check).
+ *   - `aiBrainTick` accepts `aggroDist = AI_TUNABLES.aggroDist`.
+ *   - `createDemoAi` factory accepts `getShips` callback for the
+ *     perception layer; `options.aggroDist` overrides the live bag
+ *     for this AI's pirate aggressiveness.
  */
 
 import { createShip } from './ship.js';
@@ -62,6 +82,13 @@ const FACTORY_DEFAULTS = Object.freeze({
   spawnRadius: 30,
   /** Initial yaw (radians). */
   spawnYaw: 0,
+  /**
+   * Default aggro distance for the pirate behavior (world units).
+   * Factory callers override per-AI via `options.aggroDist`.
+   * 0 = pacifist (the pirate behavior never fires — demo AI default).
+   * 300 = aggressive (pirates chase + shoot any ship within 300u).
+   */
+  aggroDist: 0,
 });
 
 /**
@@ -77,7 +104,7 @@ const POWERUP_COAST_DIST = 5;
 // ------------------------------------------------------------------
 
 /**
- * Wrap an angle into [-π, π).
+ * Wrap an angle into (-π, π].
  */
 export function wrapAngle(a) {
   const TAU = Math.PI * 2;
@@ -98,7 +125,8 @@ export function facingAngle(yaw) {
 /**
  * Predict a target's position at ship arrival time.
  * `target = { pos: {x,z}, vel?: {x,z} }`. Universal — asteroids,
- * powerups, future ships, future moving stations.
+ * powerups, ships. For targets with `vel.x === vel.z === 0`,
+ * collapses to the current position.
  */
 export function predictPosition(target, aiPos, bulletSpeed) {
   if (!target || !target.pos || typeof target.pos.x !== 'number') return null;
@@ -127,16 +155,17 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
 
 /**
  * Find the nearest item in a list to `pos`. `getPos` defaults to
- * `.getPosition()` for duck-typed asteroid-like objects.
- *
- * Returns `{ item, dx, dz, dist, pos }` or null.
+ * `.getPosition()` for duck-typed asteroid-like objects; pass an
+ * alternative for live-property targets (e.g. `s => s.position`
+ * for ships where `position` is a live object reference).
  */
-function findNearest(pos, items, getPos = (i) => i && i.getPosition && i.getPosition()) {
+function findNearest(pos, items, getPos) {
+  const getter = getPos || ((i) => i && i.getPosition && i.getPosition());
   let best = null;
   let bestDist = Infinity;
   for (const item of items) {
     if (!item) continue;
-    const p = getPos(item);
+    const p = getter(item);
     if (!p || typeof p.x !== 'number' || typeof p.z !== 'number') continue;
     const dx = p.x - pos.x;
     const dz = p.z - pos.z;
@@ -154,7 +183,7 @@ function findNearest(pos, items, getPos = (i) => i && i.getPosition && i.getPosi
 // ------------------------------------------------------------------
 
 /**
- * Compute heading error to a target position (radians, [-π, π]).
+ * Compute heading error to a target position (radians, (-π, π]).
  */
 function headingError(args, targetPos) {
   const dx = targetPos.x - args.aiPos.x;
@@ -188,7 +217,8 @@ function steerTo(args, targetPos, { forceThrust = false } = {}) {
 /**
  * The asteroid-specific prediction helper. Calls the universal
  * `predictPosition` after extracting `pos + vel` from an
- * asteroid-like duck-typed object.
+ * asteroid-like duck-typed object (must have `getPosition()` and
+ * optionally `getVelocity()`).
  */
 function predictAsteroidPosition(asteroid, aiPos, bulletSpeed) {
   if (!asteroid || typeof asteroid.getPosition !== 'function') return null;
@@ -196,6 +226,21 @@ function predictAsteroidPosition(asteroid, aiPos, bulletSpeed) {
   if (!pos) return null;
   return predictPosition(
     { pos, vel: typeof asteroid.getVelocity === 'function' ? asteroid.getVelocity() : null },
+    aiPos,
+    bulletSpeed,
+  );
+}
+
+/**
+ * Ship-target prediction helper. Reads from a live ship object
+ * (ship.position, ship.velocity) instead of asteroid-like methods.
+ * Ships in this codebase don't expose `getPosition()` — position is
+ * a direct property on the ship object.
+ */
+function predictShipPosition(ship, aiPos, bulletSpeed) {
+  if (!ship || !ship.position || typeof ship.position.x !== 'number') return null;
+  return predictPosition(
+    { pos: ship.position, vel: ship.velocity || { x: 0, z: 0 } },
     aiPos,
     bulletSpeed,
   );
@@ -226,6 +271,33 @@ function evadeBehavior(snap, args) {
     thrust: steer.thrust,
     mode: 'evade',
     reason: `asteroid ${a.dist.toFixed(1)}u < ${args.evadeDist.toFixed(1)}u`,
+  };
+}
+
+/**
+ * PIRATE behavior (v0.56.0): nearest ship within aggroDist →
+ * predict at bullet flight + steer. The chase target type is 'ship',
+ * but the universal `predictPosition` + `steerTo` helpers handle
+ * every detail. Distinguishes from ENGAGE only by target type —
+ * visible in the AI debug overlay as `mode: 'pirate'`.
+ *
+ * Per-AI aggression is controlled by `aggroDist`:
+ *   - `aggroDist: 0` (demo AI default): never engages — the
+ *     predicate `a.dist >= args.aggroDist` is always true → null.
+ *   - `aggroDist: 300` (pirate default): chases + shoots any ship
+ *     within 300u.
+ */
+function pirateBehavior(snap, args) {
+  if (!snap.nearestShip || snap.nearestShip.dist >= args.aggroDist) return null;
+  const s = snap.nearestShip;
+  const predicted = predictShipPosition(s.item, args.aiPos, args.bulletSpeed);
+  if (!predicted) return null;
+  const steer = steerTo(args, predicted);
+  return {
+    yaw: steer.yaw,
+    thrust: steer.thrust,
+    mode: 'pirate',
+    reason: `pirate target ${s.dist.toFixed(1)}u`,
   };
 }
 
@@ -275,11 +347,15 @@ function idleBehavior() {
   return { yaw: 0, thrust: false, mode: 'idle', reason: 'no targets in range' };
 }
 
-// Priority order: EVADE wins (immediate threat), then COLLECT (user
-// priority per the spec), then ENGAGE, then IDLE as fallback. Insert
-// future behaviors (pirate, land) at the right priority slot here.
+// Priority order:
+//   1. EVADE   — immediate threat to survival
+//   2. PIRATE  — aggressive ships target other ships
+//   3. COLLECT — per user spec, "priority to collect"
+//   4. ENGAGE  — fallback for asteroids
+//   5. IDLE    — no behavior matched
 const BEHAVIORS = [
   { name: 'evade', run: evadeBehavior },
+  { name: 'pirate', run: pirateBehavior },
   { name: 'collect', run: collectBehavior },
   { name: 'engage', run: engageBehavior },
   { name: 'idle', run: idleBehavior },
@@ -290,8 +366,10 @@ const BEHAVIORS = [
 // ------------------------------------------------------------------
 
 /**
- * Evaluate perception — nearest asteroid, nearest powerup, future: ships,
- * stations, etc. Returns a snapshot the behaviors read.
+ * Evaluate perception — nearest asteroid, nearest powerup, nearest
+ * ship. Returns a snapshot the behaviors read. Ship duck-typing is
+ * live-property (`s.position` is an object ref) instead of the
+ * asteroid-style `getPosition()` method.
  */
 function evaluatePerception(args) {
   const nearestAst = findNearest(args.aiPos, args.asteroids || []);
@@ -305,24 +383,36 @@ function evaluatePerception(args) {
         ),
       }
     : null;
-  return { nearestAst, nearestPw };
+  // Ships: live-property duck-typing (s.position is a ref, not a method).
+  const nearestShip = findNearest(args.aiPos, args.ships || [], (s) => s.position);
+  return { nearestAst, nearestPw, nearestShip };
 }
 
 // ------------------------------------------------------------------
-// Fire loop (independent of chase target)
+// Fire loop (independent of chase target, scans asteroids AND ships)
 // ------------------------------------------------------------------
 
 /**
- * Decide whether the AI should fire this tick. Scans every asteroid,
- * predicts its position at bullet flight time, and fires if any is
- * in the forward cone + fire range. Independent of chase target so
- * the ship can shoot while chasing a powerup.
+ * Decide whether the AI should fire this tick. Universal in-cone +
+ * in-range check across every target type (asteroids + ships).
+ * Independent of chase target so the ship can shoot while chasing.
  */
 function evaluateFire(args) {
-  if (!args.asteroids) return false;
-  for (const a of args.asteroids) {
+  // Asteroids (asteroid-like duck typing: getPosition + getVelocity).
+  for (const a of args.asteroids || []) {
     if (!a || typeof a.getPosition !== 'function') continue;
     const predicted = predictAsteroidPosition(a, args.aiPos, args.bulletSpeed);
+    if (!predicted) continue;
+    const d = Math.hypot(predicted.x - args.aiPos.x, predicted.z - args.aiPos.z);
+    if (d < args.fireMinDist || d > args.fireMaxDist) continue;
+    if (isTargetInFront(args.aiPos, args.aiYaw, predicted, args.fireHeadingGate)) {
+      return true;
+    }
+  }
+  // Ships (live-property duck typing: position + velocity).
+  for (const s of args.ships || []) {
+    if (!s || !s.position) continue;
+    const predicted = predictShipPosition(s, args.aiPos, args.bulletSpeed);
     if (!predicted) continue;
     const d = Math.hypot(predicted.x - args.aiPos.x, predicted.z - args.aiPos.z);
     if (d < args.fireMinDist || d > args.fireMaxDist) continue;
@@ -344,9 +434,10 @@ function evaluateFire(args) {
  * @param {{x,y,z}} args.aiPos — required
  * @param {number} args.aiYaw  — required (radians, ship.js convention)
  * @param {Array}  args.asteroids — required (array of duck-typed entities)
- * @param {{x,z}?} args.powerupPos — optional; falling null = no powerup in scene
- * @param {{x,z}?} args.powerupVel — optional; defaults to {0,0}
- * @param {number} args.evadeDist, args.powerupMaxChaseDist,
+ * @param {Array?} args.ships     — optional, list of live ships (v0.56.0)
+ * @param {{x,z}?} args.powerupPos — optional
+ * @param {{x,z}?} args.powerupVel — optional
+ * @param {number} args.evadeDist, args.aggroDist, args.powerupMaxChaseDist,
  *               args.thrustHeadingGate, args.yawDeadband,
  *               args.fireHeadingGate, args.fireMinDist, args.fireMaxDist,
  *               args.bulletSpeed — optional; fall through to AI_TUNABLES
@@ -356,9 +447,11 @@ export function aiBrainTick({
   aiPos,
   aiYaw,
   asteroids,
+  ships = [],
   powerupPos = null,
   powerupVel = null,
   evadeDist = AI_TUNABLES.evadeDist,
+  aggroDist = AI_TUNABLES.aggroDist,
   powerupMaxChaseDist = AI_TUNABLES.powerupMaxChaseDist,
   thrustHeadingGate = AI_TUNABLES.thrustHeadingGate,
   yawDeadband = AI_TUNABLES.yawDeadband,
@@ -370,11 +463,14 @@ export function aiBrainTick({
   if (!aiPos) throw new Error('aiBrainTick: aiPos is required');
   if (typeof aiYaw !== 'number') throw new Error('aiBrainTick: aiYaw must be a number');
   if (!Array.isArray(asteroids)) throw new Error('aiBrainTick: asteroids must be an array');
+  if (ships && !Array.isArray(ships)) {
+    throw new Error('aiBrainTick: ships must be an array');
+  }
 
   const args = {
-    aiPos, aiYaw, asteroids,
+    aiPos, aiYaw, asteroids, ships,
     powerupPos, powerupVel,
-    evadeDist, powerupMaxChaseDist,
+    evadeDist, aggroDist, powerupMaxChaseDist,
     thrustHeadingGate, yawDeadband,
     fireHeadingGate, fireMinDist, fireMaxDist,
     bulletSpeed,
@@ -387,8 +483,6 @@ export function aiBrainTick({
       return decision;
     }
   }
-  // Should never reach here (idle always returns), but keep the
-  // fallback for behavior-registry safety.
   return { yaw: 0, thrust: false, mode: 'idle', fire: false, reason: 'no behavior fired' };
 }
 
@@ -411,11 +505,15 @@ export function pickAiSpawn(radius = FACTORY_DEFAULTS.spawnRadius, rng = Math.ra
 }
 
 // ------------------------------------------------------------------
-// Demo AI factory (same API surface, simplified internals)
+// Demo AI / Pirate AI factory (same API surface, pirate role via
+// `options.aggroDist > 0`)
 // ------------------------------------------------------------------
 
 /**
- * Create a demo AI ship. Wires the pure brain to a live ship.
+ * Create an AI ship. The role (demo vs pirate) is selected via
+ * `options.aggroDist` — pirates set it to a positive value (300 by
+ * default in AI_TUNABLES) so the pirate behavior fires; demo AIs
+ * leave it at 0 (default) so pirate never activates.
  *
  * @param {object} cfg
  * @param {THREE.Scene} cfg.scene — required.
@@ -424,8 +522,11 @@ export function pickAiSpawn(radius = FACTORY_DEFAULTS.spawnRadius, rng = Math.ra
  * @param {function?}  cfg.getPowerupPos — () => { x, z } | null
  * @param {function?}  cfg.getPowerupVel — () => { x, z }
  * @param {function?}  cfg.getActiveWeapon — () => 'bullet' | 'laser'
+ * @param {function?}  cfg.getShips — () => ship[] (v0.56.0). Each ship
+ *                  must have live `.position` and `.velocity`.
  * @param {object?}    cfg.options — per-AI overrides:
  *     - resetDist, spawnRadius (factory-only, not in AI_TUNABLES)
+ *     - aggroDist (0 for demo, 300 for pirate — overrides AI_TUNABLES)
  *     - shipFactory, rng (test seam)
  *     - any brain tunable (overrides AI_TUNABLES for this AI)
  */
@@ -436,6 +537,7 @@ export function createDemoAi({
   getPowerupPos = null,
   getPowerupVel = null,
   getActiveWeapon = null,
+  getShips = null,
   options = {},
 } = {}) {
   if (!scene) throw new Error('createDemoAi: `scene` is required');
@@ -476,8 +578,10 @@ export function createDemoAi({
       aiPos: ship.position,
       aiYaw: ship.rotation.yaw,
       asteroids,
+      ships: getShips ? getShips() : [],
       powerupPos: getPowerupPos ? getPowerupPos() : null,
       powerupVel: getPowerupVel ? getPowerupVel() : { x: 0, z: 0 },
+      activeWeapon: getActiveWeapon ? getActiveWeapon() : 'bullet',
       ...opts,
     };
   }
@@ -495,9 +599,7 @@ export function createDemoAi({
     const decision = aiBrainTick(args);
     lastMode = decision.mode;
 
-    // Build the debug-overlay-friendly snapshot (target + predictedPos
-    // + nearest + threatsCount). Kept identical to the previous
-    // API surface so the debug overlay continues to render.
+    // Build the debug-overlay-friendly snapshot.
     const snap = evaluatePerception(args);
     const nearest = snap.nearestAst;
     let target = null;
@@ -505,12 +607,17 @@ export function createDemoAi({
       target = { pos: snap.nearestPw.pos, mode: 'powerup', dist: snap.nearestPw.dist };
     } else if ((decision.mode === 'asteroid' || decision.mode === 'evade') && nearest) {
       target = { pos: nearest.pos, mode: 'asteroid', dist: nearest.dist };
+    } else if (decision.mode === 'pirate' && snap.nearestShip) {
+      const s = snap.nearestShip;
+      target = { pos: s.pos, mode: 'ship', dist: s.dist };
     }
     let predictedPos = null;
     if (target && target.mode === 'asteroid') {
       predictedPos = predictAsteroidPosition(nearest.item, args.aiPos, args.bulletSpeed);
     } else if (target && target.mode === 'powerup') {
       predictedPos = predictPosition(snap.nearestPw, args.aiPos, args.bulletSpeed);
+    } else if (target && target.mode === 'ship') {
+      predictedPos = predictShipPosition(snap.nearestShip.item, args.aiPos, args.bulletSpeed);
     }
     let threatsCount = 0;
     for (const a of asteroids) {

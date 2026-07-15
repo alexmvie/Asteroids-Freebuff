@@ -1,3 +1,47 @@
+## v0.56.0 -- 2 Pirate Ships (Foundation for Pirate Mode)
+
+**User request:** "ALWAYS push commits. yes, add lets say 2 pirate ships so we can work on the pirate mode also."
+
+### What shipped
+
+Two pirate ships spawned at startup, using the v0.55.0 BEHAVIORS registry extension seam. The "pirate" behavior drops in as one entry alongside IDLE / ENGAGE / COLLECT / EVADE -- no brain refactor needed.
+
+**Files changed:**
+- `src/entities/ai.js` (extended)
+- `src/entities/ai-tunables.js` (added `aggroDist`)
+- `src/main.js` (2 pirates + tinting + update loop)
+- `tests/ai.test.js` (8 new tests)
+- `src/version-constants.js` (v0.55.0 -> v0.56.0)
+
+### Pirate AI design
+
+- **Priority order**: `EVADE > PIRATE > COLLECT > ENGAGE > IDLE`. Pirates prefer combat over powerups.
+- **Per-AI aggression**: factory option `aggroDist` -- `0` (demo AI default, pacifist) or `300` (pirates).
+- **Universal predict+steer**: same `predictPosition` + `steerTo` helpers handle asteroids, powerups, and ships.
+- **Universal fire loop**: `evaluateFire` scans asteroids AND ships in cone + range (in-cone + in-range check is target-agnostic).
+- **Ship duck-typing**: ships expose `ship.position` and `ship.velocity` as LIVE objects (not `getPosition()` like asteroids).
+- **Visual distinction**: `tintShipAs(ship, 0xff3333)` recolors body + wings + glow red.
+
+### What pirates do today vs future pirate mode
+
+| Capability | v0.56.0 foundation | Future pirate mode |
+|---|---|---|
+| Spawn at startup | yes (pirate1 @ +100/+80, pirate2 @ -100/-80) | same |
+| Pirate AI behavior | yes (chase + shoot nearest ship within 300u) | same |
+| Tick in render loop | yes (every frame, regardless of state) | state-toggled maybe |
+| Share AI bullet pool | yes (16 capacity, fine) | separate pool if firing-heavy |
+| Shoot asteroids | yes (incidental cleanup) | yes |
+| Shoot player ship | NO (no bullet-vs-ship collision) | YES |
+| Die from bullets | NO (indestructible) | YES |
+| Die from asteroids | NO (no per-ship collision) | YES |
+| Respawn | NO | YES |
+| See other pirates | NO (target list is [player] only) | YES |
+| Land on station | NO | future |
+
+### Push status reminder
+
+Per AGENTS.md Rule 6 + the post-commit auto-push hook (`.githooks/post-commit`), `git push` fires automatically on every commit to `refine-coded-ai`. The 9 commits queued from v0.51.0-v0.55.0 will land when the next commit's hook fires.
+
 ## v0.55.0 -- Clean-Room AI Rewrite (4 behaviors, 9 tunables, behavior registry for future extension)
 
 **User request:** "the current ai bahaviour is still useless. asteroids is really a simple game. the ship wanders through space. as a object is within radius it shoots or collects. priority to collect. it evades asteroids. it predicts the flight path of objects and moves to that target. that target is updated regularly as the flight path could change due colissions. so nothing fancy. what did you overcomplicate in our ai controller? keep it simple, let it open for adding features like not beeing a demo ship but beeing an ai pirate attacking other ships, asteroids, colelcting extras, landing on space stations, whatever we might come up with. but its important to have a perfect basement ai controller. spawn up whatever strong thinker you can get to plan this or enhance existing code"
