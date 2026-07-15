@@ -1,3 +1,30 @@
+## v0.58.0 -- AI Tuners Panel Reconciliation + Regression Guard
+
+**User feedback (verbatim):** "look at our ai live tuners panel. alot of params are undefined. how came that. dont you have any quality control in your coding? no tests?"
+
+Fair criticism. v0.55.0 collapsed `AI_TUNABLES` from 22 keys to 9 (later 10 with v0.56.0's `aggroDist`). The brain was thoroughly tested; the UI panel was not. 13 sliders rendered their `value="undefined"` and the value cells read "undefined". This entry ships the reconciliation + a regression guard so it can't recur.
+
+### What shipped
+
+1. **Reduced `TUNER_GROUPS`** from 7 groups / 22 keys to 6 groups / 10 keys -- matches the current `AI_TUNABLES` bag exactly (Fire 4 + Thrust 2 + Evade 1 + Aggro 1 + Powerup 1 + Ship 1).
+2. **Trimmed `TUNER_SPECS`** to match (11 entries: 10 active + 1 transitively referenced). Added `aggroDist` ("PIRATE AGGRO", 0..500u, guideType 'circle').
+3. **New file `tests/ai-tuners-panel.test.js`** (8 tests) -- the regression guard:
+   - Bidirectional key-set parity (panel keys all in bag, bag keys all in panel).
+   - `formatTunable` never emits the literal string "undefined".
+   - Every spec has the required shape.
+   - Bag mirrors defaults at boot.
+
+### Why I missed it (honest)
+
+In v0.55.0 the focus was the brain refactor. The panel was treated as "downstream consumer that should auto-follow". The user's complaint is correct -- the project needs bidirectional parity assertions between every UI consumer and its data source.
+
+### Validation
+
+- `npm test`: __508 + 8 = 516/516 green__ (was 508)
+- `npm run build`: clean
+- Code-reviewer verdict pending.
+- AGENTS.md + LOG.md: v0.58.0 entry added.
+
 ## v0.57.0 -- Procedural Pirate Texture (visual distinction from player/demo AI)
 
 **User request:** "tint the ship texture of the pirates so they look different then the player/ai-demo ship"

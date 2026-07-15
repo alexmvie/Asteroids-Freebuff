@@ -555,6 +555,36 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
   - Faction color-coding for other NPC archetypes (trader ships green, police ships blue) -- the helper accepts any `THREE.Texture` so a different procedural generator would slot in identically
   - Per-material tint over textures (e.g., a different `tintShipAs` color would re-tint the textured material just like the plain material)
 
+- [x] **v0.58.0 -- AI Tuners Panel Reconciliation + Regression Guard** -- `src/ui/ai-tuners-panel.js` (TUNER_GROUPS reduced from 7 to 6 groups / 22 to 10 keys; TUNER_SPECS shrunk from 22 to 11 entries), `tests/ai-tuners-panel.test.js` (NEW, 8 tests -- the regression guard the project was missing), `src/version-constants.js` (v0.57.0 -> v0.58.0), `LOG.md`, `AGENTS.md`. The user reported: "look at our ai live tuners panel. alot of params are undefined. how came that. dont you have any quality control in your coding? no tests?". Fair criticism -- v0.55.0 collapsed the 22-key AI_TUNABLES bag to 9 (later 10 with v0.56.0's `aggroDist`) but the tuner's hardcoded `TUNER_GROUPS` list was never reconciled. 13 sliders showed `value="undefined"`, propagating to "undefined" text in the value cells. The brain was tested; the panel was not.
+
+  **Diagnosis (what broke):**
+  - v0.55.0 SIMPLE-AI commit (commit `0bae6cb`) reduced `AI_TUNABLES` from 22 keys (Powerup collection: cruise speed, brake envelope, velocity-error threshold, final-approach dist/speed, sticky-time, approach gain, brake-safety; Target: size bias, forward cone, near-behind; Laser: laserFireHeadingGate) to 9 keys (Fire 4 + Thrust 2 + Evade 1 + Powerup 1 + Ship 1). The 13 dropped keys were absorbed into the universal `predict + steer` controller.
+  - v0.56.0 added `aggroDist` to the bag but didn't touch the panel.
+  - The panel (`src/ui/ai-tuners-panel.js`) had `TUNER_GROUPS` referencing the 22-keys shape verbatim. When `tunables[key]` was read for a removed key, the result was `undefined` -- `value="${undefined}"` for the slider + `formatTunable(key, undefined)` -> `String(undefined)` = `"undefined"` for the value cell.
+  - **No test caught the drift** because the brain-side tests (`tests/ai.test.js`) only exercise `AI_TUNABLES` directly; the panel is a DOM layer and had no Node-runnable tests.
+
+  **Fix:**
+  - Reduced `TUNER_GROUPS` to 6 groups / 10 keys matching the current bag: Fire (4) + Thrust (2) + Evade (1) + Aggro (1, v0.56.0) + Powerup (1) + Ship (1). Removed the obsolete 3 Powerup keys, 3 Target keys, 1 Laser key.
+  - Trimmed `TUNER_SPECS` to match: 11 entries (10 active + 1 transitively referenced). Each entry kept its full shape (`label`, `min`, `max`, `step`, `format`, `help`, `guideType`).
+  - Added `aggroDist` to TUNER_SPECS as a new "PIRATE AGGRO" slider (0..500u, guideType 'circle').
+
+  **Regression guard (`tests/ai-tuners-panel.test.js` -- 8 tests):**
+  1. "every TUNER_GROUPS key exists in AI_TUNABLES" -- direct fix for the symptom: catches missing-from-bag references that produce "undefined" sliders.
+  2. "every AI_TUNABLES key has a TUNER_SPECS entry" -- the reverse: catches bag-only keys that would render without a visual guide / proper formatter.
+  3. "TUNER_GROUPS key set == AI_TUNABLES key set (no orphans either way)" -- bidirectional parity.
+  4. "formatTunable never emits the literal string 'undefined'" -- sanity guard.
+  5. "formatTunable malformed input is bypassed safely" -- defensive.
+  6. "clampToTunableRange clamps known keys to spec range" -- behavior preserved.
+  7. "clampToTunableRange: unknown keys pass through unchanged" -- pins the pass-through for removed legacy keys.
+  8. "every TUNER_SPECS entry has required shape (label, min, max, step, format, help, guideType)" -- prevents malformed entries.
+  9. "AI_TUNABLES bag mirrors AI_TUNABLE_DEFAULTS at boot" -- regression net for bag mutations leaking across test runs.
+
+  **Why I missed it:** in v0.55.0 the focus was the brain refactor. The panel was treated as "downstream consumer that should auto-follow". In v0.56.0 the focus was wiring pirates. The pattern is clear: any UI surface that hardcodes the bag's keys needs a test that asserts the panel<>bag bidirectional parity AT BOOT. This file is that test for the tuner panel.
+
+  **Future hardening (separate commits):**
+  - Builder/derived specs -- `buildTunerSpecsFromBag(aiTunables)` that scans the bag's keys + Reads jsdoc for `min`/`max` hints, eliminating the manual sync entirely.
+  - Same shape for the AI debug overlay (`src/ui/ai-debug-overlay.js`) -- it reads bag keys too, and would benefit from the same regression guard.
+
 ### ⏳ Next Steps (priority order)
 
 1. **Spatial hash** — `src/systems/collision.js` (broad-phase): uniform grid keyed by world position. The narrow-phase step is already in place; this is the O(1) candidate-selection layer above it.

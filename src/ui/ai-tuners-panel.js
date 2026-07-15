@@ -61,6 +61,14 @@
  * not enforce semantic constraints at runtime (a powerup-radius
  * slider dragged to 10000u just makes the AI chase distant pickups).
  */
+/**
+ * Display-ordering groups. Every key MUST be present in
+ * `AI_TUNABLE_DEFAULTS` (src/entities/ai-tunables.js). The
+ * `tests/ai-tuners-panel.test.js` regression guard asserts this
+ * invariant -- drift between the panel and the bag produces
+ * "undefined" slider values in the browser, which is what
+ * motivated v0.58.0.
+ */
 export const TUNER_GROUPS = Object.freeze([
   {
     name: 'Fire',
@@ -74,28 +82,17 @@ export const TUNER_GROUPS = Object.freeze([
     name: 'Evade',
     keys: ['evadeDist'],
   },
+  // v0.56.0: pirate aggression distance. 0 = pacifist (the demo AI
+  // default), 300 = aggressive (pirates chase + shoot ships). Tied
+  // to the AI Live Tuners surface so the user can dial aggression
+  // without code edits.
+  {
+    name: 'Aggro',
+    keys: ['aggroDist'],
+  },
   {
     name: 'Powerup',
-    keys: [
-      'powerupMaxChaseDist',
-      'powerupThrustGate',
-      'powerupStickyTime',
-      'powerupCruiseSpeed',
-      'powerupMinApproachSpeed',
-      'powerupApproachGain',
-      'powerupBrakeSafetyFactor',
-      'powerupVelocityErrorThreshold',
-      'powerupFinalApproachDist',
-      'powerupFinalApproachSpeed',
-    ],
-  },
-  {
-    name: 'Target',
-    keys: ['asteroidSizeBias', 'forwardConeHalfAngle', 'powerupNearBehindThreshold'],
-  },
-  {
-    name: 'Laser',
-    keys: ['laserFireHeadingGate'],
+    keys: ['powerupMaxChaseDist'],
   },
   {
     name: 'Ship',
@@ -202,98 +199,13 @@ export const TUNER_SPECS = Object.freeze({
     help: 'Beyond this, AI ignores the pickup entirely.',
     guideType: 'circle',
   },
-  powerupThrustGate: {
-    label: 'POWERUP THRUST',
-    min: 0.02, max: 1.0, step: 0.01,
-    format: (v) => `${(v * 180 / Math.PI).toFixed(0)}°`,
-    help: 'Heading gate for thrust while chasing a powerup. Tight = clean approach.',
-    guideType: 'cone',
-  },
-  powerupStickyTime: {
-    label: 'POWERUP STICKY',
-    min: 0, max: 10, step: 0.1,
-    format: (v) => `${v.toFixed(1)}s`,
-    help: 'Once committed to a powerup, ignore better asteroids for this long.',
-    guideType: 'clock',
-  },
-  powerupCruiseSpeed: {
-    label: 'PU CRUISE',
-    min: 5, max: 200, step: 5,
-    format: (v) => `${Math.round(v)} u/s`,
-    help: 'Cap on speed while approaching a powerup.',
-    guideType: 'speedometer',
-  },
-  powerupMinApproachSpeed: {
-    label: 'PU MIN APPROACH',
-    min: 0, max: 50, step: 1,
-    format: (v) => `${Math.round(v)} u/s`,
-    help: 'Lower bound for required approach speed (used in horizon computation).',
-    guideType: 'speedometer',
-  },
-  powerupApproachGain: {
-    label: 'PU APPROACH GAIN',
-    min: 0.1, max: 2.0, step: 0.05,
-    format: (v) => `${v.toFixed(2)} u·s/u`,
-    help: 'Distance-to-speed scaling for the adaptive horizon.',
-    guideType: 'bar',
-  },
-  powerupBrakeSafetyFactor: {
-    label: 'PU BRAKE SAFETY',
-    min: 0.1, max: 1.0, step: 0.05,
-    format: (v) => `${(v * 100).toFixed(0)}%`,
-    help: 'Multiplier on theoretical max safe approach speed. <1 leaves a margin.',
-    guideType: 'bar',
-  },
-  powerupVelocityErrorThreshold: {
-    label: 'PU VEL ERR',
-    min: 0, max: 30, step: 0.5,
-    format: (v) => `${v.toFixed(1)} u/s`,
-    help: 'Below this velocity-error magnitude, AI coasts (no thrust pulses).',
-    guideType: 'bar',
-  },
-  powerupFinalApproachDist: {
-    label: 'PU FINAL DIST',
-    min: 1, max: 30, step: 1,
+  // v0.56.0: pirate aggression distance.
+  aggroDist: {
+    label: 'PIRATE AGGRO',
+    min: 0, max: 500, step: 25,
     format: (v) => `${Math.round(v)}u`,
-    help: 'Inside this distance, controller switches to final-approach mode.',
+    help: 'Nearest ship within this distance triggers the pirate behavior. 0 = pacifist (demo AI). 300+ = aggressive.',
     guideType: 'circle',
-  },
-  powerupFinalApproachSpeed: {
-    label: 'PU FINAL SPEED',
-    min: 0, max: 20, step: 0.5,
-    format: (v) => `${v.toFixed(1)} u/s`,
-    help: 'Min closing speed during final approach (prevents stalling outside pickup radius).',
-    guideType: 'speedometer',
-  },
-  // Target --------------------------------------------------------------
-  asteroidSizeBias: {
-    label: 'SIZE BIAS',
-    min: 0, max: 50, step: 1,
-    format: (v) => `${Math.round(v)} u`,
-    help: 'Effective distance = real_dist - (2 - size) * sizeBias. Big = prefer large.',
-    guideType: 'bar',
-  },
-  forwardConeHalfAngle: {
-    label: 'TARGET CONE',
-    min: 0.1, max: Math.PI, step: 0.05,
-    format: (v) => `${(v * 180 / Math.PI).toFixed(0)}°`,
-    help: 'Half-angle of the forward cone used for target priority.',
-    guideType: 'cone',
-  },
-  powerupNearBehindThreshold: {
-    label: 'NEAR-BEHIND',
-    min: 0, max: 200, step: 5,
-    format: (v) => `${Math.round(v)}u`,
-    help: 'Powerups closer than this BEHIND the ship are still chased.',
-    guideType: 'bar',
-  },
-  // Laser ---------------------------------------------------------------
-  laserFireHeadingGate: {
-    label: 'LASER HEADING',
-    min: 0.02, max: 1.0, step: 0.01,
-    format: (v) => `${(v * 180 / Math.PI).toFixed(0)}°`,
-    help: 'Laser cone half-angle. Tight = lock-on at center.',
-    guideType: 'cone',
   },
 });
 
