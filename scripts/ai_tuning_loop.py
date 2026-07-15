@@ -155,15 +155,21 @@ def run_capture(seconds, fps):
 
 
 def find_dev_server(timeout_s=2):
-    """Probe common Vite ports and return the first reachable URL."""
+    """Probe common Vite ports and return the first reachable URL.
+
+    Vite on macOS often binds to ``localhost`` (IPv6 / dual-stack) rather
+    than ``127.0.0.1``, so we try ``localhost`` first and fall back to
+    ``127.0.0.1``.
+    """
     import urllib.request
     for port in [5173, 5174, 5175, 5176, 5177, 5178]:
-        url = f"http://127.0.0.1:{port}/"
-        try:
-            with urllib.request.urlopen(url, timeout=timeout_s):
-                return url
-        except Exception:
-            continue
+        for host in ["localhost", "127.0.0.1"]:
+            url = f"http://{host}:{port}/"
+            try:
+                with urllib.request.urlopen(url, timeout=timeout_s):
+                    return url
+            except Exception:
+                continue
     return None
 
 

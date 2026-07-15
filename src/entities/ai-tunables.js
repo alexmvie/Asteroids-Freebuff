@@ -12,26 +12,26 @@
 
 export const AI_TUNABLES = Object.freeze({
   /** Heading gate for firing (radians). */
-  fireHeadingGate: 0.40,
+  fireHeadingGate: 0.4,
 
   /** Heading gate for thrust (radians). */
-  thrustHeadingGate: 0.30,
+  thrustHeadingGate: 0.2,
 
   /** Emergency evade distance (world units). */
-  evadeDist: 12,
+  evadeDist: 10,
 
   /** Maximum distance at which the AI chases a powerup. */
-  powerupMaxChaseDist: 300,
+  powerupMaxChaseDist: 350,
 
   /** Minimum fire distance (world units). */
-  fireMinDist: 10,
+  fireMinDist: 20,
 
   /** Maximum fire distance (world units). */
-  fireMaxDist: 150,
+  fireMaxDist: 200,
 
   /** Heading gate for powerup collection thrust (radians). */
-  powerupThrustGate: 0.10,
+  powerupThrustGate: 0.2,
 
   /** Bias for asteroid size when choosing a chase target. */
-  asteroidSizeBias: 8,
+  asteroidSizeBias: 12,
 });

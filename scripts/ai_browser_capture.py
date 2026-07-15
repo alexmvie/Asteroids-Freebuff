@@ -31,7 +31,7 @@ def run(cmd, cwd=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--out-dir', default='artifacts/ai-browser')
-    parser.add_argument('--url', default='http://127.0.0.1:5173/')
+    parser.add_argument('--url', default='http://localhost:5173/')
     parser.add_argument('--seconds', type=int, default=6)
     parser.add_argument('--fps', type=int, default=8)
     args = parser.parse_args()
