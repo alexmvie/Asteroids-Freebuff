@@ -1,3 +1,73 @@
+## v0.50.0 -- Collapsible Debug Column on Left + UV Editor/Viewer Cleanup
+
+**User request:** "remove the UV editor and viewer and all of its code from our project - we will not use it anymore - be sure not to destroy code. be sure not to leave zombie code" (previous turn, finished in this commit) + "combine the radar and ebug card to a column to the left screen. do not mix the code. jsut define a 2 row column and put them there in equal width. make them collapsible to a litte quad on the top left" (this turn).
+
+### What changed
+
+**Stream 1 (debug column layout):**
+- `index.html`: wrapped `#ai-debug-overlay` + `#debug-hud` in a new `#debug-column` div with a 32x32 `#debug-column-toggle` button at top-left.
+- `src/styles.css`: added `.debug-column` rules (~85 lines). 220px wide, `position: fixed; top: var(--space-3); left: var(--space-3); z-index: var(--z-debug); display: flex; flex-direction: column; gap: var(--space-1); pointer-events: none;`. Toggle is 32x32 with chevron text. Body has `overflow-y: auto`. Children get `width: 100%; min-width: 0; flex-shrink: 0;` for equal-width. Children get `position: static` overrides (`.debug-column .debug-hud { position: static; bottom/left: auto; ... }` + `.debug-column .ai-debug { position: static; bottom/right: auto; ... }`) so the flex container can stack them as static children. Specificity 0,2,0 beats base 0,1,0. Collapsed state: `.debug-column--collapsed .debug-column__body { display: none; }` so the toggle button is the only visible element ("little quad" in the collapsed state).
+- `src/main.js`: added ~25-line collapse handler with localStorage persistence (`debugColumnCollapsed` key, default expanded).
+
+**Stream 2 (UV-zombie cleanup, 10 surgical edits to `src/main.js`):**
+- Dropped `CAPSULE_UV_PLANE` from the asteroid.js import.
+- Removed 3 deleted-system imports (`createAsteroidUvDebugOverlay`, `createUvUnwrapViewer`, `createEditObjectScreen`).
+- Removed the `asteroidUvDebug` setup block + the `window.ASTEROID_UV_DEBUG` + `window.ASTEROID_UV_PLANE` setters (NEBULA_DEBUG setter kept).
+- Removed the `uvUnwrapViewer` setup + the `window.UV_UNWRAP_DEBUG` setter.
+- Removed the UV grid toggle button + the `setEnabled` wrap.
+- Removed the UV unwrap viewer toggle button + the `setEnabled` wrap.
+- Removed `let gameHalted = false` + `let cameraFocused = false` + the `editScreen` creation + `window.EDIT_OBJECT` setter + the editBtn block.
+- Cleaned the `createAsteroidField({ scene, uvDebugOverlay: ... })` → `createAsteroidField({ scene })`.
+- Cleaned the `createAsteroidFromSpec({ spec, scene, uvDebugOverlay: ... })` → `createAsteroidFromSpec({ spec, scene })`.
+- Removed the tick early-return for `editScreen.isOpen()` + `gameHalted` + `cameraFocused`.
+
+### Validation
+
+- `npm test`: 516/516 green (was 561 at v0.49.0; -45 net: UV tests removed).
+- `npm run build`: clean (build error in the previous turn from the missing `asteroid-uv-debug-overlay` import is now resolved).
+- Code reviewer: ship-able across 2 rounds (round 1 flagged the doc gap as a blocker; round 2 confirmed the backfill is clean).
+
+### Modules untouched (constraint: "do not mix the code")
+
+- `createDebugHud` + `createAiDebugOverlay` + `createEditObjectScreen` + `createAsteroidUvDebugOverlay` + `createUvUnwrapViewer` + `createAiTunersPanel`: none modified. The `data-debug-hud-root` + `data-ai-debug-root` + `data-ai-tuners-root` attributes stay on the same elements so `mount()` calls work unchanged.
+
+## v0.51.0 -- Collapsible Right-Side AI Tuners Column + Shared Column-Toggle Helper
+
+**User request:** "put the ai live tuners to a column right to the screen - make sure its wide enough to show all text. make this also collapsible to a small sqare to the top right"
+
+### What changed
+
+1. **Shared `createColumnToggle` helper** (`src/ui/column-toggle.js`, NEW -- ~70 lines). Extracted the v0.50.0 debug-column toggle pattern into a reusable factory. Signature: `createColumnToggle({ column, toggleBtn, storageKey, collapsedClass, expandTitle, collapseTitle })`. Wires a button to toggle a `--collapsed` class on a wrapper, persists state in localStorage (per-column key), updates `aria-expanded` + tooltip, has try/catch for SSR. Returns `{ getCollapsed, setCollapsed }` for future consumers (tests, debug HUD read). Re-exported from `src/ui/index.js`.
+
+2. **AI tuners right-side column** (`index.html`, `src/styles.css`). Wrapped `#ai-tuners` in a new `#ai-tuners-column` div with a 32x32 `#ai-tuners-column-toggle` button. CSS: 340px wide, `top: var(--space-3); right: var(--space-3)`, `z-index: var(--z-debug)`, flex-column. Body has `margin-top: var(--space-5)` (24px) to hang below the ~49px-tall HUD top bar so the expanded panel doesn’t cover the energy HUD. Overrides `.ai-tuners { position: static; bottom/right: auto; width: 100%; min-width: 0; max-width: none; max-height: none; }` (specificity 0,2,0 > base 0,1,0) so the flex container can stack the panel as a static child. Collapsed state hides the body via `display: none`.
+
+3. **Widened `.ai-tuner__row` grid** (`src/styles.css`). Changed `grid-template-columns` from `70px 1fr 56px 60px` to `110px 1fr 50px 60px`. Label cell grows from 70 to 110px so the longest label ("PU APPROACH GAIN" at 16 chars / 9px monospace ≈ 86px glyph width) fits with ~24px headroom. Value cell trims slightly (56 → 50px) since numeric values like `9999.00` (~38px) still fit. Slider gets the remaining ~108px of the 340px column (was barely usable at 220px).
+
+4. **Refactored existing debug-column handler** (`src/main.js`). The inline ~30-line handler is replaced with a single `createColumnToggle({...})` call. Same localStorage key (`debugColumnCollapsed`) so existing user preferences are preserved. Same class (`debug-column--collapsed`) so CSS behavior is unchanged. Net: -23 lines of duplicated logic.
+
+5. **Added AI tuners column toggle handler** (`src/main.js`). Parallel call to the same helper with `storageKey: "aiTunersColumnCollapsed"` + `collapsedClass: "ai-tuners-column--collapsed"` + `expandTitle: "Expand AI tuners panel"` + `collapseTitle: "Collapse AI tuners panel"`.
+
+6. **Fixed orphaned-toggle UX gap** (`src/main.js`). When `AI_TUNING_ENABLED=false`, the `else` branch now calls `removeIfMounted("#ai-tuners-column")` along with the existing `[data-ai-tuners-root]` + `[data-ai-debug-root]` removals -- previously the column wrapper + toggle stayed in the DOM as a no-op. The debug column wrapper is INTENTIONALLY kept (it hosts the diagnostic HUD which is NOT gated by AI tuning). Console.log + comment updated to reflect the new cleanup.
+
+### Module untouched
+
+- `createAiTunersPanel` is unmodified. Its `mount(root)` call works on `[data-ai-tuners-root]` which is the inner div (now inside the column wrapper).
+- `createDebugHud` + `createAiDebugOverlay` are unmodified. Their data-attrs stay on the same elements.
+- Constraint "do not mix the code" honored: column layouts are pure CSS + a shared helper factory.
+
+### Decisions
+
+- **Column width 340px** (not 220px like the debug column) because the AI tuners labels are longer than the diagnostic HUD labels. Could go wider (360-400px) for more slider room, but 340px is enough and keeps the layout balanced.
+- **Body margin-top 24px (var(--space-5))** to clear the ~49px-tall HUD top bar. The toggle stays at the very top (`top: 12px`) so the collapsed "small square" lands at the absolute top-right of the screen, matching the user’s request.
+- **Helper return value `{ getCollapsed, setCollapsed }`** -- not used by main.js today but available for tests + future debug HUD readouts.
+- **Grid 110/1fr/50/60** (was 70/1fr/56/60) -- trades value-cell width for label-cell width. Numeric values like `9999.00` still fit in 50px; guide SVG still fits in 60px.
+
+### Validation
+
+- `npm test`: 516/516 green (unchanged from v0.50.0; +0 net).
+- `npm run build`: clean (Vite warns about 642KB main bundle; pre-existing, not from this commit).
+- Code reviewer: ship-able (round 1 flagged the orphaned-toggle gap; round 2 confirmed fix is clean).
+
 ## v0.49.0 -- AI Slider Live-Bag Wiring Cleanup + Ship Max-Speed Slider + Debug-HUD Layout Cleanup
 
 **User request:** "i am not sure if the ai reacts on any of the sliders. i saw no difference in collecting extras or atacking asteroids. also the ship speed is not adjustable (max speed should also be adjustable i think)" / "the layout needs to be better . reduce debug infos - delete the AI BRAIN, AI ... section there"

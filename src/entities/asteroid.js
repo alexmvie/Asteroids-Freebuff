@@ -5,12 +5,7 @@ import { mulberry32 } from '../world/rng.js';
 
 /**
  * Returns the body type for an asteroid spec: 'icosphere' (seed
- * bit 0 = 0) or 'capsule' (seed bit 0 = 1). Used by the UV
- * editor's per-type template system (one save covers all
- * asteroids of the same body type). Exported so the UV editor
- * can name the saved JSON file by type and so the
- * `createAsteroidFromSpec` factory can look up the right
- * template at creation time.
+ * bit 0 = 0) or 'capsule' (seed bit 0 = 1). Pure type discriminant.
  *
  * @param {import('../world/types.js').AsteroidSpec} spec
  * @returns {'icosphere' | 'capsule'}
@@ -110,18 +105,10 @@ const _scratchAxis = new THREE.Vector3();
  * `split()` / collision work unchanged (the spin applies to the whole
  * group; the bounding radius is still `spec.radius`).
  *
- * If `uvDebugOverlay` is provided, a debug mesh (sharing the body's
- * geometry) is attached to the body. The debug mesh shows a 10×10
- * UV grid (one cell per 0.1×0.1 UV, colored by region) when the
- * overlay is enabled — useful for tuning the unwrap live in the
- * browser via `window.ASTEROID_UV_DEBUG`. See
- * `src/systems/asteroid-uv-debug-overlay.js` for the overlay.
- *
  * @param {import('../world/types.js').AsteroidSpec} spec
- * @param {object} [uvDebugOverlay] optional UV debug overlay
  * @returns {THREE.Group}
  */
-function buildAsteroidMesh(spec, uvDebugOverlay) {
+function buildAsteroidMesh(spec) {
   const rng = mulberry32(spec.seed);
   const group = new THREE.Group();
 
@@ -134,15 +121,14 @@ function buildAsteroidMesh(spec, uvDebugOverlay) {
   // the field has visual variety.
   const isCapsule = (spec.seed & 1) === 1;
 
-  // Build the body. Each branch returns `{ lowestY, lod, debugMeshes }`:
+  // Build the body. Each branch returns `{ lowestY, lod }`:
   //   - `lowestY`: the body's lowest y in local space (for the ground)
   //   - `lod`: the THREE.LOD if the body is a LOD, else null
-  //   - `debugMeshes`: array of overlay-attached meshes (for cleanup)
   let bodyResult;
   if (isCapsule) {
-    bodyResult = buildCapsuleBody(group, spec, rng, uvDebugOverlay);
+    bodyResult = buildCapsuleBody(group, spec, rng);
   } else {
-    bodyResult = buildNoisyIcosphereBody(group, spec, rng, uvDebugOverlay);
+    bodyResult = buildNoisyIcosphereBody(group, spec, rng);
   }
 
   // ---- DEBUG: square ground footprint -------------------------------
@@ -154,12 +140,9 @@ function buildAsteroidMesh(spec, uvDebugOverlay) {
 
   group.position.set(spec.position.x, spec.position.y, spec.position.z);
 
-  // Attach the LOD reference + debug-mesh list to the group so the
-  // entity's update / dispose methods can find them. `null` for
-  // `lod` on capsule bodies; `[]` for `debugMeshes` if no overlay
-  // was supplied.
+  // Attach the LOD reference so the entity's update() can call
+  // `lod.update(camera)` each frame. `null` for capsule bodies.
   group.userData.lod = bodyResult.lod;
-  group.userData.debugMeshes = bodyResult.debugMeshes || [];
   return group;
 }
 
@@ -287,7 +270,7 @@ function getAsteroidBump() {
  * and applied along the radial direction. Returns `{ lowestY, lod,
  * debugMeshes }`.
  */
-function buildNoisyIcosphereBody(group, spec, rng, uvDebugOverlay) {
+function buildNoisyIcosphereBody(group, spec, rng) {
   const radius = spec.radius;
 
   // Per-asteroid noise offsets — generated once and shared across
@@ -333,29 +316,11 @@ function buildNoisyIcosphereBody(group, spec, rng, uvDebugOverlay) {
   const meshLow = new THREE.Mesh(geomLow, material);
   lod.addLevel(meshLow, LOD_FAR_DIST);
 
-  // If the UV debug overlay is supplied, attach a debug mesh to
-  // each LOD level (the LOD picks the active child each frame; the
-  // debug mesh is a sibling of the body on each level so it shows
-  // up on all 3 detail levels).
-  const debugMeshes = [];
-  if (uvDebugOverlay) {
-    const kinds = [
-      { mesh: meshHigh, geom: geomHigh },
-      { mesh: meshMid, geom: geomMid },
-      { mesh: meshLow, geom: geomLow },
-    ];
-    for (const { mesh, geom } of kinds) {
-      const debugMesh = uvDebugOverlay.attach(geom, 'icosphere');
-      mesh.add(debugMesh);
-      debugMeshes.push(debugMesh);
-    }
-  }
-
   group.add(lod);
 
-  // Lowest y of the icosphere (worst case: -radius × (1 + noiseAmount/radius)
-  // = -(radius + noiseAmount) = -1.25 × radius for the default 25% noise).
-  return { lowestY: -(radius + noiseAmount), lod, debugMeshes };
+  // Lowest y of the icosphere (worst case: -radius * (1 + noiseAmount/radius)
+  // = -(radius + noiseAmount) = -1.25 * radius for the default 25% noise).
+  return { lowestY: -(radius + noiseAmount), lod };
 }
 
 /**
@@ -375,20 +340,14 @@ const CAPSULE_HEIGHT_SEGMENTS = 6;
 
 /**
  * Which axis-aligned plane the capsule's planar UV unwrap projects
- * onto. `'xy'` gives a side view (U = x, V = y) — the best default
- * for the vertical capsule shape because the long axis is one of
- * the texture coordinates, so the texture runs the full length of
- * the potato. The other options are `'xz'` (top-down) and `'yz'`
- * (side view rotated 90°). The unwrap is in the mesh's LOCAL
- * frame, so the texture is "stuck to" the mesh — different
- * asteroids show different parts of the texture.
+ * onto. The unwrap is in the mesh's LOCAL frame, so the texture is
+ * "stuck to" the mesh. Different asteroids show different parts of
+ * the texture.
  *
- * Exported so `main.js` can sync the initial value of the
- * `window.ASTEROID_UV_PLANE` runtime setter (see
- * `src/systems/asteroid-uv-debug-overlay.js`). The runtime setter
- * can also change the plane live without rebuilding.
+ * Local constant — not exported. Only consumed by
+ * `buildCapsuleBody()` below.
  */
-export const CAPSULE_UV_PLANE = 'xy';
+const CAPSULE_UV_PLANE = 'xy';
 
 /**
  * Build the "potato" body: a single capsule with normal jitter for a
@@ -409,7 +368,7 @@ export const CAPSULE_UV_PLANE = 'xy';
  * the icosphere body — one material API, one set of textures,
  * two body types.
  */
-function buildCapsuleBody(group, spec, rng, uvDebugOverlay) {
+function buildCapsuleBody(group, spec, rng) {
   const capsuleRadius = spec.radius;
   const capsuleLength = spec.radius * 1.5; // slightly elongated
 
@@ -439,18 +398,9 @@ function buildCapsuleBody(group, spec, rng, uvDebugOverlay) {
   const material = createAsteroidMaterial();
 
   const capsule = new THREE.Mesh(geom, material);
-  // If the UV debug overlay is supplied, attach a debug mesh as a
-  // child of the body mesh. The debug mesh shares the geometry
-  // (no extra memory) and renders the 10x10 UV grid pattern.
-  const debugMeshes = [];
-  if (uvDebugOverlay) {
-    const debugMesh = uvDebugOverlay.attach(geom, 'capsule');
-    capsule.add(debugMesh);
-    debugMeshes.push(debugMesh);
-  }
   group.add(capsule);
 
-  return { lowestY: -(capsuleLength / 2 + capsuleRadius), lod: null, debugMeshes };
+  return { lowestY: -(capsuleLength / 2 + capsuleRadius), lod: null };
 }
 
 /**
@@ -478,72 +428,13 @@ function addDebugGround(group, spec, groundY) {
  * @param {{
  *   spec: import('../world/types.js').AsteroidSpec,
  *   scene: import('three').Scene,
- *   uvDebugOverlay?: object,
  * }} opts
  */
-/**
- * localStorage key prefix for per-type UV templates saved by the
- * UV editor's SAVE TEMPLATE button. The full key is
- * `asteroid-uv-template-${type}` (e.g. `asteroid-uv-template-icosphere`).
- * Templates are plain JSON (same shape as the SAVE JSON file,
- * minus the per-instance metadata) and are applied 1:1 by
- * vertex index to the new asteroid's body geometry on creation.
- */
-const UV_TEMPLATE_KEY_PREFIX = 'asteroid-uv-template-';
-
-/**
- * If a UV template has been saved for this asteroid's body
- * type, copy its UV attribute onto the new geometry. Vertex
- * count must match (same detail level on icosphere, same
- * capsule parameters) — the function silently no-ops on a
- * mismatch (a future change in mesh parameters would need a
- * re-save). The seams from the template are stashed on
- * `mesh.userData.templateSeams` so the UV editor can pick
- * them up the next time the user opens this asteroid.
- *
- * @param {THREE.Group} mesh
- * @param {import('../world/types.js').AsteroidSpec} spec
- */
-function applyUvTemplate(mesh, spec) {
-  if (typeof localStorage === 'undefined') return;
-  const type = getAsteroidType(spec);
-  let raw;
-  try { raw = localStorage.getItem(UV_TEMPLATE_KEY_PREFIX + type); }
-  catch (_) { return; } // localStorage disabled / quota
-  if (!raw) return;
-  let data;
-  try { data = JSON.parse(raw); } catch (_) { return; }
-  if (!data || !Array.isArray(data.uvs)) return;
-  const body = mesh.children[0];
-  if (!body) return;
-  // Use the same body the UV editor reads from (highest-detail
-  // LOD level for icospheres, the capsule mesh for capsules).
-  const geom = body.isLOD ? body.levels[0].object.geometry : body.geometry;
-  if (!geom || !geom.attributes.uv) return;
-  const uvAttr = geom.attributes.uv;
-  if (uvAttr.array.length !== data.uvs.length) return; // vertex count mismatch
-  for (let i = 0; i < uvAttr.array.length; i++) uvAttr.array[i] = data.uvs[i];
-  uvAttr.needsUpdate = true;
-  // Stash seams so the editor can adopt them if the user opens
-  // this asteroid. The editor's seam-set is session-scoped;
-  // the template's seams only take effect when the user
-  // opens the editor for this asteroid.
-  if (Array.isArray(data.seams)) {
-    mesh.userData.templateSeams = new Set(data.seams);
-  }
-}
-
-export function createAsteroidFromSpec({ spec, scene, uvDebugOverlay }) {
+export function createAsteroidFromSpec({ spec, scene } = {}) {
   if (!scene) throw new Error('createAsteroidFromSpec: `scene` is required');
   if (!spec) throw new Error('createAsteroidFromSpec: `spec` is required');
 
-  const mesh = buildAsteroidMesh(spec, uvDebugOverlay);
-  // Apply any per-type UV template saved by the UV editor's
-  // SAVE TEMPLATE button. Runs AFTER the mesh is built so the
-  // geometry's `uv` attribute is fully populated. The 1:1 UV
-  // copy assumes matching vertex counts across asteroids of
-  // the same type (true for the current mesh parameters).
-  applyUvTemplate(mesh, spec);
+  const mesh = buildAsteroidMesh(spec);
   scene.add(mesh);
 
   let rotation = 0; // accumulated angle (radians) around `spec.axis`
@@ -618,20 +509,6 @@ export function createAsteroidFromSpec({ spec, scene, uvDebugOverlay }) {
 
   function dispose() {
     scene.remove(mesh);
-    // If a UV debug overlay was supplied, unregister every debug
-    // mesh we attached. The overlay's shared material is NOT
-    // disposed here (it's shared across all asteroids; the
-    // overlay's `dispose()` handles it when the overlay is
-    // disposed).
-    const debugMeshes = mesh.userData.debugMeshes || [];
-    for (const dm of debugMeshes) {
-      if (uvDebugOverlay && typeof uvDebugOverlay.detach === 'function') {
-        uvDebugOverlay.detach(dm);
-      }
-      // The debug mesh's parent (the body mesh) is being disposed
-      // below; the debug mesh will be garbage-collected as part
-      // of the recursive dispose.
-    }
     // `mesh` is a Group containing a debug ground plane + body mesh
     // (LOD or capsule), each with its own geometry and material.
     // Release both per child.

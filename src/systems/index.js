@@ -37,18 +37,6 @@ export { createStarfield } from './starfield.js';
 export { createNebulaBackground } from './nebula-background.js';
 export { createNebulaDebugOverlay } from './nebula-debug-overlay.js';
 
-// UV editor + viewer (the big one — 2700+ lines).
-// Kept as a direct file import here because the viewer is a
-// single factory function; the upcoming tool-by-tool split
-// will replace this with a thinner orchestrator.
-export { createUvUnwrapViewer } from './uv-unwrap-viewer.js';
-
-// UV debug overlay (mini-3D viewport helper).
-export { createAsteroidUvDebugOverlay } from './asteroid-uv-debug-overlay.js';
-
 // Asteroid field (streaming + entity lifecycle).
 export { createAsteroidField } from './asteroid-field.js';
 export { createParticleSystem } from './particles.js';
-
-// Edit-object screen (UV editor fullscreen overlay).
-export { createEditObjectScreen } from './edit-object-screen.js';

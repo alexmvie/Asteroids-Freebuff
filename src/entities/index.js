@@ -8,7 +8,7 @@
 export { createShip } from './ship.js';
 
 // Asteroid (uses the noisy icosphere or capsule body).
-export { CAPSULE_UV_PLANE, createAsteroidFromSpec } from './asteroid.js';
+export { createAsteroidFromSpec } from './asteroid.js';
 
 // Bullet pool (fixed-size, pre-allocated).
 export { createBulletPool } from './bullet.js';

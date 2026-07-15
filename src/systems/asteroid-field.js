@@ -16,7 +16,6 @@
  *
  * @param {{
  *   scene: import('three').Scene,
- *   uvDebugOverlay: { attach: (entity: any) => void },
  *   systemSeed?: number,
  * }} opts
  */
@@ -32,7 +31,6 @@ import {
 
 export function createAsteroidField({
   scene,
-  uvDebugOverlay,
   systemSeed = INITIAL_SYSTEM_SEED,
 } = {}) {
   if (!scene) throw new Error('createAsteroidField: `scene` is required');
@@ -58,7 +56,7 @@ export function createAsteroidField({
       if (entityByChunkKey.has(key)) continue;
       const batch = [];
       for (const spec of chunk.asteroids) {
-        const entity = createAsteroidFromSpec({ spec, scene, uvDebugOverlay });
+        const entity = createAsteroidFromSpec({ spec, scene });
         entities.push(entity);
         batch.push(entity);
       }

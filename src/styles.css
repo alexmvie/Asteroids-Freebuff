@@ -1945,7 +1945,7 @@ canvas {
 
 .ai-tuner__row {
   display: grid;
-  grid-template-columns: 70px 1fr 56px 60px;
+  grid-template-columns: 110px 1fr 50px 60px;
   align-items: center;
   gap: var(--space-1);
   font-size: var(--font-size-xs);
@@ -2053,6 +2053,265 @@ canvas {
 
 .ai-tuner__status--error {
   color: var(--color-warn);
+}
+
+/* ============================================================================
+   Block: debug-column (v0.50.x — collapsible left-side debug stack)
+   ----------------------------------------------------------------------------
+   Wraps the AI debug overlay (radar + mode chip + decision panels) and the
+   diagnostic HUD (FPS / state / score / lives / ...) as two equal-width
+   rows in a left-anchored column. Click the top-left toggle (the "quad")
+   to collapse both panels into a single small chip. State persists in
+   localStorage so the user's preference survives reloads. The two
+   children keep their existing class names + data-attrs so the existing
+   mount() calls in main.js work unchanged — only their `position: fixed`
+   is overridden so the flex container can stack them as static children.
+   ============================================================================ */
+
+.debug-column {
+  position: fixed;
+  top: var(--space-3);
+  left: var(--space-3);
+  width: 220px;
+  max-height: calc(100vh - var(--space-3) - var(--space-3));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  z-index: var(--z-debug);
+  font-family: var(--font-family);
+  pointer-events: none;
+}
+
+.debug-column__toggle {
+  pointer-events: auto;
+  align-self: flex-start;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-icon);
+  cursor: pointer;
+  padding: 0;
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base);
+}
+.debug-column__toggle:hover {
+  background: var(--color-bg-tint-primary-soft);
+  border-color: var(--color-primary-base);
+  color: var(--color-fg);
+}
+.debug-column__toggle:active {
+  transform: translateY(1px);
+}
+
+.debug-column__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-primary-soft) transparent;
+}
+.debug-column__body::-webkit-scrollbar {
+  width: 4px;
+}
+.debug-column__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.debug-column__body::-webkit-scrollbar-thumb {
+  background: var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+}
+
+/* Equal-width: each row stretches the column's width. */
+.debug-column__body > * {
+  width: 100%;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+/* Override the children's fixed positioning so the flex container can
+   stack them. The base rules (`bottom: var(--space-3); left/right: ...`)
+   don't apply when the panel is inside the column. We zero out
+   position + offset anchors here. */
+.debug-column .debug-hud {
+  position: static;
+  bottom: auto;
+  left: auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.debug-column .ai-debug {
+  position: static;
+  bottom: auto;
+  right: auto;
+  width: 100%;
+  min-width: 0;
+}
+
+/* Collapsed state: hide the body, show only the toggle button.
+   The button stays at top-left as the "little quad" the user can
+   click again to expand. */
+.debug-column--collapsed .debug-column__body {
+  display: none;
+}
+.debug-column--collapsed .debug-column__toggle {
+  border-color: var(--color-primary-base);
+  color: var(--color-fg);
+  background: var(--color-bg-tint-primary-soft);
+}
+.debug-column--collapsed .debug-column__toggle:hover {
+  background: var(--color-bg-tint-primary-base);
+  color: var(--color-primary);
+}
+
+/* ============================================================================
+   Block: ai-tuners-column (v0.51.x — collapsible right-side AI tuners stack)
+   ----------------------------------------------------------------------------
+   Wraps the AI Live Tuners panel as a 340px-wide column anchored to the
+   right edge of the screen. 340px was chosen so all 21 slider labels fit
+   without truncation at the 9px monospace font — the longest label is
+   "PU APPROACH GAIN" at 16 chars (~86px of glyph width). The grid
+   `.ai-tuner__row` was widened from `70px 1fr 56px 60px` to
+   `110px 1fr 50px 60px` to match: the label cell grows from 70 to 110px
+   so even the longest label has comfortable headroom, the value cell
+   trims slightly to `50px` (numeric values like `9999.00` still fit),
+   the guide-SVG cell stays at `60px`, and the slider gets the remaining
+   ~108px of the 340px column.
+
+   Click the top-right toggle to collapse the panel into a single small
+   chip (the "small square to the top right" the user asked for). State
+   persists in localStorage. The toggle is anchored at the very top of
+   the column (top: var(--space-3)) and the body hangs below the HUD
+   top bar via `margin-top: var(--space-5)` so the expanded panel does
+   NOT overlap the energy HUD on the right side of the top bar.
+
+   Module (createAiTunersPanel) untouched — the child keeps its existing
+   `data-ai-tuners-root` attribute so main.js's mount() call works
+   unchanged.
+   ============================================================================ */
+
+.ai-tuners-column {
+  position: fixed;
+  top: var(--space-3);
+  right: var(--space-3);
+  width: 340px;
+  max-height: calc(100vh - var(--space-3) - var(--space-3));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  z-index: var(--z-debug);
+  font-family: var(--font-family);
+  pointer-events: none;
+}
+
+.ai-tuners-column__toggle {
+  pointer-events: auto;
+  align-self: flex-end;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-icon);
+  cursor: pointer;
+  padding: 0;
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base);
+}
+.ai-tuners-column__toggle:hover {
+  background: var(--color-bg-tint-primary-soft);
+  border-color: var(--color-primary-base);
+  color: var(--color-fg);
+}
+.ai-tuners-column__toggle:active {
+  transform: translateY(1px);
+}
+
+.ai-tuners-column__body {
+  /* Hang the panel below the HUD top bar (~49px tall: top:0 + padding:16px
+     + content:27px + padding-bottom:16px) so the expanded panel doesn't
+     cover the energy HUD on the right side of the top bar. The toggle
+     itself sits ABOVE this margin so the collapsed "small square" lands
+     at the very top-right of the screen. */
+  margin-top: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-primary-soft) transparent;
+}
+.ai-tuners-column__body::-webkit-scrollbar {
+  width: 4px;
+}
+.ai-tuners-column__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ai-tuners-column__body::-webkit-scrollbar-thumb {
+  background: var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+}
+
+/* Equal-width: the single child stretches the column's width. */
+.ai-tuners-column__body > * {
+  width: 100%;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+/* Override AI tuners' fixed positioning when inside the column. The
+   base rules (`bottom: 540px; right: ...`) don't apply when the panel
+   is inside the column. We zero out position + offset anchors here so
+   the flex container can stack the panel as a static child. */
+.ai-tuners-column .ai-tuners {
+  position: static;
+  bottom: auto;
+  right: auto;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  max-height: none;
+}
+
+/* Collapsed state: hide the body, show only the toggle button. The
+   button stays at top-right as the "small square" the user can click
+   again to expand. */
+.ai-tuners-column--collapsed .ai-tuners-column__body {
+  display: none;
+}
+.ai-tuners-column--collapsed .ai-tuners-column__toggle {
+  border-color: var(--color-primary-base);
+  color: var(--color-fg);
+  background: var(--color-bg-tint-primary-soft);
+}
+.ai-tuners-column--collapsed .ai-tuners-column__toggle:hover {
+  background: var(--color-bg-tint-primary-base);
+  color: var(--color-primary);
 }
 
 /* ============================================================================

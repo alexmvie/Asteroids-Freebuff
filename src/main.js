@@ -2,7 +2,7 @@ import { Clock } from 'three';
 import './styles.css';
 import { createScene } from './scene.js';
 import { createShip, loadShipModel } from './entities/ship.js';
-import { CAPSULE_UV_PLANE, createAsteroidFromSpec } from './entities/asteroid.js';
+import { createAsteroidFromSpec } from './entities/asteroid.js';
 import { createBulletPool } from './entities/bullet.js';
 import { createLaser } from './entities/laser.js';
 import {
@@ -34,6 +34,7 @@ import {
   exportAITunables,
 } from './entities/ai-tunables.js';
 import { createAiTunersPanel } from './ui/ai-tuners-panel.js';
+import { createColumnToggle } from './ui/column-toggle.js';
 import { VERSION } from './version-constants.js';
 // __BRANCH__ + __COMMIT__ are Vite-define globals, populated from git at
 // config-load time in vite.config.js. See that file for the rationale
@@ -41,9 +42,6 @@ import { VERSION } from './version-constants.js';
 // file).
 import { createDemoAi } from './entities/ai.js';
 import { createAsteroidField } from './systems/asteroid-field.js';
-import { createAsteroidUvDebugOverlay } from './systems/asteroid-uv-debug-overlay.js';
-import { createUvUnwrapViewer } from './systems/uv-unwrap-viewer.js';
-import { createEditObjectScreen } from './systems/edit-object-screen.js';
 import { createPowerUpSystem } from './systems/powerup-system.js';
 import { createParticleSystem } from './systems/particles.js';
 import { createCaptureMarkers } from './systems/capture-markers.js';
@@ -98,15 +96,6 @@ const {
 } = createScene();
 const clock = new Clock();
 
-// ---- Asteroid UV debug overlay -----------------------------------------
-// One shared material, one per-asteroid debug mesh (sharing the
-// body's geometry). Toggled by `window.ASTEROID_UV_DEBUG`; the
-// plane projection on the capsule body is toggled by
-// `window.ASTEROID_UV_PLANE` (one of 'xy' | 'xz' | 'yz').
-// See `src/systems/asteroid-uv-debug-overlay.js`.
-const asteroidUvDebug = createAsteroidUvDebugOverlay();
-asteroidUvDebug.setCapsulePlane(CAPSULE_UV_PLANE); // sync with the constant
-
 // ---- NEBULA_DEBUG runtime toggle ---------------------------------------
 // The default is the compile-time constant NEBULA_DEBUG_DEFAULT
 // (false in production). The user / dev can flip it live in the
@@ -121,203 +110,11 @@ if (typeof window !== 'undefined') {
     get() { return nebulaDebug.isEnabled(); },
     set(v) { nebulaDebug.setEnabled(!!v); },
   });
-
-  // ASTEROID_UV_DEBUG — show / hide the per-asteroid UV grid
-  // overlay. Each asteroid body has a child mesh (sharing its
-  // geometry) that renders a 10×10 rainbow-tinted wireframe UV
-  // grid, useful for tuning the unwrap live in the browser.
-  Object.defineProperty(window, 'ASTEROID_UV_DEBUG', {
-    configurable: true,
-    enumerable: true,
-    get() { return asteroidUvDebug.isEnabled(); },
-    set(v) { asteroidUvDebug.setEnabled(!!v); },
-  });
-
-  // ASTEROID_UV_PLANE — change the planar projection used by the
-  // capsule body. Triggers a UV recompute on every attached capsule
-  // (no rebuild). Accepts 'xy' | 'xz' | 'yz' (mirrors the
-  // CAPSULE_UV_PLANE compile-time constant). Invalid values are
-  // rejected with a console warning and the state is unchanged.
-  Object.defineProperty(window, 'ASTEROID_UV_PLANE', {
-    configurable: true,
-    enumerable: true,
-    get() { return asteroidUvDebug.getCapsulePlane(); },
-    set(v) { asteroidUvDebug.setCapsulePlane(v); },
-  });
-
 }
 
-// ---- UV unwrap viewer --------------------------------------------------
-// 3ds-Max-style 2D editor in a side panel. Toggle with the
-// `UV UNWRAP` button in the debug HUD (or via the
-// `window.UV_UNWRAP_DEBUG` runtime setter). When enabled, hover
-// an asteroid in the 3D view to highlight it, click to display
-// its UV layout. Pan / zoom in the panel with drag / wheel. The
-// panel's `BG: CHECKER` / `BG: TEXTURE` button toggles between
-// the background modes; `RESET` restores the default view.
-const uvUnwrapViewer = createUvUnwrapViewer({
-  canvas: renderer.domElement,
-  camera,
-  getAsteroids: () => field.getEntities(),
-});
-
-if (typeof window !== 'undefined') {
-  Object.defineProperty(window, 'UV_UNWRAP_DEBUG', {
-    configurable: true,
-    enumerable: true,
-    get() { return uvUnwrapViewer.isEnabled(); },
-    set(v) { uvUnwrapViewer.setEnabled(!!v); },
-  });
-}
-
-// ---- Debug HUD: UV grid toggle button ---------------------------------
-// The debug overlay (#debug-hud) is non-interactive by default
-// (`pointer-events: none` on the container, so the canvas stays
-// clickable). The toggle button is the one exception — it has
-// `pointer-events: auto` in the CSS and a click handler here.
-// Clicking the button flips `asteroidUvDebug.setEnabled(...)` and
-// updates the label / `.debug-hud-toggle--on` class to match.
-// Setting `window.ASTEROID_UV_DEBUG` from the console also
-// updates the button label (the setter below listens for the
-// overlay's state change via the same `updateBtn()` closure).
-const uvToggleBtn = document.getElementById('debug-toggle-uv');
-if (uvToggleBtn) {
-  const updateUvToggleBtn = () => {
-    const on = asteroidUvDebug.isEnabled();
-    uvToggleBtn.textContent = `UV GRID: ${on ? 'ON' : 'OFF'}`;
-    uvToggleBtn.classList.toggle('debug-hud-toggle--on', on);
-  };
-  uvToggleBtn.addEventListener('click', () => {
-    asteroidUvDebug.setEnabled(!asteroidUvDebug.isEnabled());
-    updateUvToggleBtn();
-  });
-  // Wrap the overlay's setEnabled so the button stays in sync
-  // when the user toggles via the console (`window.ASTEROID_UV_DEBUG
-  // = true` in devtools). Without this wrap, the button would only
-  // update on click — out-of-band changes would be invisible.
-  const originalSetEnabled = asteroidUvDebug.setEnabled;
-  asteroidUvDebug.setEnabled = (v) => {
-    originalSetEnabled(v);
-    updateUvToggleBtn();
-  };
-  updateUvToggleBtn(); // initial label (OFF by default)
-}
-
-// ---- Debug HUD: UV unwrap viewer toggle button ------------------------
-// Same pattern as the UV grid button: `pointer-events: auto` on the
-// button overrides the container's `pointer-events: none`, the
-// click handler flips the viewer's enabled state, and the
-// `setEnabled` wrap on the viewer keeps the label in sync when
-// the user toggles via the console setter or the panel's own
-// close button. The panel's close button calls
-// `uvUnwrapViewer.setEnabled(false)`, which (via the wrap below)
-// also flips this button back to OFF.
-const uvViewerBtn = document.getElementById('debug-toggle-uv-viewer');
-if (uvViewerBtn) {
-  const updateUvViewerBtn = () => {
-    const on = uvUnwrapViewer.isEnabled();
-    uvViewerBtn.textContent = `UV UNWRAP: ${on ? 'ON' : 'OFF'}`;
-    uvViewerBtn.classList.toggle('debug-hud-toggle--on', on);
-  };
-  uvViewerBtn.addEventListener('click', () => {
-    uvUnwrapViewer.setEnabled(!uvUnwrapViewer.isEnabled());
-    updateUvViewerBtn();
-  });
-  // Wrap setEnabled so the button stays in sync with
-  // out-of-band changes (console setter, panel close button).
-  const originalViewerSetEnabled = uvUnwrapViewer.setEnabled;
-  uvUnwrapViewer.setEnabled = (v) => {
-    originalViewerSetEnabled(v);
-    updateUvViewerBtn();
-  };
-  updateUvViewerBtn(); // initial label (OFF by default)
-}
-
-// ---- Game-halt flag ----------------------------------------------------
-// When the edit-object screen is open OR in pick mode, the game
-// entities (ship, asteroids, AI, collisions) are paused. When the
-// screen is in 'edit' state, the main 3D scene stops rendering
-// entirely (the modal's mini viewport is the only thing drawing).
-// The edit screen calls onPause(true) on beginPick/openFor and
-// onPause(false) on close/cancelPick; the render loop checks the
-// resulting flags.
-let gameHalted = false;
-// `cameraFocused` is set to true when the user presses FOCUS
-// inside the edit screen. While true, the chase camera (the
-// `updateCamera` lerp that follows the player ship) is paused
-// so the manually-positioned FOCUS camera isn't immediately
-// reverted. Cleared on screen close.
-let cameraFocused = false;
 
 
-// ---- Edit-object screen -----------------------------------------------
-// Full-screen modal that shows an isolated 3D viewport of the
-// selected asteroid (a dedicated lightweight renderer — no full
-// game scene rendered behind it), an embedded UV editor, and an
-// info box. The flow is:
-//
-//   1. User clicks EDIT OBJECT → `beginPick()` pauses the game
-//      and shows a small "EDIT MODE" hint. The main 3D view
-//      stays active with a crosshair cursor.
-//   2. User clicks an asteroid → `openFor(entity)` opens the
-//      full screen. The main 3D scene stops rendering.
-//   3. User clicks X (or Esc) → `close()` resumes the game.
-//
-// The modal is OPAQUE (no transparency, no backdrop-filter) so
-// the GPU doesn't waste fill-rate on a see-through layer.
-const editScreen = createEditObjectScreen({
-  renderer,
-  camera,
-  scene,
-  getAsteroids: () => field.getEntities(),
-  onPause: (paused) => {
-    gameHalted = !!paused;
-    // Resuming the game clears the FOCUS hold so the chase
-    // camera re-engages on the next frame.
-    if (!paused) cameraFocused = false;
-  },
-});
 
-// ---- Debug HUD: EDIT OBJECT toggle button -----------------------------
-// Cycles the edit screen through three states:
-//   closed → pick   (click 1: begin pick mode)
-//   pick   → closed (click 2 in pick: cancel)
-//   pick   → edit   (after user clicks an asteroid)
-//   edit   → closed (click 3: close screen)
-const editBtn = document.getElementById('debug-toggle-edit');
-if (editBtn) {
-  const updateEditBtn = () => {
-    const isOpen = editScreen.isOpen();
-    const isPicking = editScreen.isPicking();
-    // Caption stays plain "EDIT OBJECT" — the state is conveyed
-    // visually by the `.debug-hud__toggle--on` modifier (background
-    // + border change), not by the text. The old "EDIT OBJECT:
-    // OFF" label read as "off is off" which was confusing.
-    editBtn.textContent = 'EDIT OBJECT';
-    editBtn.classList.toggle('debug-hud__toggle--on', isOpen || isPicking);
-  };
-  editBtn.addEventListener('click', () => {
-    if (editScreen.isOpen()) editScreen.close();
-    else if (editScreen.isPicking()) editScreen.cancelPick();
-    else editScreen.beginPick();
-    updateEditBtn();
-  });
-  if (typeof window !== 'undefined') {
-    Object.defineProperty(window, 'EDIT_OBJECT', {
-      configurable: true,
-      enumerable: true,
-      get() { return editScreen.isOpen() || editScreen.isPicking(); },
-      set(v) {
-        if (v) editScreen.beginPick();
-        else {
-          if (editScreen.isOpen()) editScreen.close();
-          else if (editScreen.isPicking()) editScreen.cancelPick();
-        }
-      },
-    });
-  }
-  updateEditBtn();
-}
 const bus = createEventBus();
 const stateMachine = createStateMachine({ initial: State.DEMO, events: bus });
 
@@ -360,7 +157,7 @@ const laser = createLaser({ scene });
 //   field.clearAll()                     — wipe on game restart
 //   field.getEntities()                  — read-only entity array
 //   field.getWorld()                     — world object (for powerupSystem)
-const field = createAsteroidField({ scene, uvDebugOverlay: asteroidUvDebug });
+const field = createAsteroidField({ scene });
 
 // ---- Particle system ---------------------------------------------------
 // Smoke puffs + stone debris on asteroid destruction. Updated every
@@ -754,7 +551,7 @@ function processCollisions(dt) {
     // ---- Explosion particle effect ----------------------------
     particles.emitExplosion(destroyedPos, asteroidRadius);
     for (const spec of childSpecs) {
-      asteroids.push(createAsteroidFromSpec({ spec, scene, uvDebugOverlay: asteroidUvDebug }));
+      asteroids.push(createAsteroidFromSpec({ spec, scene }));
     }
     // ---- Power-up drop on asteroid kill -----------------------
     // Roll the per-kill chance (POWERUP_DROP_CHANCE, near the
@@ -906,6 +703,41 @@ const debugHud = createDebugHud();
   if (root) debugHud.mount(root);
 }
 
+// ---- Debug column collapse toggle (v0.50.x + v0.51.x) ------------------
+// Small button at the top-left of the debug column that hides/shows
+// the entire column body (the AI debug overlay + diagnostic HUD).
+// The button itself stays visible as the "little quad" the user
+// can click again to expand. State persists in localStorage so the
+// user's preference survives reloads. Default is expanded. v0.51.x
+// extracted the shared `createColumnToggle` helper so the AI tuners
+// column (right side) can reuse the exact same pattern. No hotkey
+// bound — the button is the only control surface (keep it simple).
+createColumnToggle({
+  column: document.getElementById('debug-column'),
+  toggleBtn: document.getElementById('debug-column-toggle'),
+  storageKey: 'debugColumnCollapsed',
+  collapsedClass: 'debug-column--collapsed',
+  expandTitle: 'Expand debug panels',
+  collapseTitle: 'Collapse debug panels',
+});
+
+// ---- AI tuners column collapse toggle (v0.51.x) ------------------------
+// Right-side counterpart to the debug column toggle. Same shared
+// helper, different storageKey + collapsedClass + titles. The toggle
+// button is the "small square to the top right" the user asked for
+// — when collapsed, only the 32x32 button is visible at top: 12px,
+// right: 12px. When expanded, the body hangs below the HUD top bar
+// via `margin-top: var(--space-5)` so it doesn't overlap the energy
+// HUD on the right side of the top bar. Default is expanded.
+createColumnToggle({
+  column: document.getElementById('ai-tuners-column'),
+  toggleBtn: document.getElementById('ai-tuners-column-toggle'),
+  storageKey: 'aiTunersColumnCollapsed',
+  collapsedClass: 'ai-tuners-column--collapsed',
+  expandTitle: 'Expand AI tuners panel',
+  collapseTitle: 'Collapse AI tuners panel',
+});
+
 // ---- AI tuning master flag (v0.48.0) -----------------------------------
 // One switch that gates the ENTIRE AI-tuning component structure
 // (panel + debug overlay + the HTML containers in index.html).
@@ -978,23 +810,27 @@ if (AI_TUNING_ENABLED) {
   {
     const root = document.querySelector('[data-ai-tuners-root]');
     if (root) aiTunersPanel.mount(root);
+  }  } else {
+    // AI tuning disabled — completely scrub the AI-debug-overlay +
+    // AI-tuners HTML roots AND the AI-tuners-column wrapper from the
+    // DOM so nobody sees an empty container or an orphaned toggle.
+    // The debug column wrapper is INTENTIONALLY kept: it hosts the
+    // diagnostic HUD (#debug-hud) which is NOT gated by AI tuning
+    // and should remain visible regardless. Done BEFORE the render
+    // loop starts so position measurements in CSS don't see
+    // zero-height elements.
+    const removeIfMounted = (selector) => {
+      if (typeof document === 'undefined') return;
+      const el = document.querySelector(selector);
+      if (el && typeof el.remove === 'function') el.remove();
+    };
+    removeIfMounted('[data-ai-tuners-root]');
+    removeIfMounted('[data-ai-debug-root]');
+    removeIfMounted('#ai-tuners-column');
+    if (typeof console !== 'undefined') {
+      console.log('[main] AI tuning disabled (AI_TUNING_ENABLED=false) — panel + overlay + guides + AI tuners column omitted.');
+    }
   }
-} else {
-  // AI tuning disabled — completely scrub the AI-debug-overlay +
-  // AI-tuners HTML roots from the DOM so nobody sees an empty
-  // container. Done BEFORE the render loop starts so position
-  // measurements in CSS don't see zero-height elements.
-  const removeIfMounted = (selector) => {
-    if (typeof document === 'undefined') return;
-    const el = document.querySelector(selector);
-    if (el && typeof el.remove === 'function') el.remove();
-  };
-  removeIfMounted('[data-ai-tuners-root]');
-  removeIfMounted('[data-ai-debug-root]');
-  if (typeof console !== 'undefined') {
-    console.log('[main] AI tuning disabled (AI_TUNING_ENABLED=false) — panel + overlay + guides omitted.');
-  }
-}
 
 // Runtime toggle hook — `window.AI_TUNING_ENABLED = false` then
 // reload to disable; `window.AI_TUNING_ENABLED = true` then reload
@@ -1060,25 +896,6 @@ function countSceneGeometry(scene) {
 }
 
 function tick(dt) {
-  // ---- Edit screen (open) ------------------------------------------
-  // The editor screen has its own lightweight 3D viewport (the
-  // mini renderer inside the modal). The main 3D scene does
-  // NOT render while the screen is open — the modal is opaque
-  // and covers it, so rendering it would be wasted GPU work.
-  if (editScreen.isOpen()) {
-    editScreen.updateMini(dt);
-    return;
-  }
-  // While the game is halted (pick mode, or edit screen open in
-  // an earlier version), the gameplay ticks are skipped but the
-  // chase camera + main render continue so the user can see the
-  // scene. The chase camera is paused while the camera is
-  // FOCUS-locked.
-  if (gameHalted) {
-    if (!cameraFocused) updateCamera(dt);
-    renderer.render(scene, camera);
-    return;
-  }
   input.update();
   ship.update(dt);
   playerBullets.update(dt);
