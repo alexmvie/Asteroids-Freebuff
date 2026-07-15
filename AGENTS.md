@@ -353,7 +353,7 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
 
   **Per-cell skip-if-unchanged** — replaced the AI debug overlay's global 80 ms throttle with per-cell text caching inside `setText()` (`lastWritten = { name: lastText }`). One string compare per cell per frame; never drops real changes. Explicitly tested with back-to-back `ai.update()` calls where the WHY row toggles between two reasons.
 
-  **Test deltas:** +29 ai-tuners-panel tests (new file) + 17 ai-tunables tests (new file) + 3 ai-debug-overlay WHY = 543 total pass (+50 vs v0.46.1). Vite build succeeds.
+  **Test count:** 543 total pass (+50 vs v0.46.1). Vite build succeeds.
 
 - [x] **v0.45.1 — AI Powerup Orbit Trap Fix** — `src/entities/ai.js`, `tests/ai.test.js`. Fixed the orbital trap where a nearby powerup could not be collected because the ship kept thrusting while circling it. `collectBehavior` now suspends thrust when total speed is much higher than the desired closing speed (`speed < desiredClosing * 1.5`), letting `LINEAR_DRAG` decay tangential velocity so the ship spirals into the pickup radius instead of orbiting forever. Added regression test. 487 tests pass, build succeeds.
   - `src/systems/capture-markers.js`: High-contrast wireframe markers (green ship ring, red asteroid spheres, yellow powerup ring) for reliable video analysis.
