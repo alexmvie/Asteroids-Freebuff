@@ -585,6 +585,41 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
   - Builder/derived specs -- `buildTunerSpecsFromBag(aiTunables)` that scans the bag's keys + Reads jsdoc for `min`/`max` hints, eliminating the manual sync entirely.
   - Same shape for the AI debug overlay (`src/ui/ai-debug-overlay.js`) -- it reads bag keys too, and would benefit from the same regression guard.
 
+
+- [x] **v0.59.0 -- Radar Radius = 3 x Ship Sight (live-tunable world scope)** -- `src/ui/ai-debug-overlay.js` (new `resolveWorldRadius` helper + `getWorldRadius` callback wired into the radar view + composing factory; `currentWorldRadius()` moved to top of `draw()` so the live-tunable contract holds even when the canvas context is unavailable), `src/main.js` (imports `CHUNK_SIZE` + `BUBBLE_RADIUS_CHUNKS` from `./world/index.js`; passes `getWorldRadius: () => RADAR_BUBBLE_MULTIPLIER * CHUNK_SIZE * BUBBLE_RADIUS_CHUNKS` to the overlay; new `RADAR_BUBBLE_MULTIPLIER = 3` module-scope constant), `tests/ai-debug-overlay.test.js` (11 new tests: 8 helper contract + 3 factory wiring), `src/version-constants.js`, `LOG.md`, `AGENTS.md`. The user asked: "the radius of the radar seems not to be 1:1 the radius of the ships sight. it must be i wd say 3 times the ship sight".
+
+  **Design decision ("ship sight" = streaming bubble radius).** Three candidate meanings were considered:
+  1. AI's reactive range (`powerupMaxChaseDist = 350u`) -> 3x = 1050u, but that exceeds the streaming bubble (600u) and the radar would show void rings beyond the rendered world.
+  2. Camera view distance (~22u follow distance) -> 3x = 66u, less than the 80u default the radar already had. Visually a regression.
+  3. **Streaming bubble radius (`CHUNK_SIZE 200u x BUBBLE_RADIUS_CHUNKS 3 = 600u`)** -> 3x = 1800u. The bubble is what the player LITERALLY sees in the world; the radar covering 3x of it gives a meaningful outer ring beyond the streamed chunks so threats are visible before they enter the bubble. **Chosen.**
+
+  **Implementation:**
+  - **`resolveWorldRadius(staticValue, getterFn, fallback)`** -- new exported pure helper. Priority order: live getter (returns valid positive number) > static `worldRadius` parameter > fallback (defaults to `OVERLAY_CONFIG.worldRadius = 80u`). Defensive against: getter throws, getter returns undefined / null / NaN / Infinity / negative / zero -- all fall through to static then fallback. Never returns a non-positive / NaN / undefined / null result (would divide by zero in `worldToRadar`).
+  - **`getWorldRadius`** -- new optional callback parameter on both `createRadarView(deps)` and `createAiDebugOverlay(deps)`. Evaluated per `draw()` call (NOT cached at mount time) so the radar radius can change at runtime -- e.g. when `BUBBLE_RADIUS_CHUNKS` is tuned for a denser system, or when a future "world scope" tuner is added to the AI Tuners panel. The resolution is evaluated BEFORE the `if (!ctx) return` guard so the live-tunable contract holds even when the canvas context is unavailable (e.g. unit tests that mock the canvas).
+  - **`main.js`** wires the callback: `getWorldRadius: () => RADAR_BUBBLE_MULTIPLIER * CHUNK_SIZE * BUBBLE_RADIUS_CHUNKS` (= 1800u at MVP defaults). Imports `CHUNK_SIZE` + `BUBBLE_RADIUS_CHUNKS` from the existing `./world/index.js` barrel. The `3` multiplier is hoisted to module-scope `RADAR_BUBBLE_MULTIPLIER` (no magic literals).
+
+  **Tests (11 new):**
+  - `resolveWorldRadius: live getter wins over static value`
+  - `resolveWorldRadius: live getter wins over fallback too`
+  - `resolveWorldRadius: static value when getter is missing`
+  - `resolveWorldRadius: fallback when getter is missing AND static is invalid`
+  - `resolveWorldRadius: getter returning invalid values falls through to static` (6 sub-cases: 0, negative, NaN, Infinity, undefined, null)
+  - `resolveWorldRadius: getter that throws falls through silently`
+  - `resolveWorldRadius: getter + static both invalid -> fallback`
+  - `resolveWorldRadius: getter returning a live-changing value is called each time`
+  - `createAiDebugOverlay: getWorldRadius callback is called every update (live-tunable, not cached at mount)` -- pins call frequency (factory integration via the live draw path)
+  - `createAiDebugOverlay: getWorldRadius callback value overrides static worldRadius` -- pins override semantic (asserts via the helper, since the radar view's `currentWorldRadius()` is internal)
+  - `createAiDebugOverlay: missing getWorldRadius falls back to static worldRadius` -- back-compat with v0.23.x call sites; uses unique `worldRadius: 240` so the static branch is actually exercised (not just the config default of 80)
+
+  **Bug found and fixed during implementation:** the previous overlay-file edit left a broken `// Asteroids.` loop with a placeholder sentinel (`for (const a of asteroids) { let { px, py, dist } = worldToRadar((p) => p, ...) }`) followed by a duplicate of the real loop with a stale `worldRadius` (not `worldRadiusLive`) reference. This commit replaces the entire section with the clean version that uses `worldRadiusLive` consistently across all three loops (asteroids, powerup, target bracket).
+
+  **Validation:**
+  - `npm test`: full suite passes (489/489); +11 new tests on top of v0.58.0.
+  - `npm run build`: clean.
+  - Code-reviewer-minimax-m3: ship-able.
+  - Standing rule honored: no `--no-verify` on commit so the auto-push hook fires.
+
+
 ### ⏳ Next Steps (priority order)
 
 1. **Spatial hash** — `src/systems/collision.js` (broad-phase): uniform grid keyed by world position. The narrow-phase step is already in place; this is the O(1) candidate-selection layer above it.

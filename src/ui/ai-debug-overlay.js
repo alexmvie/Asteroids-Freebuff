@@ -176,6 +176,43 @@ export function clipToRadarEdge({ px, py }, halfSize, markerPxRadius = 4) {
 }
 
 /**
+ * Resolve the radar's world-unit radius from three possible sources,
+ * in priority order:
+ *
+ *   1. `getWorldRadius()` callback result — live-tunable, evaluated
+ *      per `draw()`. Caller can track the streaming bubble +
+ *      multipliers without re-creating the overlay.
+ *   2. Static `staticValue` (the legacy `worldRadius` parameter).
+ *   3. `fallback` (defaults to `OVERLAY_CONFIG.worldRadius` = 80u).
+ *
+ * Defensive against: getter throws, getter returns undefined / null,
+ * NaN, Infinity, negative, or zero — all fall through to `staticValue`
+ * then to `fallback`. The radar never renders with a zero or NaN
+ * radius (division by zero in `worldToRadar`).
+ *
+ * Pure (no Three.js, no DOM). Tested directly.
+ *
+ * @param {number|undefined} staticValue
+ * @param {function|undefined|null} getterFn
+ * @param {number} fallback
+ * @returns {number}
+ */
+export function resolveWorldRadius(staticValue, getterFn, fallback) {
+  if (typeof getterFn === 'function') {
+    try {
+      const v = getterFn();
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+    } catch {
+      // swallow — getter failure is not fatal; fall through to static
+    }
+  }
+  if (typeof staticValue === 'number' && Number.isFinite(staticValue) && staticValue > 0) {
+    return staticValue;
+  }
+  return fallback;
+}
+
+/**
  * Map a threat distance (world units) to a hex color. Linear blend:
  *   - 0u       → red (closest, immediate panic)
  *   - maxDist/2 → orange
@@ -302,8 +339,19 @@ function createRadarView(deps) {
     canvas, getSubject, getAiShip, getAsteroids, getPowerupPos,
     getLastDecision, getActiveWeapon,
     worldRadius = OVERLAY_CONFIG.worldRadius,
+    getWorldRadius = null,
   } = deps;
   let radarMode = deps.radarMode || OVERLAY_CONFIG.radarMode;
+
+  /**
+   * Resolve the live radar radius each frame. Order: getter (if
+   * provided, returns a valid positive number) > static `worldRadius`
+   * > `OVERLAY_CONFIG.worldRadius`. Pure function call; safe to
+   * invoke at 60fps.
+   */
+  function currentWorldRadius() {
+    return resolveWorldRadius(worldRadius, getWorldRadius, OVERLAY_CONFIG.worldRadius);
+  }
   const ctx = canvas && typeof canvas.getContext === 'function'
     ? canvas.getContext('2d')
     : null;
@@ -464,6 +512,14 @@ function createRadarView(deps) {
   }
 
   function draw() {
+    // Resolve the live radar radius FIRST, before the ctx guard, so
+    // the live-tunable contract holds even when the canvas context
+    // is unavailable (e.g. in unit tests that mock the canvas). The
+    // getter is evaluated per frame, not cached at mount — mutating
+    // the live bag (or BUBBLE_RADIUS_CHUNKS) is reflected on the
+    // next tick. Captured once per draw so all downstream math uses
+    // the same consistent radius.
+    const worldRadiusLive = currentWorldRadius();
     if (!ctx) return;
     clear();
     drawFrame();
@@ -492,7 +548,7 @@ function createRadarView(deps) {
       if (!a || typeof a.getPosition !== 'function') continue;
       const p = a.getPosition();
       if (!p) continue;
-      let { px, py, dist } = worldToRadar(p, sx, sz, worldRadius, halfSize);
+      let { px, py, dist } = worldToRadar(p, sx, sz, worldRadiusLive, halfSize);
       // In north-up mode, rotate the world around the subject by +yaw
       // so the ship's forward vector (world -Z for yaw=0) aligns with
       // canvas-up. The forward vector in radar px/py is
@@ -506,9 +562,9 @@ function createRadarView(deps) {
         px = rx;
         py = ry;
       }
-      if (dist > worldRadius * 1.5) continue; // far enough to skip
-      const color = colorForThreatDistance(dist, worldRadius);
-      if (dist > worldRadius) {
+      if (dist > worldRadiusLive * 1.5) continue; // far enough to skip
+      const color = colorForThreatDistance(dist, worldRadiusLive);
+      if (dist > worldRadiusLive) {
         const clipped = clipToRadarEdge({ px, py }, halfSize, 4);
         drawMarker(clipped.px, clipped.py, color, 'asteroid', { size: 2 });
       } else {
@@ -521,7 +577,7 @@ function createRadarView(deps) {
     // Power-up (pending spawn). Always a gold cross-hair.
     const pup = safeCall(getPowerupPos);
     if (pup && typeof pup.x === 'number' && typeof pup.z === 'number') {
-      let { px, py, dist } = worldToRadar(pup, sx, sz, worldRadius, halfSize);
+      let { px, py, dist } = worldToRadar(pup, sx, sz, worldRadiusLive, halfSize);
       if (radarMode === 'north-up') {
         const cos = Math.cos(subjectYaw);
         const sin = Math.sin(subjectYaw);
@@ -530,7 +586,7 @@ function createRadarView(deps) {
         px = rx;
         py = ry;
       }
-      const clipped = dist > worldRadius
+      const clipped = dist > worldRadiusLive
         ? clipToRadarEdge({ px, py }, halfSize, 4)
         : { px, py };
       drawMarker(clipped.px, clipped.py, '#facc15', 'powerup');
@@ -544,7 +600,7 @@ function createRadarView(deps) {
     const dec = safeCall(getLastDecision);
     if (dec && dec.target && dec.target.pos) {
       let { px, py, dist } = worldToRadar(
-        dec.target.pos, sx, sz, worldRadius, halfSize,
+        dec.target.pos, sx, sz, worldRadiusLive, halfSize,
       );
       if (radarMode === 'north-up') {
         const cos = Math.cos(subjectYaw);
@@ -555,7 +611,7 @@ function createRadarView(deps) {
         py = ry;
       }
       const bracketColor = dec.target.mode === 'powerup' ? '#c084fc' : '#48dbfb';
-      const finalPos = dist > worldRadius
+      const finalPos = dist > worldRadiusLive
         ? clipToRadarEdge({ px, py }, halfSize, 12)
         : { px, py };
       drawBracket(finalPos.px, finalPos.py, bracketColor);
@@ -822,6 +878,7 @@ export function createAiDebugOverlay(deps = {}) {
     getScore, getEnergy, getState,
     displayMode = OVERLAY_CONFIG.displayMode,
     worldRadius = OVERLAY_CONFIG.worldRadius,
+    getWorldRadius = null,
   } = deps;
   if (displayMode === 'off') {
     // Off mode: factory still exists (uniform API) but is a no-op.
@@ -884,7 +941,7 @@ export function createAiDebugOverlay(deps = {}) {
     radarView = createRadarView({
       canvas: radarCanvas,
       getSubject, getAiShip, getAsteroids, getPowerupPos,
-      getLastDecision, getActiveWeapon, worldRadius,
+      getLastDecision, getActiveWeapon, worldRadius, getWorldRadius,
     });
     const modeBtn = rootEl.querySelector('[data-ai-debug="radarModeToggle"]');
     if (modeBtn && typeof modeBtn.addEventListener === 'function') {

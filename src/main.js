@@ -12,6 +12,8 @@ import {
   NEBULA_MAX_OPACITY,
   worldToChunk,
   getActiveChunks,
+  CHUNK_SIZE,
+  BUBBLE_RADIUS_CHUNKS,
 } from './world/index.js';
 import { createInputSystem } from './systems/input.js';
 import {
@@ -47,6 +49,14 @@ import { createPirateTexture, applyPirateTexture } from './systems/pirate-textur
 import { createParticleSystem } from './systems/particles.js';
 import { createCaptureMarkers } from './systems/capture-markers.js';
 import { createAiFlightDebug } from './systems/ai-flight-debug.js';
+
+// ---- Radar radius (v0.59.0) ----------------------------------------------
+// Multiplier on the streaming bubble radius (= CHUNK_SIZE × BUBBLE_RADIUS_CHUNKS)
+// used as the AI Debug Overlay's radar scope. Per the user's request
+// ("the radar should be ~3× the ship sight"), 3× gives a generous
+// outer ring beyond the streamed chunks. Hoisted to module scope so
+// the "3×" intent is named, not a magic literal.
+const RADAR_BUBBLE_MULTIPLIER = 3;
 
 // ---- Power-up drop frequency -------------------------------------------
 // Probability (0.0–1.0) that an asteroid destroy spawns a laser
@@ -865,6 +875,11 @@ if (AI_TUNING_ENABLED) {
       max: ship.getMaxEnergy ? ship.getMaxEnergy() : 100,
     }),
     getState: () => stateMachine.getState(),
+    // v0.59.0: radar radius = 3 × ship sight (= 3 × bubble radius,
+    // i.e. 1800u at MVP defaults). "Ship sight" = streaming bubble
+    // radius (CHUNK_SIZE × BUBBLE_RADIUS_CHUNKS). Live getter so the
+    // radar tracks any future BUBBLE_RADIUS_CHUNKS change.
+    getWorldRadius: () => RADAR_BUBBLE_MULTIPLIER * CHUNK_SIZE * BUBBLE_RADIUS_CHUNKS,
   });
   {
     const root = document.querySelector('[data-ai-debug-root]');

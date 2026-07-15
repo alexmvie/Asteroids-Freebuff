@@ -28,6 +28,7 @@ import {
   formatDistance,
   formatYawCommand,
   formatBool,
+  resolveWorldRadius,
   createAiDebugOverlay,
 } from '../src/ui/ai-debug-overlay.js';
 
@@ -251,6 +252,70 @@ test('formatBool: truthy / falsy but normalized through Boolean()', () => {
   assert.equal(formatBool(0), 'OFF');
   assert.equal(formatBool(null), 'OFF');
   assert.equal(formatBool('yes'), 'ON');
+});
+
+// ---------------------------------------------------------------------------
+// Helper: resolveWorldRadius (v0.59.0)
+// ---------------------------------------------------------------------------
+// Priority order: live getter (returns valid positive number) > static
+// `worldRadius` > fallback (OVERLAY_CONFIG.worldRadius = 80u). The
+// helper never returns a non-positive / NaN / undefined / null result;
+// the radar would otherwise divide by zero in `worldToRadar`.
+
+test('resolveWorldRadius: live getter wins over static value', () => {
+  assert.equal(resolveWorldRadius(80, () => 1800, 80), 1800);
+});
+
+test('resolveWorldRadius: live getter wins over fallback too', () => {
+  // No static value → getter must still take precedence.
+  assert.equal(resolveWorldRadius(undefined, () => 250, 80), 250);
+});
+
+test('resolveWorldRadius: static value when getter is missing', () => {
+  assert.equal(resolveWorldRadius(120, null, 80), 120);
+  assert.equal(resolveWorldRadius(120, undefined, 80), 120);
+});
+
+test('resolveWorldRadius: fallback when getter is missing AND static is invalid', () => {
+  assert.equal(resolveWorldRadius(0, null, 80), 80);
+  assert.equal(resolveWorldRadius(NaN, null, 80), 80);
+  assert.equal(resolveWorldRadius(undefined, null, 80), 80);
+});
+
+test('resolveWorldRadius: getter returning invalid values falls through to static', () => {
+  // None of these should ever reach the radar; resolveWorldRadius
+  // must reject and fall back. The radar would otherwise divide by
+  // zero / render NaN coordinates.
+  assert.equal(resolveWorldRadius(120, () => 0, 80), 120);
+  assert.equal(resolveWorldRadius(120, () => -5, 80), 120);
+  assert.equal(resolveWorldRadius(120, () => NaN, 80), 120);
+  assert.equal(resolveWorldRadius(120, () => Infinity, 80), 120);
+  assert.equal(resolveWorldRadius(120, () => undefined, 80), 120);
+  assert.equal(resolveWorldRadius(120, () => null, 80), 120);
+});
+
+test('resolveWorldRadius: getter that throws falls through silently', () => {
+  // The radar calls this every frame; a getter that throws must NOT
+  // crash the radar loop. Falls through to static.
+  assert.equal(resolveWorldRadius(120, () => { throw new Error('boom'); }, 80), 120);
+});
+
+test('resolveWorldRadius: getter + static both invalid → fallback', () => {
+  assert.equal(resolveWorldRadius(0, () => 0, 80), 80);
+  assert.equal(resolveWorldRadius(NaN, () => NaN, 80), 80);
+  assert.equal(resolveWorldRadius(undefined, () => undefined, 80), 80);
+});
+
+test('resolveWorldRadius: getter returning a live-changing value is called each time', () => {
+  // The closure captures `n` by reference, so callers can mutate the
+  // bag between calls and see the new value.
+  let n = 100;
+  const getter = () => n;
+  assert.equal(resolveWorldRadius(80, getter, 80), 100);
+  n = 200;
+  assert.equal(resolveWorldRadius(80, getter, 80), 200);
+  n = 0; // invalid → falls through to static
+  assert.equal(resolveWorldRadius(80, getter, 80), 80);
 });
 
 // ---------------------------------------------------------------------------
@@ -554,6 +619,96 @@ test('createAiDebugOverlay: dispose unmounts (subsequent update does not throw b
   ai.mount(root);
   ai.dispose();
   assert.doesNotThrow(() => ai.update(), 'update after dispose should be a no-op');
+});
+
+// =============================================================================
+// v0.59.0 — Radar radius = 3 × ship sight (live-tunable world scope)
+// =============================================================================
+// The user asked for the radar to cover ~3× the ship's visible world
+// scope, not just the AI's reactive range. The wiring contract:
+//   - The factory accepts an OPTIONAL `getWorldRadius` callback.
+//   - When provided AND returning a valid positive number, the radar
+//     uses that value as its worldRadius (overriding any static arg).
+//   - When missing / invalid / throwing, the radar falls back to the
+//     static `worldRadius` parameter, then to OVERLAY_CONFIG.worldRadius.
+// This pair of tests pins the wiring contract so the live scope can
+// be changed at runtime (e.g. via the AI Tuners panel) without
+// re-creating the overlay.
+
+test('createAiDebugOverlay: getWorldRadius callback is called every update (live-tunable, not cached at mount)', () => {
+  // The live-tunable contract: the getter is called on every update
+  // call, regardless of whether the canvas has a usable context. The
+  // current implementation evaluates `currentWorldRadius()` BEFORE
+  // the `if (!ctx) return` guard in `draw()` so the live-bag
+  // mutation propagates even when the radar is a no-op visually.
+  let getterCalls = 0;
+  let liveRadius = 1800;
+  const ai = createAiDebugOverlay({
+    getSubject: () => null, // mock canvas returns null context; draw is a no-op
+    worldRadius: 80,        // static fallback
+    getWorldRadius: () => { getterCalls++; return liveRadius; },
+  });
+  const root = buildMockRoot();
+  ai.mount(root);
+  ai.update();
+  ai.update();
+  assert.equal(getterCalls, 2, 'getter is called every update (live-tunable, not cached)');
+  // Mutate the live bag and verify the next update reflects it.
+  liveRadius = 900;
+  getterCalls = 0;
+  ai.update();
+  assert.equal(getterCalls, 1);
+  ai.dispose();
+});
+
+test('createAiDebugOverlay: getWorldRadius callback value overrides static worldRadius', () => {
+  // The override semantic: when the getter returns a valid positive
+  // number, that number is the radar's worldRadius — the static arg
+  // is ignored. NOTE: this test asserts via `resolveWorldRadius`
+  // directly (the pure helper). The factory path is covered by the
+  // call-frequency test above (which exercises the live draw path
+  // through `radarView.draw()` -> `currentWorldRadius()` ->
+  // `resolveWorldRadius(...)`). The radar view's `currentWorldRadius`
+  // is internal so we cannot spy on it from outside.
+  let liveRadius = 250;
+  const ai = createAiDebugOverlay({
+    getSubject: () => null,
+    worldRadius: 80,
+    getWorldRadius: () => liveRadius,
+  });
+  const root = buildMockRoot();
+  ai.mount(root);
+  ai.update();
+  // Snapshot the resolved value via the public API: the radar view
+  // doesn't expose currentWorldRadius(), so we exercise it indirectly
+  // by re-evaluating resolveWorldRadius with the same wiring
+  // semantics. This pins the contract: liveRadius is the source of
+  // truth when present, regardless of static.
+  assert.equal(resolveWorldRadius(80, () => liveRadius, 80), liveRadius);
+  liveRadius = 999;
+  assert.equal(resolveWorldRadius(80, () => liveRadius, 80), 999);
+  ai.dispose();
+});
+
+test('createAiDebugOverlay: missing getWorldRadius falls back to static worldRadius', () => {
+  // No getWorldRadius provided → resolver falls through to the static
+  // `worldRadius` parameter. Use a unique static value (240) so the
+  // test exercises the static branch specifically — not just the
+  // config default (which happens to also be 80). NOTE: the factory
+  // path is a smoke test ("doesn't throw + `resolveWorldRadius(240,
+  // null, 80) === 240`"); the live draw path through the radar view
+  // is covered by the call-frequency test above.
+  const ai = createAiDebugOverlay({
+    getSubject: () => null,
+    worldRadius: 240,
+  });
+  const root = buildMockRoot();
+  ai.mount(root);
+  assert.doesNotThrow(() => ai.update());
+  // The radar's resolved radius equals the static 240, not the
+  // config default 80. Pin the value directly via the helper.
+  assert.equal(resolveWorldRadius(240, null, 80), 240);
+  ai.dispose();
 });
 
 // =============================================================================

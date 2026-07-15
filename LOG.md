@@ -778,3 +778,11 @@ Drei Scripts für automatisierte Game-Analyse ohne manuelles Eingreifen:
 
 **Validation:**
 - 486 tests pass, build succeeds.
+
+
+## v0.59.0 (radar radius = 3 x ship sight)
+
+**Why:** the radar's 80u scope was a hardcoded relic from v0.23.x that didn't track the AI's reactive range OR the streaming bubble OR any meaningful "ship sight" reference. The user's intuition is right -- the radar should cover ~3x what the player can see, not 1/8 of it. We chose the streaming bubble as the reference (the player literally sees this much of the world; 3x gives a generous outer ring). Implementation is a single live-getter callback, evaluated every frame, with full defensive fallback chain (getter > static > config default).
+
+**Shipped:** commit pending. ~14 commits ahead of remote per the standing push-as-rule (the sandbox push keeps timing out on network -- run `git push origin refine-coded-ai` from your local terminal whenever convenient and the queue lands in one shot).
+
