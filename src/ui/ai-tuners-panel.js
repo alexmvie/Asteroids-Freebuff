@@ -2,7 +2,14 @@
  * AI Tuners Panel — runtime tunables for the demo AI.
  *
  * v0.46.x — Live browser-based tuning (no app reload, no 10-min
- * capture-and-compare loops).
+ *           capture-and-compare loops).
+ * v0.48.0   — Inline SVG visual guides per slider + master flag
+ *           (see src/main.js `AI_TUNING_ENABLED`). Each of the 21
+ *           tunables gets a 56×36 SVG that morphs live on slider
+ *           drag: cones expand/shrink for angular gates, circles
+ *           grow/shrink for radii, speedometer needles swing for
+ *           speeds, bars fill for scalars, clock hands rotate for
+ *           timers. The guideType per spec is the pattern picker.
  *
  * Architecture (modular factory, matches the project's existing
  * pattern in src/ui/hud.js, src/ui/debug-hud.js, src/ui/ai-debug-
@@ -10,8 +17,12 @@
  *   • Pure helpers (exported for unit tests):
  *       - `formatTunable(key, value)`  — key-specific value formatter
  *       - `clampToTunableRange(key, value)` — defensive min/max clamp
- *   • Tuner specs (TUNER_SPECS) — min/max/step/format per AI_TUNABLES key
- *   • Tuner groups (TUNER_GROUPS) — UI ordering (Fire, Thrust, Evade, ...)
+ *       - `renderGuide(pattern, value, min, max)` — inline-SVG string
+ *   • Tuner specs (TUNER_SPECS) — min/max/step/format/guideType per
+ *     AI_TUNABLES key. `guideType` picks one of 'cone' | 'circle' |
+ *     'speedometer' | 'bar' | 'clock' (defensive: unknown = empty).
+ *   • Tuner groups (TUNER_GROUPS) — UI ordering (Fire, Thrust, Evade,
+ *     Powerup, Target, Laser).
  *   • Composing factory: createAiTunersPanel(deps) → { mount, dispose,
  *     getValues, setValue, reset, exportSnapshot }
  *
@@ -24,7 +35,8 @@
  * Reset semantics: "RESET" calls `resetAITunables()` from
  * ai-tunables.js, which `Object.assign()`s the frozen defaults into
  * the live bag. No app reload — the AI immediately snaps back to
- * canonical behavior.
+ * canonical behavior. After a reset, all slider values + value
+ * cells + guide SVGs are re-rendered from the live bag.
  *
  * Save semantics: "COPY JSON" writes the current values to the
  * clipboard via `navigator.clipboard.writeText` AND emits a
@@ -32,7 +44,8 @@
  * can paste it into a save file or send it via chat.
  *
  * Removal: delete this file + remove the `createAiTunersPanel` import
- * + the mount block + the HTML container. No other file is affected.
+ * + the mount block + the HTML container + the
+ * AI_TUNING_ENABLED gate in main.js. No other file is affected.
  *
  * Pure helpers exported for unit tests — none of these touch DOM, so
  * they can be exercised without jsdom.
@@ -87,7 +100,7 @@ export const TUNER_GROUPS = Object.freeze([
 ]);
 
 // ===========================================================================
-// TUNER SPECS — min/max/step/format per AI_TUNABLES key
+// TUNER SPECS — min/max/step/format/guideType per AI_TUNABLES key
 // ===========================================================================
 
 /**
@@ -98,6 +111,19 @@ export const TUNER_GROUPS = Object.freeze([
  * Min/max ranges are intentionally wider than the python tuning
  * loop's discrete grid — the user wants smooth dragging, not a
  * stepped grid. Validated by `clampToTunableRange`.
+ *
+ * `guideType` is the visual-guide pattern (v0.48.0):
+ *   • 'cone'        — angular gate, value in radians (half-angle)
+ *   • 'circle'      — radius, value in world units
+ *   • 'speedometer' — speed, value in u/s (or any monotonic scalar)
+ *   • 'bar'         — scalar slider [min, max]
+ *   • 'clock'       — seconds (or any cyclic / time-like scalar)
+ *   • undefined / unknown → no guide rendered
+ *
+ * The pattern is purely cosmetic; it just makes the value visible
+ * in a form that matches its semantic meaning. The pattern picker
+ * lives here (not in `renderGuide`) so a single source of truth
+ * decides which guide goes with which key.
  */
 export const TUNER_SPECS = Object.freeze({
   // Fire ----------------------------------------------------------------
@@ -106,24 +132,28 @@ export const TUNER_SPECS = Object.freeze({
     min: 0.05, max: 1.5, step: 0.01,
     format: (v) => `${(v * 180 / Math.PI).toFixed(0)}°`,
     help: 'Wide = loose aim. >0.5 rad = shots at any in-range target.',
+    guideType: 'cone',
   },
   fireMinDist: {
     label: 'FIRE MIN DIST',
     min: 0, max: 200, step: 1,
     format: (v) => `${Math.round(v)}u`,
     help: 'Closest distance to fire at. Avoid friendly-fire in collision range.',
+    guideType: 'bar',
   },
   fireMaxDist: {
     label: 'FIRE MAX DIST',
     min: 10, max: 500, step: 5,
     format: (v) => `${Math.round(v)}u`,
     help: 'Far-range cutoff. Beyond this, AI does not shoot.',
+    guideType: 'bar',
   },
   bulletSpeed: {
     label: 'BULLET SPEED',
     min: 50, max: 800, step: 25,
     format: (v) => `${Math.round(v)} u/s`,
     help: 'For lead prediction. Must mirror BULLET_SPEED in bullet.js.',
+    guideType: 'speedometer',
   },
   // Thrust --------------------------------------------------------------
   thrustHeadingGate: {
@@ -131,12 +161,14 @@ export const TUNER_SPECS = Object.freeze({
     min: 0.05, max: 1.0, step: 0.01,
     format: (v) => `${(v * 180 / Math.PI).toFixed(0)}°`,
     help: 'Tight = stop-turn-thrust. Wide = thrust-while-turning (spirals).',
+    guideType: 'cone',
   },
   yawDeadband: {
     label: 'YAW DEADBAND',
     min: 0.0, max: 0.5, step: 0.01,
     format: (v) => `${(v * 180 / Math.PI).toFixed(0)}°`,
     help: 'Inside this band, no yaw command. Wide = wobble-free.',
+    guideType: 'cone',
   },
   // Evade ---------------------------------------------------------------
   evadeDist: {
@@ -144,6 +176,7 @@ export const TUNER_SPECS = Object.freeze({
     min: 2, max: 100, step: 1,
     format: (v) => `${Math.round(v)}u`,
     help: 'Below this distance from nearest asteroid → EVADE mode.',
+    guideType: 'circle',
   },
   // Powerup -------------------------------------------------------------
   powerupMaxChaseDist: {
@@ -151,60 +184,70 @@ export const TUNER_SPECS = Object.freeze({
     min: 50, max: 500, step: 10,
     format: (v) => `${Math.round(v)}u`,
     help: 'Beyond this, AI ignores the pickup entirely.',
+    guideType: 'circle',
   },
   powerupThrustGate: {
     label: 'POWERUP THRUST',
     min: 0.02, max: 1.0, step: 0.01,
     format: (v) => `${(v * 180 / Math.PI).toFixed(0)}°`,
     help: 'Heading gate for thrust while chasing a powerup. Tight = clean approach.',
+    guideType: 'cone',
   },
   powerupStickyTime: {
     label: 'POWERUP STICKY',
     min: 0, max: 10, step: 0.1,
     format: (v) => `${v.toFixed(1)}s`,
     help: 'Once committed to a powerup, ignore better asteroids for this long.',
+    guideType: 'clock',
   },
   powerupCruiseSpeed: {
     label: 'PU CRUISE',
     min: 5, max: 200, step: 5,
     format: (v) => `${Math.round(v)} u/s`,
     help: 'Cap on speed while approaching a powerup.',
+    guideType: 'speedometer',
   },
   powerupMinApproachSpeed: {
     label: 'PU MIN APPROACH',
     min: 0, max: 50, step: 1,
     format: (v) => `${Math.round(v)} u/s`,
     help: 'Lower bound for required approach speed (used in horizon computation).',
+    guideType: 'speedometer',
   },
   powerupApproachGain: {
     label: 'PU APPROACH GAIN',
     min: 0.1, max: 2.0, step: 0.05,
     format: (v) => `${v.toFixed(2)} u·s/u`,
     help: 'Distance-to-speed scaling for the adaptive horizon.',
+    guideType: 'bar',
   },
   powerupBrakeSafetyFactor: {
     label: 'PU BRAKE SAFETY',
     min: 0.1, max: 1.0, step: 0.05,
     format: (v) => `${(v * 100).toFixed(0)}%`,
     help: 'Multiplier on theoretical max safe approach speed. <1 leaves a margin.',
+    guideType: 'bar',
   },
   powerupVelocityErrorThreshold: {
     label: 'PU VEL ERR',
     min: 0, max: 30, step: 0.5,
     format: (v) => `${v.toFixed(1)} u/s`,
     help: 'Below this velocity-error magnitude, AI coasts (no thrust pulses).',
+    guideType: 'bar',
   },
   powerupFinalApproachDist: {
     label: 'PU FINAL DIST',
     min: 1, max: 30, step: 1,
     format: (v) => `${Math.round(v)}u`,
     help: 'Inside this distance, controller switches to final-approach mode.',
+    guideType: 'circle',
   },
   powerupFinalApproachSpeed: {
     label: 'PU FINAL SPEED',
     min: 0, max: 20, step: 0.5,
     format: (v) => `${v.toFixed(1)} u/s`,
     help: 'Min closing speed during final approach (prevents stalling outside pickup radius).',
+    guideType: 'speedometer',
   },
   // Target --------------------------------------------------------------
   asteroidSizeBias: {
@@ -212,18 +255,21 @@ export const TUNER_SPECS = Object.freeze({
     min: 0, max: 50, step: 1,
     format: (v) => `${Math.round(v)} u`,
     help: 'Effective distance = real_dist - (2 - size) * sizeBias. Big = prefer large.',
+    guideType: 'bar',
   },
   forwardConeHalfAngle: {
     label: 'TARGET CONE',
     min: 0.1, max: Math.PI, step: 0.05,
     format: (v) => `${(v * 180 / Math.PI).toFixed(0)}°`,
     help: 'Half-angle of the forward cone used for target priority.',
+    guideType: 'cone',
   },
   powerupNearBehindThreshold: {
     label: 'NEAR-BEHIND',
     min: 0, max: 200, step: 5,
     format: (v) => `${Math.round(v)}u`,
     help: 'Powerups closer than this BEHIND the ship are still chased.',
+    guideType: 'bar',
   },
   // Laser ---------------------------------------------------------------
   laserFireHeadingGate: {
@@ -231,6 +277,7 @@ export const TUNER_SPECS = Object.freeze({
     min: 0.02, max: 1.0, step: 0.01,
     format: (v) => `${(v * 180 / Math.PI).toFixed(0)}°`,
     help: 'Laser cone half-angle. Tight = lock-on at center.',
+    guideType: 'cone',
   },
 });
 
@@ -268,6 +315,195 @@ export function clampToTunableRange(key, value) {
   const spec = TUNER_SPECS[key];
   if (!spec) return value;
   return Math.min(spec.max, Math.max(spec.min, value));
+}
+
+// ===========================================================================
+// Visual guides — pure SVG-string renderer (v0.48.0)
+// ===========================================================================
+//
+// Each row in the panel gets a 56×36 SVG that morphs live as the
+// slider drags. The SVG string is constructed on every value change
+// and re-injected into the row's `[data-tuner-guide]` container.
+// Strings (not DOM nodes) so the helper has zero DOM dependency and
+// tests don't need jsdom.
+//
+// The five patterns were chosen so EVERY one of the 21 tunables
+// maps cleanly to a semantically appropriate shape:
+//
+//   • 'cone'        — angular gate (radians, half-angle). Used for
+//                     fire / thrust / target / laser cone half-
+//                     angles + yaw deadband. Shows a wedge whose
+//                     spread grows with `value`.
+//   • 'circle'      — radius (world units). Used for evade distance
+//                     + powerup chase / final approach distances.
+//                     Shows a growing centered disc inside a
+//                     dashed max-radius ring.
+//   • 'speedometer' — speed (u/s, or any monotonic scalar). Used
+//                     for bullet speed + the three powerup approach
+//                     speeds. Shows a half-arc dial with a needle
+//                     rotated proportional to the slider position.
+//   • 'bar'         — generic scalar slider. Used for the 6 unitless
+//                     sliders + FIRE min/max (which sit inside
+//                     their own context). Shows a horizontal fill
+//                     bar.
+//   • 'clock'       — seconds / time-like cyclic value. Used for
+//                     powerup sticky time. Shows a clock face with
+//                     a hand rotated full-circle as the value
+//                     increases from 0 → max.
+//
+// All five share the same 100-unit viewBox so the panel's CSS can
+// size them uniformly with `.ai-tuner__svg { width: 100%; height:
+// 100%; }`. Theme colors come from `.ai-tuner__svg-bg` and
+// `.ai-tuner__svg-fg` rules in styles.css.
+
+const GUIDE_EMPTY_SVG =
+  '<svg class="ai-tuner__svg" viewBox="0 0 100 36" ' +
+  'xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>';
+
+/**
+ * Render the inline-SVG string for one slider row. Returns an
+ * empty-string SVG (a placeholder of the same dimensions, so the
+ * panel layout stays stable) when no guide applies. NaN / non-finite
+ * values are coerced to `min` so the user always sees a coherent
+ * shape — never a broken SVG.
+ *
+ * Pure function — DOM-free, safe for unit tests without jsdom.
+ *
+ * @param {string|undefined|null} pattern — one of the five guide
+ *   types. Unknown → empty placeholder.
+ * @param {number} value — current slider value (clamped internally)
+ * @param {number} min — spec min
+ * @param {number} max — spec max
+ * @returns {string} SVG markup suitable for `innerHTML`
+ */
+export function renderGuide(pattern, value, min, max) {
+  // Compute a safe t with all defenses layered. Any single bad
+  // input produces a meaningful number, never throws.
+  const safeMin = Number.isFinite(min) ? min : 0;
+  const safeMax = (() => {
+    if (!Number.isFinite(max)) return safeMin + 1;
+    return Math.max(safeMin + 1e-9, max);
+  })();
+  const rawT = (Number.isFinite(value) ? value : safeMin) - safeMin;
+  const range = safeMax - safeMin;
+  const t = Math.min(1, Math.max(0, range > 0 ? rawT / range : 0));
+
+  switch (pattern) {
+    case 'cone':
+      return coneGuide(t, safeMin, safeMax);
+    case 'circle':
+      return circleGuide(t);
+    case 'speedometer':
+      return speedometerGuide(t);
+    case 'bar':
+      return barGuide(t);
+    case 'clock':
+      return clockGuide(t);
+    default:
+      // Unknown pattern → empty placeholder so layout doesn't jump.
+      return GUIDE_EMPTY_SVG;
+  }
+}
+
+/**
+ * Cone guide: a wedge whose half-spread is proportional to the
+ * slider value. Centered axis points "forward" (up in the viewBox).
+ * Background wedge shows the max-spread; foreground wedge morphs.
+ */
+function coneGuide(t) {
+  const W = 100, H = 36;
+  const cx = W / 2;
+  const spread = Math.round(45 * t); // 0..45 px half-spread
+  return (
+    `<svg class="ai-tuner__svg ai-tuner__svg--cone" viewBox="0 0 ${W} ${H}" ` +
+    `xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
+    `<path class="ai-tuner__svg-bg" d="M ${cx - 45} ${H} L ${cx} 4 L ${cx + 45} ${H} Z" />` +
+    `<path class="ai-tuner__svg-fg" d="M ${cx - spread} ${H} L ${cx} 4 L ${cx + spread} ${H} Z" />` +
+    `<line class="ai-tuner__svg-axis" x1="${cx}" y1="${H}" x2="${cx}" y2="4" />` +
+    `</svg>`
+  );
+}
+
+/**
+ * Circle guide: a centered disc whose radius is proportional to t.
+ * Surrounding dashed ring shows the maximum radius for context.
+ */
+function circleGuide(t) {
+  const cx = 50, cy = 18, maxR = 15;
+  const r = Math.max(0.5, t * maxR);
+  return (
+    `<svg class="ai-tuner__svg ai-tuner__svg--circle" viewBox="0 0 100 36" ` +
+    `xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
+    `<circle class="ai-tuner__svg-bg" cx="${cx}" cy="${cy}" r="${maxR}" />` +
+    `<circle class="ai-tuner__svg-fg" cx="${cx}" cy="${cy}" r="${r.toFixed(2)}" />` +
+    `</svg>`
+  );
+}
+
+/**
+ * Speedometer guide: half-arc dial with a needle rotated from
+ * -90° (full left, value=0) to +90° (full right, value=max).
+ *
+ * The needle length stays constant so the eye tracks rotation, not
+ * length; the dial arc stays constant so the "what's full" anchor
+ * is stable. Only the needle moves.
+ */
+function speedometerGuide(t) {
+  const cx = 50, cy = 30, r = 22;
+  // Angle: -π at t=0 (left), 0 at t=1 (right).
+  const angle = -Math.PI + Math.PI * t;
+  const nx = cx + r * Math.cos(angle);
+  const ny = cy + r * Math.sin(angle);
+  // Background arc — half-circle from (cx-r, cy) over the top to
+  // (cx+r, cy). SVG arc syntax: A rx ry rot largeArcFlag sweepFlag x y.
+  return (
+    `<svg class="ai-tuner__svg ai-tuner__svg--speedometer" viewBox="0 0 100 36" ` +
+    `xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
+    `<path class="ai-tuner__svg-bg" d="M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}" />` +
+    `<line class="ai-tuner__svg-fg" x1="${cx}" y1="${cy}" ` +
+    `x2="${nx.toFixed(2)}" y2="${ny.toFixed(2)}" />` +
+    `<circle class="ai-tuner__svg-axis" cx="${cx}" cy="${cy}" r="1.5" />` +
+    `</svg>`
+  );
+}
+
+/**
+ * Bar guide: horizontal fill bar. Width = t × total. Background bar
+ * shows full extent; foreground bar shows fill.
+ */
+function barGuide(t) {
+  const W = 90, x = 5, y = 14, h = 8, fillW = Math.round(W * t);
+  const fillX = x;
+  return (
+    `<svg class="ai-tuner__svg ai-tuner__svg--bar" viewBox="0 0 100 36" ` +
+    `xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
+    `<rect class="ai-tuner__svg-bg" x="${x}" y="${y}" width="${W}" height="${h}" rx="2" />` +
+    `<rect class="ai-tuner__svg-fg" x="${fillX}" y="${y}" width="${fillW}" height="${h}" rx="2" />` +
+    `</svg>`
+  );
+}
+
+/**
+ * Clock guide: clock face with a hand rotated full-circle as t goes
+ * 0 → 1. Hand starts at 12 o'clock (angle = -π/2) — same convention
+ * used by the SVG painter's algorithm. Center pivot circle marks
+ * the spindle.
+ */
+function clockGuide(t) {
+  const cx = 50, cy = 18, r = 13;
+  // -π/2 → +3π/2 = full clockwise sweep as t goes 0 → 1.
+  const angle = -Math.PI / 2 + 2 * Math.PI * t;
+  const hx = cx + r * Math.cos(angle);
+  const hy = cy + r * Math.sin(angle);
+  return (
+    `<svg class="ai-tuner__svg ai-tuner__svg--clock" viewBox="0 0 100 36" ` +
+    `xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
+    `<circle class="ai-tuner__svg-bg" cx="${cx}" cy="${cy}" r="${r}" />` +
+    `<line class="ai-tuner__svg-fg" x1="${cx}" y1="${cy}" ` +
+    `x2="${hx.toFixed(2)}" y2="${hy.toFixed(2)}" />` +
+    `<circle class="ai-tuner__svg-axis" cx="${cx}" cy="${cy}" r="1.5" />` +
+    `</svg>`
+  );
 }
 
 // ===========================================================================
@@ -309,27 +545,7 @@ export function createAiTunersPanel(deps = {}) {
 
   function buildDom(rootElArg) {
     const sections = TUNER_GROUPS.map((group) => {
-      const rows = group.keys.map((key) => {
-        const spec = TUNER_SPECS[key];
-        const label = (spec && spec.label) || key;
-        const help = (spec && spec.help) || '';
-        const current = tunables[key];
-        const stepAttr = spec && typeof spec.step === 'number' ? spec.step : 0.01;
-        const minAttr = spec && typeof spec.min === 'number' ? spec.min : 0;
-        const maxAttr = spec && typeof spec.max === 'number' ? spec.max : 1000;
-        return `
-          <div class="ai-tuner__row" data-tuner-row="${key}">
-            <label class="ai-tuner__label" for="ai-tuner-${key}">${label}</label>
-            <input class="ai-tuner__slider" type="range"
-                   id="ai-tuner-${key}"
-                   data-tuner="${key}"
-                   min="${minAttr}" max="${maxAttr}" step="${stepAttr}"
-                   value="${current}"
-                   aria-label="${label}" title="${help}">
-            <span class="ai-tuner__value" data-tuner-value="${key}">${formatTunable(key, current)}</span>
-          </div>
-        `;
-      }).join('');
+      const rows = group.keys.map((key) => buildRow(key)).join('');
       return `
         <fieldset class="ai-tuner__group" data-tuner-group="${group.name}">
           <legend class="ai-tuner__group-legend">${group.name}</legend>
@@ -350,35 +566,103 @@ export function createAiTunersPanel(deps = {}) {
     rootElArg.classList.add('ai-tuners--mounted');
   }
 
+  /** Build a single row's HTML — extracted so setValue + reset can
+   *  rebuild the guide portion of a row without re-rendering the
+   *  whole panel. */
+  function buildRow(key) {
+    const spec = TUNER_SPECS[key];
+    const label = (spec && spec.label) || key;
+    const help = (spec && spec.help) || '';
+    const current = tunables[key];
+    const stepAttr = spec && typeof spec.step === 'number' ? spec.step : 0.01;
+    const minAttr = spec && typeof spec.min === 'number' ? spec.min : 0;
+    const maxAttr = spec && typeof spec.max === 'number' ? spec.max : 1000;
+    const guideHtml = renderGuide(
+      spec && spec.guideType,
+      current,
+      minAttr,
+      maxAttr,
+    );
+    return `
+      <div class="ai-tuner__row" data-tuner-row="${key}">
+        <label class="ai-tuner__label" for="ai-tuner-${key}">${label}</label>
+        <input class="ai-tuner__slider" type="range"
+               id="ai-tuner-${key}"
+               data-tuner="${key}"
+               min="${minAttr}" max="${maxAttr}" step="${stepAttr}"
+               value="${current}"
+               aria-label="${label}" title="${help}">
+        <span class="ai-tuner__value" data-tuner-value="${key}">${formatTunable(key, current)}</span>
+        <div class="ai-tuner__guide" data-tuner-guide="${key}">${guideHtml}</div>
+      </div>
+    `;
+  }
+
+  /** Update a single row's guide cell (called on every setValue +
+   *  reset, since the guide value tracks the live value). Defensive
+   *  against rows whose guide cells were removed (e.g. via DOM
+   *  detachment on a re-mount). */
+  function refreshGuideCell(key) {
+    if (!groupedFormEls || !groupedFormEls.guideCells) return;
+    const cell = groupedFormEls.guideCells[key];
+    if (!cell) return;
+    const spec = TUNER_SPECS[key];
+    if (!spec) return;
+    cell.innerHTML = renderGuide(spec.guideType, tunables[key], spec.min, spec.max);
+  }
+
   function readElements() {
     if (!rootEl || typeof rootEl.querySelector !== 'function') return null;
     const sliders = {};
     const valueCells = {};
+    const guideCells = {};
     rootEl.querySelectorAll('[data-tuner]').forEach((el) => {
       sliders[el.dataset.tuner] = el;
     });
     rootEl.querySelectorAll('[data-tuner-value]').forEach((el) => {
       valueCells[el.dataset.tunerValue] = el;
     });
+    rootEl.querySelectorAll('[data-tuner-guide]').forEach((el) => {
+      guideCells[el.dataset.tunerGuide] = el;
+    });
     const actionBtns = {};
     rootEl.querySelectorAll('[data-tuner-action]').forEach((el) => {
       actionBtns[el.dataset.tunerAction] = el;
     });
-    return { sliders, valueCells, actionBtns };
+    return { sliders, valueCells, guideCells, actionBtns };
   }
 
   function setValue(key, value) {
     const safe = clampToTunableRange(key, value);
     if (safe === undefined) return;
     tunables[key] = safe;
-    if (groupedFormEls && groupedFormEls.sliders[key]) {
-      groupedFormEls.sliders[key].value = String(safe);
-    }
-    if (groupedFormEls && groupedFormEls.valueCells[key]) {
-      groupedFormEls.valueCells[key].textContent = formatTunable(key, safe);
+    if (groupedFormEls) {
+      if (groupedFormEls.sliders[key]) {
+        groupedFormEls.sliders[key].value = String(safe);
+      }
+      if (groupedFormEls.valueCells[key]) {
+        groupedFormEls.valueCells[key].textContent = formatTunable(key, safe);
+      }
+      refreshGuideCell(key);
     }
     if (typeof onChange === 'function') {
       try { onChange(key, safe); } catch { /* swallow — UI must not crash on hook error */ }
+    }
+  }
+
+  /** Refresh all rows from the live `tunables` bag. Called after
+   *  reset (defaults-copied-into-bag) and on demand by callers
+   *  importing the snapshot via COPY JSON. */
+  function refreshAllRows() {
+    if (!groupedFormEls) return;
+    for (const key of Object.keys(groupedFormEls.sliders)) {
+      const v = tunables[key];
+      if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+      groupedFormEls.sliders[key].value = String(v);
+      if (groupedFormEls.valueCells[key]) {
+        groupedFormEls.valueCells[key].textContent = formatTunable(key, v);
+      }
+      refreshGuideCell(key);
     }
   }
 
@@ -405,18 +689,10 @@ export function createAiTunersPanel(deps = {}) {
           // Fallback: copy defaults into the live bag directly.
           Object.assign(tunables, defaults);
         }
-        // After a reset, refresh ALL sliders + value cells from the
-        // live bag (in case the resetFn restored to values that
-        // differ from the initial render).
-        if (groupedFormEls) {
-          for (const key of Object.keys(groupedFormEls.sliders)) {
-            const v = tunables[key];
-            if (typeof v === 'number' && Number.isFinite(v)) {
-              groupedFormEls.sliders[key].value = String(v);
-              groupedFormEls.valueCells[key].textContent = formatTunable(key, v);
-            }
-          }
-        }
+        // After a reset, refresh ALL sliders + value cells + guides
+        // from the live bag (in case the resetFn restored to values
+        // that differ from the initial render).
+        refreshAllRows();
         setStatus('Reset to defaults', false);
       });
     }
@@ -493,15 +769,6 @@ export function createAiTunersPanel(deps = {}) {
   return { mount, dispose, getValues, setValue, reset: () => {
     if (typeof resetFn === 'function') resetFn();
     else if (defaults) Object.assign(tunables, defaults);
-    // Sync the DOM to the post-reset values.
-    if (groupedFormEls) {
-      for (const key of Object.keys(groupedFormEls.sliders)) {
-        const v = tunables[key];
-        if (typeof v === 'number' && Number.isFinite(v)) {
-          groupedFormEls.sliders[key].value = String(v);
-          groupedFormEls.valueCells[key].textContent = formatTunable(key, v);
-        }
-      }
-    }
+    refreshAllRows();
   }, exportSnapshot };
 }

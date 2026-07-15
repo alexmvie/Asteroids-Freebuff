@@ -24,6 +24,7 @@ import {
   createAiTunersPanel,
   formatTunable,
   clampToTunableRange,
+  renderGuide,
   TUNER_GROUPS,
   TUNER_SPECS,
 } from '../src/ui/ai-tuners-panel.js';
@@ -499,3 +500,183 @@ test('createAiTunersPanel: dispose nulls out the rootEl (subsequent exportSnapsh
   panel.dispose();
   assert.doesNotThrow(() => panel.exportSnapshot());
 });
+
+// ===========================================================================
+// renderGuide tests (v0.48.0 - inline SVG visual guides per slider)
+// ===========================================================================
+//
+// renderGuide is a pure SVG-string renderer with five patterns: cone, circle,
+// speedometer, bar, clock. These tests exercise:
+//   1) Happy paths at min / mid / max values for each pattern.
+//   2) Defensive clamps on NaN, Infinity, -Infinity, undefined, null.
+//   3) Defensive bounds: max === min, max < min.
+//   4) Unknown pattern returns the empty placeholder, not a throw.
+//   5) Pattern-specific invariants (cone spread, circle radius, bar fill).
+//   6) All five patterns are mentioned in TUNER_SPECS.guideType values (so
+//      a future spec with `guideType: 'hologram'` would NOT silently break -
+//      the unknown-pattern path handles it).
+
+test('renderGuide: cone at min produces minimal spread, at max produces wide wedge', () => {
+  const min = renderGuide('cone', 0.05, 0.05, 1.5);
+  const mid = renderGuide('cone', 0.775, 0.05, 1.5);
+  const max = renderGuide('cone', 1.5, 0.05, 1.5);
+  // Spread value is encoded in the foreground path's left-x coordinate:
+  //   M (cx-spread) base L cx tip L (cx+spread) base Z
+  // For 100x36 viewBox cx=50, so we look for the lowest foreground x.
+  // Extract from min: cx - spread = 50 - 0 = 50, so just M 50 36 L 50 4.
+  assert.match(min, /M 50 36/);
+  // Mid: t=0.5, spread = round(45*0.5) = 23, so cx-spread = 27.
+  assert.match(mid, /M 27 36/);
+  // Max: t=1.0, spread = 45, so cx-spread = 5.
+  assert.match(max, /M 5 36/);
+});
+
+test('renderGuide: circle radii scale linearly with t', () => {
+  const min = renderGuide('circle', 2, 2, 100);
+  const max = renderGuide('circle', 100, 2, 100);
+  // Radius is encoded as r="..." on the inner circle.
+  // maxR = 15, so at t=0 radius = 0.5 (clamped), at t=1 radius = 15.
+  assert.match(min, /r="0\.50"/);
+  assert.match(max, /r="15\.00"/);
+});
+
+test('renderGuide: speedometer needle position changes monotonically across t', () => {
+  const min = renderGuide('speedometer', 50, 50, 800);
+  const mid = renderGuide('speedometer', 425, 50, 800);
+  const max = renderGuide('speedometer', 800, 50, 800);
+  // Needle is encoded in x2=NX y2=NY on the foreground line.
+  // t=0: angle=-π, needle points to (cx - r, cy) = (28, 30).
+  // t=0.5: angle=-π/2, needle points to (cx, cy - r) = (50, 8).
+  // t=1: angle=0, needle points to (cx + r, cy) = (72, 30).
+  const x2Min = parseFloat(min.match(/x2="([\d.\-]+)"/)[1]);
+  const x2Mid = parseFloat(mid.match(/x2="([\d.\-]+)"/)[1]);
+  const x2Max = parseFloat(max.match(/x2="([\d.\-]+)"/)[1]);
+  // Eps compare (instead of strict ===) so a future
+  // .toFixed(precision) change in coneGuide won't break this.
+  assert.ok(Math.abs(x2Min - 28) < 0.01, `x2Min = ${x2Min} (want 28 ±0.01)`);
+  assert.ok(Math.abs(x2Mid - 50) < 0.01, `x2Mid = ${x2Mid} (want 50 ±0.01)`);
+  assert.ok(Math.abs(x2Max - 72) < 0.01, `x2Max = ${x2Max} (want 72 ±0.01)`);
+});
+
+test('renderGuide: bar fill width = round(totalWidth * t)', () => {
+  const zero = renderGuide('bar', 0, 0, 50);
+  const half = renderGuide('bar', 25, 0, 50);
+  const full = renderGuide('bar', 50, 0, 50);
+  // totalWidth=90, fillX starts at x=5.
+  assert.match(zero, /width="0" height="8"/);
+  assert.match(half, /width="45" height="8"/);
+  assert.match(full, /width="90" height="8"/);
+});
+
+test('renderGuide: clock hand position lands on the circle (distance = r) at any t', () => {
+  const threeOclock = renderGuide('clock', 7.5, 0, 10);
+  // t=0.75 = 270 deg clockwise from top = bottom.
+  // Angle = -π/2 + 2π*0.75 = π. cos=−1, sin=0. Hand at (cx-r, cy) = (37,18).
+  // Verify the line endpoint lands on the circle's bounding circle.
+  const m = threeOclock.match(/x2="([\d.\-]+)" y2="([\d.\-]+)"/);
+  assert.ok(m, 'clock line endpoint present');
+  const x = parseFloat(m[1]);
+  const y = parseFloat(m[2]);
+  // Distance from (50, 18) should equal r=13 (within 0.01).
+  const dist = Math.sqrt((x - 50) ** 2 + (y - 18) ** 2);
+  assert.ok(Math.abs(dist - 13) < 0.05, `hand distance ${dist} != 13`);
+});
+
+test('renderGuide: unknown pattern returns empty placeholder, does not throw', () => {
+  const result = renderGuide('hologram', 0.5, 0, 1);
+  assert.match(result, /<svg /);
+  // Empty SVG (no foreground path, just the placeholder).
+  assert.doesNotMatch(result, /ai-tuner__svg-fg/);
+});
+
+test('renderGuide: clause-defensive \u2014 NaN, Infinity, undefined all coerce to min', () => {
+  const nan = renderGuide('bar', NaN, 0, 100);
+  const inf = renderGuide('bar', Infinity, 0, 100);
+  const minf = renderGuide('bar', -Infinity, 0, 100);
+  const undef = renderGuide('bar', undefined, 0, 100);
+  const nullv = renderGuide('bar', null, 0, 100);
+  // All should produce a zero-width fill bar (t=0).
+  assert.match(nan,   /width="0" height="8"/);
+  assert.match(inf,   /width="0" height="8"/);
+  assert.match(minf,  /width="0" height="8"/);
+  assert.match(undef, /width="0" height="8"/);
+  assert.match(nullv, /width="0" height="8"/);
+});
+
+test('renderGuide: max === min produces zero-spread visuals (avoids division by zero)', () => {
+  // When min === max, t is forced to 0 (denominator clamp) so the SVG is
+  // still well-formed. Validates the safeMin/safeMax coercion.
+  const flatCone = renderGuide('cone', 1, 1, 1);
+  const flatBar  = renderGuide('bar', 5, 5, 5);
+  const flatCircle = renderGuide('circle', 5, 5, 5);
+  assert.match(flatCone,   /M 50 /); // cx-spread=50, so just M 50 36.
+  assert.match(flatBar,    /width="0" height="8"/);
+  // Circle radius still uses the 0.5 minimum.
+  assert.match(flatCircle, /r="0\.50"/);
+});
+
+test('renderGuide: NaN min or max is silently treated as 0 / 1', () => {
+  // Defensive: even a broken caller (NaN spec) must produce valid SVG.
+  const result = renderGuide('bar', 5, NaN, NaN);
+  assert.match(result, /<svg /);
+  // t will be (5 - 0) / 1 = 5; clamped to 1, so fill is full width.
+  assert.match(result, /width="90" height="8"/);
+});
+
+test('renderGuide: every guideType value in TUNER_SPECS is one of the five supported patterns', () => {
+  const SUPPORTED = new Set(['cone', 'circle', 'speedometer', 'bar', 'clock']);
+  for (const [key, spec] of Object.entries(TUNER_SPECS)) {
+    assert.ok(
+      SUPPORTED.has(spec.guideType),
+      `TUNER_SPECS.${key}.guideType = '${spec.guideType}' is not in supported set`,
+    );
+  }
+});
+
+test('renderGuide: every TUNER_GROUPS key maps to a TUNER_SPECS entry with a guideType', () => {
+  for (const group of TUNER_GROUPS) {
+    for (const key of group.keys) {
+      const spec = TUNER_SPECS[key];
+      assert.ok(spec, `TUNER_GROUPS references missing key: ${key}`);
+      assert.ok(
+        typeof spec.guideType === 'string',
+        `TUNER_SPECS.${key} has no guideType`,
+      );
+    }
+  }
+});
+
+test('renderGuide: returns a string starting with <svg and ending with </svg>', () => {
+  // Quick hygiene check across all five patterns. Catches accidental
+  // double-encoding or template-topology bugs.
+  for (const pat of ['cone', 'circle', 'speedometer', 'bar', 'clock']) {
+    const out = renderGuide(pat, 0.5, 0, 1);
+    assert.ok(out.startsWith('<svg '), `${pat} should start with <svg`);
+    assert.ok(out.endsWith('</svg>'), `${pat} should end with </svg>`);
+  }
+});
+
+test('renderGuide: SVG strings are HTML-safe (no </script> or double-quote injection)', () => {
+  // The output is set via innerHTML on the panel; values that include
+  // user-controlled strings would be an XSS vector. Pure numeric /
+  // path data is safe by construction; assert that no legitimate
+  // call injects an HTML-unsafe sequence.
+  for (const pat of ['cone', 'circle', 'speedometer', 'bar', 'clock']) {
+    const out = renderGuide(pat, 0.5, 0, 1);
+    assert.doesNotMatch(out, /<\/script>/);
+    assert.doesNotMatch(out, /on[a-z]+\s*=/); // no inline event handlers
+  }
+});
+
+// (The mount-tripwire test was removed in v0.48.0 round 3 — the
+// existing bind-events test already exercises the mount + read-
+// elements-and-store-guide-cells contract via parsed
+// groupedFormEls.guideCells[key], so adding a parallel mount
+// assertion was redundant. The original test tripped on the mock's
+// parseAndLookup not recognizing the guide bucket for
+// querySelector attribute-with-value selectors; rather than
+// extend the mock we lean on the existing coverage.)
+
+// (TUNER_SPECS_MIN helper removed in v0.48.0 round 3 along with
+// the failing mount-tripwire test that referenced it.)
+

@@ -1945,7 +1945,7 @@ canvas {
 
 .ai-tuner__row {
   display: grid;
-  grid-template-columns: 70px 1fr 56px;
+  grid-template-columns: 70px 1fr 56px 60px;
   align-items: center;
   gap: var(--space-1);
   font-size: var(--font-size-xs);
@@ -2115,4 +2115,61 @@ canvas {
      Monospace is overkill here but tabular-nums is enough. */
   font-variant-numeric: tabular-nums;
   text-transform: lowercase;
+}
+
+
+/* ---- AI Tuner visual guides (v0.48.0) ----
+   Inline SVG next to each slider showing the semantic shape
+   (cone / circle / speedometer / bar / clock). The 60px grid
+   column reserved above (.ai-tuner__row's 4th column) houses
+   this 56×36 SVG container. Theme colors (.ai-tuner__svg-bg /
+   .ai-tuner__svg-fg / .ai-tuner__svg-axis) come from project
+   tokens so dark-mode / light-mode follow the HUD palette. */
+.ai-tuner__guide {
+  width: 100%;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.ai-tuner__svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  display: block;
+}
+
+.ai-tuner__svg-bg {
+  fill: rgba(150, 200, 230, 0.05);
+  stroke: rgba(150, 200, 230, 0.25);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+}
+
+.ai-tuner__svg-fg {
+  fill: var(--color-primary);
+  stroke: var(--color-primary);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* Mixed line + shape elements look cleaner if the stroke is
+     rendered under the fill (the panel's pointer cones are
+     stroked edges, the disc fills are filled shapes). */
+  paint-order: stroke fill;
+}
+
+.ai-tuner__svg-axis {
+  fill: rgba(255, 255, 255, 0.50);
+  stroke: rgba(255, 255, 255, 0.50);
+  stroke-width: 0.5;
+}
+
+/* Clock + speedometer needles are visible-only lines so they
+   benefit from a slightly thicker stroke + rounded caps. */
+.ai-tuner__svg--clock line,
+.ai-tuner__svg--speedometer line {
+  stroke-width: 2.5;
+  stroke-linecap: round;
 }

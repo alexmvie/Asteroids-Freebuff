@@ -355,6 +355,24 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
 
   **Test count:** 543 total pass (+50 vs v0.46.1). Vite build succeeds.
 
+- [x] **v0.48.0 — Live AI Tuners + Visual Guides + Master Flag** — `src/ui/ai-tuners-panel.js`, `src/main.js`, `src/styles.css`, `src/version-constants.js`, `tests/ai-tuners-panel.test.js`. User complaints: "i tried all sliders but see no feedback. can you add some visual guides also to see what i am controlling? be sure AL that stuff is optional and can be enabled and disabled by just one flag (the flag includes then all the component structure for ai-tuning)".
+
+  **Visual guides (v0.48.0):** each of the 21 sliders now renders a 56×36 inline SVG cell that morphs live on drag. Five pattern types, picked per `TUNER_SPECS.guideType`: `cone` (angular rad, half-angle wedge), `circle` (radius, disc inside dashed max-ring), `speedometer` (u/s, half-arc + needle), `bar` (generic scalar, horizontal fill), `clock` (seconds, clock face + rotating hand). Pure function `renderGuide(pattern, value, min, max)` — DOM-free, exported for unit tests. `buildRow(key)` extracted from `buildDom`'s row map; `refreshGuideCell(key)` + `refreshAllRows()` keep the SVGs in sync after `setValue` and reset.
+
+  **Master flag (v0.48.0):** `const AI_TUNING_ENABLED = true` at top of `src/main.js` (with `isAiTuningEnabled()` reading `localStorage('aiTuningEnabled')` before defaulting). When `false`: (a) `createAiDebugOverlay` + `createAiTunersPanel` are never instantiated, (b) the `#ai-debug-overlay` + `#ai-tuners` HTML roots are `.remove()`-d at boot, (c) the per-frame `aiDebugOverlay.update()` is null-safe (early-exits if `aiDebugOverlay` is null), (d) `window.AI_TUNING_ENABLED = X` setter persists via localStorage + warns at runtime if the panel/overlay are already mounted (reload required to take effect — documented convention).
+
+  **CSS:** `.ai-tuner__row` grid widened `70px 1fr 56px` → `70px 1fr 64px 60px` (value cell +8px so longer format strings like `1.20 u·s/u` aren't ellipsised). New guide CSS: `.ai-tuner__guide`, `.ai-tuner__svg*`, clock/speedometer needle stroke tuning. `paint-order` reviewed and intentionally kept (bg/fg have different colors; cosmetic only).
+
+  **Test count:** 556 total pass (+13 net vs v0.47.0’s 543 — 13 new
+  `renderGuide` tests covering cone / circle / speedometer / bar /
+  clock patterns with happy paths + defensive clamps + TUNER_GROUPS
+  → TUNER_SPECS consistency tripwire + XSS hygiene check; a
+  parallel mount-tripwire test was reverted because the test-mock’s
+  `parseAndLookup` didn’t recognize the guide bucket for attribute-
+  with-value selectors, and the existing bind-events test already
+  covers the mount + `groupedFormEls.guideCells[key]` contract).
+  Vite build OK; no new warnings.
+
 - [x] **v0.45.1 — AI Powerup Orbit Trap Fix** — `src/entities/ai.js`, `tests/ai.test.js`. Fixed the orbital trap where a nearby powerup could not be collected because the ship kept thrusting while circling it. `collectBehavior` now suspends thrust when total speed is much higher than the desired closing speed (`speed < desiredClosing * 1.5`), letting `LINEAR_DRAG` decay tangential velocity so the ship spirals into the pickup radius instead of orbiting forever. Added regression test. 487 tests pass, build succeeds.
   - `src/systems/capture-markers.js`: High-contrast wireframe markers (green ship ring, red asteroid spheres, yellow powerup ring) for reliable video analysis.
   - `src/entities/ai-tunables.js`: Small SSOT module for AI constants the tuning loop can adjust without touching `ai.js`.

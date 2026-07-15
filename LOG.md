@@ -1,3 +1,40 @@
+## v0.48.0 -- Visual Guides per Slider + Master Flag
+
+**User request:** "i tried all sliders but see no feedback. can you add some visual guides also to see what i am controlling? be sure AL that stuff is optional and can be enabled and disabled by just one flag".
+
+### What changed
+
+1. **Inline SVG guides per slider** -- each of the 21 tunables now has a 56x36 SVG cell next to the slider that morphs live on drag. Five pattern categories, picked per spec via :
+   -  -- angular gate (radians, half-angle wedge)
+   -  -- radius (growing disc inside dashed max-ring)
+   -  -- speed (half-arc dial with needle)
+   -  -- generic scalar slider (horizontal fill)
+   -  -- seconds (clock face with rotating hand)
+
+2. **One master flag** --  at the top of . When :
+   - Panel + debug overlay never instantiated
+   -  +  HTML roots -d from the DOM at boot
+   - Per-frame  is null-safe (early-exits if overlay is null)
+   - Override path:  value checked at boot,  setter persists + warns if already mounted.
+
+### Files touched
+
+-  --  pure helper exporting 5 pattern renderers;  extracted from ;  +  called from  and reset paths.
+-  --  default +  helper reading localStorage; gates the / creation blocks; HTML container  fallback when disabled;  runtime toggle with persistence + warn.
+-  --  grid widened from 3 columns () to 4 (); appended v0.48.0 guide CSS rules for , , and clock/speedometer needle styling.
+-  -- imported ; appended 12 tests covering cone/circle/speedometer/bar/clock patterns (happy + invariants), defensive clamps (NaN/Infinity/undefined/null), TUNER_GROUPS « TUNER_SPECS consistency tripwire, and an XSS-hygiene sanity check.
+
+### Decisions
+
+- **Inline SVGs over 3D world overlays.** The user said "see what i am controlling" — the control-panel feedback beat is what mattered. 3D world overlays (cone around ship, circles for evadeDist, etc.) become a followup if requested.
+- **Five pattern types** cover all 21 tunables. The  enum is the per-spec picker; unknown patterns fall through to an empty placeholder SVG (no throw).
+- **CSS  on ** reviewed and intentionally kept: bg/fg have genuinely different colors (cyan primary vs muted gray), so the property is harmless + useful for line-edge cleanliness on stroked paths.
+
+### Stats
+
+- 13 new tests; final tally: **556 / 556 pass** (+13 vs v0.47.0's 543).
+- Vite build OK (no new warnings).
+
 # AI Performance Protocol — LOG.md
 
 > **Purpose:** Single source of truth for demo AI performance history,

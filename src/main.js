@@ -914,48 +914,122 @@ const debugHud = createDebugHud();
   if (root) debugHud.mount(root);
 }
 
-// v0.23.x AI Debug Overlay (bottom-right; radar + panels).
-// Always visible. Reads game state via per-frame getter closures.
-const aiDebugOverlay = createAiDebugOverlay({
-  getSubject: () => stateMachine.getState() === State.DEMO
-    ? (demoAi && demoAi.getShip()) || ship
-    : ship,
-  getAiShip: () => demoAi && demoAi.getShip(),
-  getLastDecision: () => demoAi && demoAi.getLastDecision
-    ? demoAi.getLastDecision()
-    : null,
-  getActiveWeapon: () => (powerupSystem.isLaserActive() ? 'laser' : 'bullet'),
-  getAsteroids: () => field.getEntities(),
-  getPowerupPos: () => {
-    const p = powerupSystem.getPendingSpawn();
-    return p ? p.getPosition() : null;
-  },
-  getScore: () => score,
-  getEnergy: () => ({
-    value: ship.getEnergy ? ship.getEnergy() : 0,
-    max: ship.getMaxEnergy ? ship.getMaxEnergy() : 100,
-  }),
-  getState: () => stateMachine.getState(),
-});
-{
-  const root = document.querySelector('[data-ai-debug-root]');
-  if (root) aiDebugOverlay.mount(root);
+// ---- AI tuning master flag (v0.48.0) -----------------------------------
+// One switch that gates the ENTIRE AI-tuning component structure
+// (panel + debug overlay + the HTML containers in index.html).
+// Mirrors the project's "extract when 2+ consumers need it"
+// guideline — the panel, the overlay, and a dev-only console banner
+// all need to know whether AI tuning is enabled.
+const AI_TUNING_ENABLED_DEFAULT = true;
+function isAiTuningEnabled() {
+  // Override order: 1) window.AI_TUNING_ENABLED at runtime (set via
+  // devtools BEFORE this module loads — sets a localStorage note),
+  // 2) localStorage 'aiTuningEnabled' (persisted across sessions),
+  // 3) the build-time default above.
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const stored = localStorage.getItem('aiTuningEnabled');
+      if (stored != null) return stored === '1' || stored === 'true';
+    }
+  } catch { /* SSR / privacy mode */ }
+  return AI_TUNING_ENABLED_DEFAULT;
+}
+const AI_TUNING_ENABLED = isAiTuningEnabled();
+
+// Component vars are null when AI tuning is disabled so the
+// per-frame `if (aiDebugOverlay) update()` no-ops cleanly.
+let aiDebugOverlay = null;
+let aiTunersPanel = null;
+
+if (AI_TUNING_ENABLED) {
+  // v0.23.x AI Debug Overlay (bottom-right; radar + panels).
+  // Always visible. Reads game state via per-frame getter closures.
+  aiDebugOverlay = createAiDebugOverlay({
+    getSubject: () => stateMachine.getState() === State.DEMO
+      ? (demoAi && demoAi.getShip()) || ship
+      : ship,
+    getAiShip: () => demoAi && demoAi.getShip(),
+    getLastDecision: () => demoAi && demoAi.getLastDecision
+      ? demoAi.getLastDecision()
+      : null,
+    getActiveWeapon: () => (powerupSystem.isLaserActive() ? 'laser' : 'bullet'),
+    getAsteroids: () => field.getEntities(),
+    getPowerupPos: () => {
+      const p = powerupSystem.getPendingSpawn();
+      return p ? p.getPosition() : null;
+    },
+    getScore: () => score,
+    getEnergy: () => ({
+      value: ship.getEnergy ? ship.getEnergy() : 0,
+      max: ship.getMaxEnergy ? ship.getMaxEnergy() : 100,
+    }),
+    getState: () => stateMachine.getState(),
+  });
+  {
+    const root = document.querySelector('[data-ai-debug-root]');
+    if (root) aiDebugOverlay.mount(root);
+  }
+
+  // v0.46.x AI Live Tuners Panel (right of the AI debug overlay, OR
+  // stacked below on narrow viewports). v0.48.0 adds inline SVG
+  // visual guides per slider (cone / circle / speedometer / bar /
+  // clock) so the user can see what each tunable controls. Each
+  // row has a `data-tuner-guide="KEY"` cell containing an SVG that
+  // morphs as the slider drags. RESET restores frozen defaults
+  // (see AI_TUNABLE_DEFAULTS). COPY JSON writes the current
+  // snapshot to clipboard + console.
+  aiTunersPanel = createAiTunersPanel({
+    tunables: AI_TUNABLES,
+    resetFn: () => resetAITunables(),
+    exportFn: () => exportAITunables(),
+  });
+  {
+    const root = document.querySelector('[data-ai-tuners-root]');
+    if (root) aiTunersPanel.mount(root);
+  }
+} else {
+  // AI tuning disabled — completely scrub the AI-debug-overlay +
+  // AI-tuners HTML roots from the DOM so nobody sees an empty
+  // container. Done BEFORE the render loop starts so position
+  // measurements in CSS don't see zero-height elements.
+  const removeIfMounted = (selector) => {
+    if (typeof document === 'undefined') return;
+    const el = document.querySelector(selector);
+    if (el && typeof el.remove === 'function') el.remove();
+  };
+  removeIfMounted('[data-ai-tuners-root]');
+  removeIfMounted('[data-ai-debug-root]');
+  if (typeof console !== 'undefined') {
+    console.log('[main] AI tuning disabled (AI_TUNING_ENABLED=false) — panel + overlay + guides omitted.');
+  }
 }
 
-// v0.46.x AI Live Tuners Panel (right of the AI debug overlay, OR
-// stacked below on narrow viewports). Writes directly to the
-// mutable AI_TUNABLES bag; src/entities/ai.js reads those keys each
-// tick so a slider drag is visible on the next brain frame. RESET
-// restores frozen defaults (see AI_TUNABLE_DEFAULTS). COPY JSON
-// writes the current snapshot to clipboard + console.
-const aiTunersPanel = createAiTunersPanel({
-  tunables: AI_TUNABLES,
-  resetFn: () => resetAITunables(),
-  exportFn: () => exportAITunables(),
-});
-{
-  const root = document.querySelector('[data-ai-tuners-root]');
-  if (root) aiTunersPanel.mount(root);
+// Runtime toggle hook — `window.AI_TUNING_ENABLED = false` then
+// reload to disable; `window.AI_TUNING_ENABLED = true` then reload
+// to re-enable. Once the panel/overlay are mounted, runtime
+// changes are no-ops (with a console warning) because tearing
+// down + re-creating the factories mid-frame would require
+// re-importing all the UI modules, which is not idiomatic for
+// ESM. Documented convention is "set the flag, reload the page".
+if (typeof window !== 'undefined') {
+  Object.defineProperty(window, 'AI_TUNING_ENABLED', {
+    configurable: true,
+    enumerable: true,
+    get() { return AI_TUNING_ENABLED; },
+    set(v) {
+      const next = !!v;
+      try { localStorage.setItem('aiTuningEnabled', next ? '1' : '0'); }
+      catch { /* ignore */ }
+      if (aiDebugOverlay || aiTunersPanel) {
+        if (typeof console !== 'undefined') {
+          console.warn(
+            `[main] window.AI_TUNING_ENABLED is now ${next}; saved to localStorage. ` +
+            'Reload the page for the change to take effect (mid-frame teardown is not supported).',
+          );
+        }
+      }
+    },
+  });
 }
 
 // ---- Render loop ---------------------------------------------------------
@@ -1205,8 +1279,12 @@ function tick(dt) {
       : undefined,
   });
 
-  // v0.23.x AI Debug Overlay per-frame tick.
-  aiDebugOverlay.update();
+  // v0.23.x AI Debug Overlay per-frame tick. Null-safe because
+  // AI_TUNING_ENABLED may have skipped both object creations at
+  // boot (see the master-flag block above). When disabled, the
+  // per-frame guard costs one boolean check and is faster than
+  // any DOM mutation.
+  if (aiDebugOverlay) aiDebugOverlay.update();
 }
 
 function loop() {
