@@ -848,6 +848,102 @@ test('collectBehavior: velocity-error controller cancels tangential orbit veloci
   assert.equal(result.thrust, false, 'must not thrust while misaligned with velocity error');
 });
 
+test('collectBehavior: thrusts toward fast-moving powerup when already aligned', () => {
+  // Powerup is far away and moving fast along +X. The ship already faces
+  // +X, so both the current powerup position and the predicted intercept
+  // lie straight ahead. The controller should keep yaw=0 and thrust.
+  const ctx = {
+    target: { mode: 'powerup', pos: { x: 100, z: 0 } },
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 0 },
+    powerupVel: { x: 80, z: 0 },
+    powerupThrustGate: 0.10,
+    yawDeadband: 0.10,
+    aiAngularVel: 0,
+  };
+  const result = collectBehavior(ctx);
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.yaw, 0, 'must stay aligned with predicted intercept');
+  assert.equal(result.thrust, true, 'must thrust when aligned with intercept vector');
+});
+
+test('collectBehavior: predicts ahead for perpendicular fast-moving powerup', () => {
+  // Ship faces +X. Powerup is at +X but moving perpendicular (+Z).
+  // Without prediction the target would be straight ahead (yaw=0);
+  // with prediction the intercept point is offset, so the ship must
+  // turn toward the predicted point.
+  const ctx = {
+    target: { mode: 'powerup', pos: { x: 100, z: 0 } },
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 0 },
+    powerupVel: { x: 0, z: 80 },
+    powerupThrustGate: 0.10,
+    yawDeadband: 0.10,
+    aiAngularVel: 0,
+  };
+  const result = collectBehavior(ctx);
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.yaw, -1, 'must turn toward predicted intercept offset by powerup velocity');
+  assert.equal(result.thrust, false, 'must not thrust while turning onto predicted intercept');
+});
+
+test('collectBehavior: turns around to chase a powerup behind the ship', () => {
+  // Ship faces +X, powerup is directly behind it at (-50, 0).
+  const ctx = {
+    target: { mode: 'powerup', pos: { x: -50, z: 0 } },
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 0 },
+    powerupVel: { x: 0, z: 0 },
+    powerupThrustGate: 0.10,
+    yawDeadband: 0.10,
+    aiAngularVel: 0,
+  };
+  const result = collectBehavior(ctx);
+  assert.equal(result.mode, 'powerup');
+  assert.notEqual(result.yaw, 0, 'must turn toward powerup behind the ship');
+  assert.equal(result.thrust, false, 'must not thrust while turning around');
+});
+
+test('collectBehavior: final-approach guard maintains closing speed near powerup', () => {
+  // Ship is very close and aligned, but coasting slowly toward the powerup.
+  // The final-approach guard should fire to maintain minimum closing speed.
+  const ctx = {
+    target: { mode: 'powerup', pos: { x: 3, z: 0 } },
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 1, z: 0 },
+    powerupVel: { x: 0, z: 0 },
+    powerupThrustGate: 0.10,
+    yawDeadband: 0.10,
+    aiAngularVel: 0,
+  };
+  const result = collectBehavior(ctx);
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.yaw, 0, 'should stay aligned near powerup');
+  assert.equal(result.thrust, true, 'final-approach guard must maintain closing speed');
+});
+
+test('collectBehavior: final-approach guard does not fire when already closing fast enough', () => {
+  // Ship is close and aligned, but already closing faster than the
+  // final-approach minimum. The guard should not add extra thrust.
+  const ctx = {
+    target: { mode: 'powerup', pos: { x: 3, z: 0 } },
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 5, z: 0 },
+    powerupVel: { x: 0, z: 0 },
+    powerupThrustGate: 0.10,
+    yawDeadband: 0.10,
+    aiAngularVel: 0,
+  };
+  const result = collectBehavior(ctx);
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.thrust, false, 'should not over-thrust when already closing fast enough');
+});
+
 // --------------------------------------------------------------------------
 // facingAngle
 // --------------------------------------------------------------------------

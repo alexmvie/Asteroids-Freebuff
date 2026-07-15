@@ -572,10 +572,16 @@ return {
     const vErrZ = vDesZ - aiVel.z;
     const vErrMag = Math.hypot(vErrX, vErrZ);
 
-    const steerTarget = {
-      x: aiPos.x + vErrX,
-      z: aiPos.z + vErrZ,
-    };
+    // When very close to the powerup, the desired speed drops to near zero.
+    // If the ship is still moving slightly too fast, the velocity-error
+    // vector points backward and would command a 180° turn right before
+    // pickup. In this final-approach zone we steer directly toward the
+    // powerup's current position instead, and let the final-approach
+    // thrust guard handle closing speed.
+    const inFinalApproach = dist0 < AI_TUNABLES.powerupFinalApproachDist;
+    const steerTarget = inFinalApproach
+      ? targetPos
+      : { x: aiPos.x + vErrX, z: aiPos.z + vErrZ };
 
     const steeringCtx = {
       ...ctx,
@@ -588,16 +594,19 @@ return {
     // 5. Thrust only when aligned with the velocity-error direction and
     // there is still a meaningful velocity error to correct.
     const aligned = Math.abs(steer.predictedDiff) < steeringCtx.thrustHeadingGate;
-    let thrust = aligned && vErrMag > AI_TUNABLES.powerupVelocityErrorThreshold;
 
-    // Final-approach guard: when very close to the raw powerup position,
-    // maintain a minimum closing speed so the ship doesn't coast to a halt
-    // just outside the collection radius.
-    if (!thrust && aligned && dist0 < AI_TUNABLES.powerupFinalApproachDist) {
+    // In the final-approach zone, thrust is purely based on closing speed.
+    // This prevents the velocity-error magnitude (which is always positive)
+    // from commanding forward thrust when the ship is already too fast,
+    // and it keeps the ship from stalling just outside the collection radius.
+    let thrust;
+    if (inFinalApproach) {
       const dir0X = dist0 > 0.001 ? dx0 / dist0 : 0;
       const dir0Z = dist0 > 0.001 ? dz0 / dist0 : 0;
       const closingSpeed = (aiVel.x * dir0X + aiVel.z * dir0Z);
-      thrust = closingSpeed < AI_TUNABLES.powerupFinalApproachSpeed;
+      thrust = aligned && closingSpeed < AI_TUNABLES.powerupFinalApproachSpeed;
+    } else {
+      thrust = aligned && vErrMag > AI_TUNABLES.powerupVelocityErrorThreshold;
     }
 
     return { yaw: steer.yaw, thrust, mode: 'powerup', fire: false, braking: false };

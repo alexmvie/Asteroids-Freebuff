@@ -7,9 +7,9 @@
 
 ---
 
-## Current State: v0.46.0 — Physics-Based Powerup Intercept Controller
+## Current State: v0.46.1 — Powerup Intercept Controller + Edge-Case Tests
 
-**Status:** ✅ 488 tests pass, build succeeds.
+**Status:** ✅ 493 tests pass, build succeeds.
 
 ### v0.46.0 Changes
 
