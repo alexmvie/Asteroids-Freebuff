@@ -1149,7 +1149,9 @@ function escapeHtml(s) {
     // invalid-character sequence rather than an XSS bug.
     v.innerHTML =
       `<span class="game-version__branch">${escapeHtml(__BRANCH__)}</span>` +
+      `<span class="game-version__sep" aria-hidden="true">·</span>` +
       `<span class="game-version__ver">${escapeHtml(VERSION)}</span>` +
+      `<span class="game-version__sep" aria-hidden="true">·</span>` +
       `<span class="game-version__commit">${escapeHtml(__COMMIT__)}</span>`;
   }
 }

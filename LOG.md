@@ -30,6 +30,35 @@
 ### Modules untouched (constraint: "do not mix the code")
 
 - `createDebugHud` + `createAiDebugOverlay` + `createEditObjectScreen` + `createAsteroidUvDebugOverlay` + `createUvUnwrapViewer` + `createAiTunersPanel`: none modified. The `data-debug-hud-root` + `data-ai-debug-root` + `data-ai-tuners-root` attributes stay on the same elements so `mount()` calls work unchanged.
+## v0.52.0 -- Top-Center Version & Git Card (Horizontal Line)
+
+**User request:** "redesign the version & git card. show it on the top in the center of the screen with all infos in a line to safe space"
+
+### What changed
+
+1. **CSS layout change** (`src/styles.css`). Rewrote the `.game-version` block. Position: `top: var(--space-3); left: 50%; transform: translateX(-50%);` (was `bottom: var(--space-3); right: var(--space-3);`). Layout: `display: flex; flex-direction: row; align-items: center; gap: var(--space-2);` (was `flex-direction: column; align-items: flex-end; gap: var(--space-quarter);`). Added `white-space: nowrap` so the chip stays on a single line even if the branch name is long. Each individual span (`.game-version__branch`, `.game-version__ver`, `.game-version__commit`) changed from `display: block` to `display: inline-block` so they flow horizontally.
+
+2. **Separator rule** (`src/styles.css`). New `.game-version__sep` rule for the middle-dot separator: `display: inline-block; color: var(--color-fg-dim); opacity: 0.4; font-size: var(--font-size-md); font-weight: var(--font-weight-normal); user-select: none; line-height: 1;`. The `line-height: 1` keeps the `·` on the visual midline of the row (default baseline renders it slightly low next to the larger ver span).
+
+3. **innerHTML template** (`src/main.js`). Added two `<span class="game-version__sep" aria-hidden="true">·</span>` elements -- one between branch and ver, one between ver and commit. The branch + ver + commit spans are unchanged. Same `escapeHtml()` defense-in-depth on all three dynamic values (BRANCH, VERSION, COMMIT); the new separator spans contain only the static `·` character.
+
+### Visual impact
+
+- Chip now sits at the very top of the viewport, horizontally centered.
+- All 3 spans render in a single horizontal row with `·` separators between them.
+- Chip width adapts to content; stays on one line (white-space: nowrap).
+- Each span retains its original visual treatment: branch = dim uppercase small, ver = bright cyan bold, commit = dim tabular-nums.
+
+### UX nit
+
+- The chip overlaps the HUD top bar (~32px vertical overlap at top:12-44px). The HUD has score on the far left + energy on the far right + a `flex: 1` powerup element in the center. The chip sits in the center and would overlap the powerup HUD when active. Same class of overlap as the v0.50.0 debug column (overlaps score HUD) and v0.51.0 AI tuners column (overlaps energy HUD). Consistent pattern; chip has `pointer-events: none` + semi-transparent background so the HUD text below it stays readable.
+
+### Validation
+
+- `npm test`: 516/516 green (unchanged from v0.51.0; +0 net -- pure CSS + template change).
+- `npm run build`: clean.
+- Code reviewer: ship-able.
+
 
 ## v0.51.0 -- Collapsible Right-Side AI Tuners Column + Shared Column-Toggle Helper
 

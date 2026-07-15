@@ -2328,26 +2328,30 @@ canvas {
 
 .game-version {
   position: fixed;
-  bottom: var(--space-3);
-  right: var(--space-3);
+  top: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
   z-index: var(--z-hud);
   font-family: var(--font-family);
-  text-align: right;
+  text-align: center;
   user-select: none;
   pointer-events: none;
   line-height: var(--line-height-tight);
   color: var(--color-fg);
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: var(--space-quarter);
-  padding: var(--space-1) var(--space-2);
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
   background: var(--color-bg-debug);
   border: var(--border-width) solid var(--color-primary-soft);
   border-radius: var(--radius-md);
+  /* Keep the chip on a single line even if the branch name is long;
+     the chip itself can be wider than its container if needed. */
+  white-space: nowrap;
 }
 .game-version__branch {
-  display: block;
+  display: inline-block;
   font-size: var(--font-size-xs);
   letter-spacing: var(--letter-spacing-wide);
   color: var(--color-fg-dim);
@@ -2355,14 +2359,14 @@ canvas {
   text-transform: uppercase;
 }
 .game-version__ver {
-  display: block;
+  display: inline-block;
   font-size: var(--font-size-md);
   font-weight: var(--font-weight-bold);
   letter-spacing: var(--letter-spacing-wider);
   color: var(--color-primary);
 }
 .game-version__commit {
-  display: block;
+  display: inline-block;
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-normal);
   letter-spacing: var(--letter-spacing-tight);
@@ -2374,6 +2378,19 @@ canvas {
      Monospace is overkill here but tabular-nums is enough. */
   font-variant-numeric: tabular-nums;
   text-transform: lowercase;
+}
+.game-version__sep {
+  display: inline-block;
+  color: var(--color-fg-dim);
+  opacity: 0.4;
+  font-size: var(--font-size-md);
+  /* Keep the separator visually balanced — no bold, no spacing tweaks. */
+  font-weight: var(--font-weight-normal);
+  user-select: none;
+  /* Slight Y nudge so the · sits on the visual midline of the row
+     (default baseline renders it slightly low next to the larger
+     ver span). */
+  line-height: 1;
 }
 
 
