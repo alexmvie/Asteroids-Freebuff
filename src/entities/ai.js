@@ -1,56 +1,59 @@
 /**
- * Demo AI — an NPC ship for the DEMO attract state.
+ * Demo AI — clean-room rewrite (v0.55.0).
  *
- * v0.46.x — Live-tunable architecture.
+ * The brain is intentionally small. The whole game boils down to four
+ * questions:
  *
- * Architecture (perception → behaviors → arbitration → actuation):
- *   1. PERCEPTION: `buildContext()` turns raw world state into a clean
- *      context object the behaviors can read.
- *   2. BEHAVIORS: small, testable units that decide IF they want to run
- *      and WHAT they want to do. Every behavior returns a `reason`
- *      string so the debug overlay can explain WHY the AI did what it
- *      did ("EVADE: nearest 5.2u < evadeDist 10.0u"). Current
- *      behaviors: IDLE, ENGAGE, COLLECT (powerup), EVADE. Future
- *      stubs: FIGHT, LAND.
- *   3. ARBITRATION: `selectBehavior()` picks the highest-priority
- *      active behavior. Right now this is simple priority order;
- *      later it can become a goal-oriented planner without touching
- *      the behaviors.
- *   4. ACTUATION: the selected behavior returns `{ yaw, thrust,
- *      mode, reason }`, and an independent fire loop decides whether
- *      to shoot.
+ *   1. Is anything about to kill me?    → EVADE  (thrust perpendicular)
+ *   2. Is there a powerup in range?    → COLLECT (predict + steer; coast-in)
+ *   3. Is there an asteroid in range?  → ENGAGE  (predict + steer; fire)
+ *   4. Nothing in range?               → IDLE   (do nothing)
  *
- * Live tunables
- * -------------
- * Every tunable used by the brain is read per tick from
- * `AI_TUNABLES` (mutable bag in src/entities/ai-tunables.js).
- * Factory-time overrides win over the live values via
- * `opts.X ?? AI_TUNABLES.X`, so existing tests that inject factory
- * overrides keep working without re-wiring. The tuner panel
- * (src/ui/ai-tuners-panel.js) writes directly to AI_TUNABLES; a
- * slider drag is visible on the very next frame.
+ * The user's spec ("simple Asteroids AI") is exactly this. We
+ * deliberately collapsed the v0.46–v0.49 collection into a single
+ * steer-toward-predicted-position controller with a one-line coast-in
+ * gate, then removed every behavior-specific tunable.
  *
- * This keeps the classic Asteroids AI simple and fast, but gives a
- * clean seam for future behaviors (ship combat, station landing,
- * formation flying, etc.) and a clean seam for runtime tuning
- * without app reloads.
+ * Architecture
+ * ------------
+ *   1. Pure helpers (`facingAngle`, `wrapAngle`, `predictPosition`,
+ *      `isTargetInFront`) — universal across any moving target.
+ *   2. `evaluatePerception(args)` — turns raw world state into a
+ *      snapshot `{ nearestAst, nearestPw, nearestShip? }`. Add new
+ *      fields here when new target types appear.
+ *   3. `BEHAVIORS` — open-ended, priority-ordered registry. Each
+ *      entry: `{ name, run(snap, args) }` returning a decision or
+ *      null. Inserting a behavior at a priority slot is the ONLY
+ *      change needed to add a new AI mode (pirate, station lander,
+ *      formation flight, etc.).
+ *   4. `aiBrainTick(args)` — pure decision mapper. Calls perception,
+ *      walks BEHAVIORS in order, returns the first non-null decision
+ *      with `fire` set by the independent fire loop.
  *
- * Fire and flight target are decoupled: the ship can chase a powerup
- * while still shooting asteroids in its forward cone.
+ * Fire is decoupled from chase target — the ship can shoot an
+ * asteroid while chasing a powerup. Tests pin this contract.
+ *
+ * What was deliberately REMOVED (and why)
+ * ---------------------------------------
+ *   - Velocity-error controller / final-approach guard → replaced by
+ *     `predict + steer` + a single `POWERUP_COAST_DIST` for stationary
+ *     pickups.
+ *   - Angular-velocity prediction (YAW_INERTIA_TAU counter-steer) →
+ *     ship.js already has YAW_INERTIA_TAU; the AI doesn't need to
+ *     model it.
+ *   - Adaptive closing-speed throttle → coast-in alone handles close
+ *     range.
+ *   - Sticky powerup commitment → re-evaluating every tick fixes the
+ *     "stale target" bug.
+ *   - 14 of 22 AI_TUNABLES → purged.
  */
 
 import { createShip } from './ship.js';
-import { YAW_INERTIA_TAU, LINEAR_DRAG } from './ship-constants.js';
-import { POWERUP_PUSH_DRAG } from './powerup.js';
 import { AI_TUNABLES } from './ai-tunables.js';
 
-// --------------------------------------------------------------------------
-// Factory-only constants
-// --------------------------------------------------------------------------
-// Brain-level tunables live in AI_TUNABLES (live, mutable). These
-// factory-only knobs are NOT part of the runtime tunable surface —
-// they affect spawn logic at factory time only. Resetting the live
-// tunables does NOT touch these.
+// ------------------------------------------------------------------
+// Factory-only constants (not part of the runtime tunable surface)
+// ------------------------------------------------------------------
 
 const FACTORY_DEFAULTS = Object.freeze({
   /** Reset the AI ship if it drifts beyond this radius from origin. */
@@ -61,92 +64,56 @@ const FACTORY_DEFAULTS = Object.freeze({
   spawnYaw: 0,
 });
 
-// --------------------------------------------------------------------------
-// Per-tick defaults for values that are NOT in AI_TUNABLES
-// --------------------------------------------------------------------------
-// `activeWeapon` is flux (bullet/laser) decided by the powerup
-// system; it isn't a tunable. `aiAngularVel` is a per-tick sensor
-// read. These have static fallbacks used only by the pure function
-// `aiBrainTick` when callers omit them.
+/**
+ * Coast-in distance (world units) for the COLLECT behavior. When the
+ * ship is closer than this to a stationary target, thrust is cut and
+ * LINEAR_DRAG handles the deceleration. The single brake that
+ * prevents "fly past and orbit forever" at high cruise speed.
+ */
+const POWERUP_COAST_DIST = 5;
 
-const API_DEFAULTS = Object.freeze({
-  activeWeapon: 'bullet',
-  aiAngularVel: 0,
-});
+// ------------------------------------------------------------------
+// Pure math helpers
+// ------------------------------------------------------------------
 
-// --------------------------------------------------------------------------
-// Private helpers
-// --------------------------------------------------------------------------
-
-function wrapAngle(a) {
+/**
+ * Wrap an angle into [-π, π).
+ */
+export function wrapAngle(a) {
   const TAU = Math.PI * 2;
   let r = a % TAU;
   if (r > Math.PI) r -= TAU;
-  else if (r <= -Math.PI) r += TAU;
+  else if (r < -Math.PI) r += TAU;
   return r;
 }
 
-// --------------------------------------------------------------------------
-// Exported pure helpers
-// --------------------------------------------------------------------------
-
 /**
- * Convert a ship rotation `yaw` (ship.js convention: forward = (-sin(yaw), 0, -cos(yaw)))
- * into the angle of that forward vector in atan2(z, x) space.
- * yaw = 0 → faces -Z → atan2(z, x) = -π/2.
+ * Ship forward direction in atan2(z, x) space.
+ * yaw=0 → forward=(-sin(0), 0, -cos(0)) = (0,0,-1) → angle = -π/2.
  */
 export function facingAngle(yaw) {
   return Math.atan2(-Math.cos(yaw), -Math.sin(yaw));
 }
 
 /**
- * Find the nearest asteroid to a point.
+ * Predict a target's position at ship arrival time.
+ * `target = { pos: {x,z}, vel?: {x,z} }`. Universal — asteroids,
+ * powerups, future ships, future moving stations.
  */
-export function findNearestAsteroid(pos, asteroids) {
-  let best = null;
-  let bestDist = Infinity;
-  for (const a of asteroids) {
-    if (!a || typeof a.getPosition !== 'function') continue;
-    const p = a.getPosition();
-    if (!p) continue;
-    const dx = p.x - pos.x;
-    const dz = p.z - pos.z;
-    const d = Math.hypot(dx, dz);
-    if (d < bestDist) {
-      bestDist = d;
-      best = { dx, dz, dist: d, asteroid: a, pos: p };
-    }
-  }
-  return best;
+export function predictPosition(target, aiPos, bulletSpeed) {
+  if (!target || !target.pos || typeof target.pos.x !== 'number') return null;
+  const dx = target.pos.x - aiPos.x;
+  const dz = target.pos.z - aiPos.z;
+  const d = Math.hypot(dx, dz);
+  const t = d / Math.max(bulletSpeed, 1);
+  const vx = (target.vel && typeof target.vel.x === 'number') ? target.vel.x : 0;
+  const vz = (target.vel && typeof target.vel.z === 'number') ? target.vel.z : 0;
+  return { x: target.pos.x + vx * t, z: target.pos.z + vz * t };
 }
 
 /**
- * Find the best asteroid to chase, preferring larger asteroids.
- * Effective distance = dist - (2 - size) * sizeBias.
- * size 0 = large, size 1 = medium, size 2 = small.
- */
-export function findBestAsteroidForChase(pos, asteroids, sizeBias = AI_TUNABLES.asteroidSizeBias) {
-  let best = null;
-  let bestScore = Infinity;
-  for (const a of asteroids) {
-    if (!a || typeof a.getPosition !== 'function') continue;
-    const p = a.getPosition();
-    if (!p) continue;
-    const dx = p.x - pos.x;
-    const dz = p.z - pos.z;
-    const dist = Math.hypot(dx, dz);
-    const size = typeof a.getSize === 'function' ? a.getSize() : 2;
-    const score = dist - (2 - size) * sizeBias;
-    if (score < bestScore) {
-      bestScore = score;
-      best = { dx, dz, dist, asteroid: a, pos: p };
-    }
-  }
-  return best;
-}
-
-/**
- * True if the target is in front of the ship within the given half-angle.
+ * True iff a target position is in front of the ship within
+ * `halfAngle` radians. Ship-yaw convention: yaw 0 faces -Z.
  */
 export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
   if (!aiPos || !targetPos) return false;
@@ -154,553 +121,236 @@ export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
   const dz = targetPos.z - aiPos.z;
   if (dx === 0 && dz === 0) return false;
   const targetAngle = Math.atan2(dz, dx);
-  const facing = facingAngle(aiYaw);
-  const diff = Math.abs(wrapAngle(targetAngle - facing));
+  const diff = Math.abs(wrapAngle(targetAngle - facingAngle(aiYaw)));
   return diff < halfAngle;
 }
 
 /**
- * Predict where an asteroid will be when the bullet arrives.
- * Returns the predicted position. If the asteroid has no velocity,
- * returns its current position.
+ * Find the nearest item in a list to `pos`. `getPos` defaults to
+ * `.getPosition()` for duck-typed asteroid-like objects.
+ *
+ * Returns `{ item, dx, dz, dist, pos }` or null.
  */
-export function predictAsteroidPosition(asteroid, aiPos, bulletSpeed = AI_TUNABLES.bulletSpeed) {
+function findNearest(pos, items, getPos = (i) => i && i.getPosition && i.getPosition()) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const item of items) {
+    if (!item) continue;
+    const p = getPos(item);
+    if (!p || typeof p.x !== 'number' || typeof p.z !== 'number') continue;
+    const dx = p.x - pos.x;
+    const dz = p.z - pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d < bestDist) {
+      bestDist = d;
+      best = { item, dx, dz, dist: d, pos: p };
+    }
+  }
+  return best;
+}
+
+// ------------------------------------------------------------------
+// Universal steering (one helper, used by every non-idle behavior)
+// ------------------------------------------------------------------
+
+/**
+ * Compute heading error to a target position (radians, [-π, π]).
+ */
+function headingError(args, targetPos) {
+  const dx = targetPos.x - args.aiPos.x;
+  const dz = targetPos.z - args.aiPos.z;
+  if (dx === 0 && dz === 0) return 0;
+  const targetAngle = Math.atan2(dz, dx);
+  return wrapAngle(targetAngle - facingAngle(args.aiYaw));
+}
+
+/**
+ * Turn a heading error into a {-1, 0, +1} yaw command.
+ * Positive error = target is LEFT of ship's facing → yaw=-1 (turn right
+ * per ship.js convention).
+ */
+function yawCommandFromError(err, deadband) {
+  if (Math.abs(err) < deadband) return 0;
+  return err > 0 ? -1 : 1;
+}
+
+/**
+ * Universal steer helper. Returns `{ yaw, thrust, err }`.
+ * Thrust is ON when |err| < thrustHeadingGate, unless `forceThrust`.
+ */
+function steerTo(args, targetPos, { forceThrust = false } = {}) {
+  const err = headingError(args, targetPos);
+  const yaw = yawCommandFromError(err, args.yawDeadband);
+  const thrust = forceThrust || Math.abs(err) < args.thrustHeadingGate;
+  return { yaw, thrust, err };
+}
+
+/**
+ * The asteroid-specific prediction helper. Calls the universal
+ * `predictPosition` after extracting `pos + vel` from an
+ * asteroid-like duck-typed object.
+ */
+function predictAsteroidPosition(asteroid, aiPos, bulletSpeed) {
   if (!asteroid || typeof asteroid.getPosition !== 'function') return null;
   const pos = asteroid.getPosition();
   if (!pos) return null;
-  const dx = pos.x - aiPos.x;
-  const dz = pos.z - aiPos.z;
-  const dist = Math.hypot(dx, dz);
-  const flightTime = dist / Math.max(bulletSpeed, 1);
-  const vel = typeof asteroid.getVelocity === 'function' ? asteroid.getVelocity() : { x: 0, z: 0 };
-  return {
-    x: pos.x + (vel.x || 0) * flightTime,
-    z: pos.z + (vel.z || 0) * flightTime,
+  return predictPosition(
+    { pos, vel: typeof asteroid.getVelocity === 'function' ? asteroid.getVelocity() : null },
+    aiPos,
+    bulletSpeed,
+  );
+}
+
+// ------------------------------------------------------------------
+// Behavior registry (priority-ordered, future-extensible)
+// ------------------------------------------------------------------
+
+/**
+ * EVADE behavior: nearest asteroid within evadeDist → turn 90° perpendicular,
+ * thrust hard. Uses `forceThrust` because perpendicular is still the
+ * safest escape vector even when misaligned.
+ */
+function evadeBehavior(snap, args) {
+  const a = snap.nearestAst;
+  if (!a || a.dist >= args.evadeDist) return null;
+  const threatAngle = Math.atan2(a.dz, a.dx);
+  // 90° perpendicular, pick the +90° side (consistent).
+  const escapeAngle = threatAngle + Math.PI / 2;
+  const targetPos = {
+    x: args.aiPos.x + Math.cos(escapeAngle),
+    z: args.aiPos.z + Math.sin(escapeAngle),
   };
-}
-
-/**
- * Compute the signed angle from the ship's facing to a target position.
- * Returns a value in [-π, π].
- */
-function headingDiffToTarget(aiPos, aiYaw, targetPos) {
-  const dx = targetPos.x - aiPos.x;
-  const dz = targetPos.z - aiPos.z;
-  const targetAngle = Math.atan2(dz, dx);
-  return wrapAngle(targetAngle - facingAngle(aiYaw));
-}
-
-/**
- * Pick the best target.
- *
- * Rules:
- *   - A reachable powerup is always preferred over asteroids.
- *     This keeps the AI from switching targets constantly.
- *   - If no powerup is reachable, chase the best asteroid.
- *
- * Back-compat: if `aiYaw` is omitted, falls back to the legacy distance-only
- * comparison so existing callers/tests keep working.
- */
-export function pickTarget({
-  aiPos,
-  aiYaw,
-  asteroids,
-  powerupPos,
-  stickyPowerupPos = null,
-  powerupMaxChaseDist = AI_TUNABLES.powerupMaxChaseDist,
-  asteroidSizeBias = AI_TUNABLES.asteroidSizeBias,
-}) {
-  const bestAsteroid = findBestAsteroidForChase(aiPos, asteroids, asteroidSizeBias);
-
-  // Powerup evaluation.
-  let powerupTarget = null;
-  if (powerupPos && typeof powerupPos.x === 'number') {
-    const pdx = powerupPos.x - aiPos.x;
-    const pdz = powerupPos.z - aiPos.z;
-    const pDist = Math.hypot(pdx, pdz);
-    if (pDist <= powerupMaxChaseDist) {
-      powerupTarget = { pos: powerupPos, mode: 'powerup', dist: pDist };
-    }
-  }
-
-  // Reachable powerup always wins — this is the key to stopping the
-  // visible target-switching between asteroids and powerups.
-  if (stickyPowerupPos && powerupTarget && powerupTarget.pos === stickyPowerupPos) {
-    return powerupTarget;
-  }
-  if (powerupTarget) {
-    return powerupTarget;
-  }
-
-  // Legacy/back-compat path: no yaw supplied → pure distance comparison.
-  if (typeof aiYaw !== 'number') {
-    if (bestAsteroid) {
-      return { pos: bestAsteroid.pos, mode: 'asteroid', dist: bestAsteroid.dist };
-    }
-    return null;
-  }
-
-  if (bestAsteroid) {
-    return { pos: bestAsteroid.pos, mode: 'asteroid', dist: bestAsteroid.dist };
-  }
-
-  return null;
-}
-
-// --------------------------------------------------------------------------
-// Perception
-// --------------------------------------------------------------------------
-
-/**
- * Build a context object from raw brain inputs. This is the single place
- * where raw world state is normalized before behaviors see it. The ctx
- * also carries EVERY AI_TUNABLES value read by the behaviors, so a
- * live tuner-panel drag is visible on the very next buildContext call.
- *
- * @param {object} args - the same args aiBrainTick receives
- * @returns {object} ctx
- */
-function buildContext(args) {
-  const {
-    aiPos,
-    aiYaw,
-    asteroids,
-    powerupPos = null,
-    powerupVel = null,
-    stickyPowerupPos = null,
-    stickyPowerupTime = 0,
-    aiVel = null,
-  } = args;
-
-  const nearest = findNearestAsteroid(aiPos, asteroids);
-  const target = pickTarget({
-    aiPos,
-    aiYaw,
-    asteroids,
-    powerupPos,
-    powerupMaxChaseDist: args.powerupMaxChaseDist,
-    asteroidSizeBias: args.asteroidSizeBias,
-    forwardConeHalfAngle: args.forwardConeHalfAngle,
-    powerupNearBehindThreshold: args.powerupNearBehindThreshold,
-  });
-
+  const steer = steerTo(args, targetPos, { forceThrust: true });
   return {
-    // ---- pass-through state -------------------------------------
-    aiPos,
-    aiYaw,
-    asteroids,
-    powerupPos,
-    powerupVel,
-    stickyPowerupPos,
-    stickyPowerupTime,
-    aiVel,
-    // ---- per-tick artifacts used by behaviors + debug overlay ---
-    nearest,
-    target,
-    // ---- all live tunables, snapshotted from args for behavior
-    //      consumption (so a slider drag is visible next tick) ---
-    evadeDist: args.evadeDist,
-    powerupMaxChaseDist: args.powerupMaxChaseDist,
-    thrustHeadingGate: args.thrustHeadingGate,
-    yawDeadband: args.yawDeadband,
-    fireHeadingGate: args.fireHeadingGate,
-    fireMinDist: args.fireMinDist,
-    fireMaxDist: args.fireMaxDist,
-    activeWeapon: args.activeWeapon,
-    laserFireHeadingGate: args.laserFireHeadingGate,
-    bulletSpeed: args.bulletSpeed,
-    asteroidSizeBias: args.asteroidSizeBias,
-    forwardConeHalfAngle: args.forwardConeHalfAngle,
-    powerupNearBehindThreshold: args.powerupNearBehindThreshold,
-    powerupThrustGate: args.powerupThrustGate,
-    powerupStickyTime: args.powerupStickyTime,
-    powerupCruiseSpeed: args.powerupCruiseSpeed,
-    powerupMinApproachSpeed: args.powerupMinApproachSpeed,
-    powerupApproachGain: args.powerupApproachGain,
-    powerupBrakeSafetyFactor: args.powerupBrakeSafetyFactor,
-    powerupVelocityErrorThreshold: args.powerupVelocityErrorThreshold,
-    powerupFinalApproachDist: args.powerupFinalApproachDist,
-    powerupFinalApproachSpeed: args.powerupFinalApproachSpeed,
-    aiAngularVel: args.aiAngularVel,
-  };
-}
-
-// --------------------------------------------------------------------------
-// Behaviors
-// --------------------------------------------------------------------------
-
-/**
- * Compute the signed heading error from the ship's facing to a target.
- * Positive means the target is to the left of the facing vector.
- */
-function headingErrorToTarget(ctx, targetPos) {
-  const dx = targetPos.x - ctx.aiPos.x;
-  const dz = targetPos.z - ctx.aiPos.z;
-  const faceAngle = Math.atan2(dz, dx);
-  return wrapAngle(faceAngle - facingAngle(ctx.aiYaw));
-}
-
-/**
- * Compute the projection of the ship's velocity onto the line to the
- * target. Positive = moving toward the target, negative = moving away.
- */
-function closingSpeedToTarget(ctx, targetPos) {
-  const aiVel = ctx.aiVel || { x: 0, z: 0 };
-  const dx = targetPos.x - ctx.aiPos.x;
-  const dz = targetPos.z - ctx.aiPos.z;
-  const dist = Math.hypot(dx, dz);
-  if (dist < 0.001) return 0;
-  return (aiVel.x * dx + aiVel.z * dz) / dist;
-}
-
-/**
- * Turn toward a target position and thrust when aligned.
- * Shared by ENGAGE and COLLECT.
- *
- * Uses angular-velocity prediction to counter-steer before the ship's
- * angular momentum can overshoot the target. This removes the visible
- * left/right wobble caused by YAW_INERTIA_TAU.
- *
- * If `opts.desiredClosingSpeed` is provided, thrust is gated on the
- * current closing speed too: the ship coasts when it is already
- * closing faster than desired, and thrusts when it is slower. This
- * prevents overshoot and gives the AI real speed management.
- */
-export function steerToward(ctx, targetPos, mode, opts = {}) {
-  const {
-    desiredClosingSpeed = null,
-    thrustGate = ctx.thrustHeadingGate,
-  } = opts;
-
-  const targetDiff = headingErrorToTarget(ctx, targetPos);
-
-  // Predict where the heading will be one yaw time-constant from now,
-  // so the AI starts counter-steering before the ship overshoots.
-  const angularVel = ctx.aiAngularVel || 0;
-  const predictedDiff = wrapAngle(targetDiff + angularVel * YAW_INERTIA_TAU);
-  const yawDeadband = ctx.yawDeadband ?? 0.10;
-
-  const yaw = predictedDiff > yawDeadband ? -1 : predictedDiff < -yawDeadband ? 1 : 0;
-  let thrust = Math.abs(predictedDiff) < thrustGate;
-
-  // Speed management: if a desired closing speed was requested, only
-  // thrust when we are closing slower than desired. Linear drag will
-  // naturally slow us down when thrust is off.
-  if (thrust && desiredClosingSpeed !== null) {
-    const closing = closingSpeedToTarget(ctx, targetPos);
-    thrust = closing < desiredClosingSpeed;
-  }
-
-  return { yaw, thrust, mode, fire: false, braking: false, predictedDiff };
-}
-
-/**
- * EVADE behavior: something is very close — get away safely.
- *
- * Returns `{ yaw, thrust, mode: 'evade', reason }`. The reason
- * explains what threshold fired so the debug overlay can show
- * "EVADE: nearest 5.2u < evadeDist 10.0u" without recomputing
- * anything.
- */
-export function evadeBehavior(ctx) {
-  const nearest = ctx.nearest;
-  if (!nearest || nearest.dist >= ctx.evadeDist) return null;
-
-  const aiVel = ctx.aiVel || { x: 0, z: 0 };
-  const closing = (aiVel.x * nearest.dx + aiVel.z * nearest.dz) / Math.max(nearest.dist, 0.001);
-
-  let targetDiff;
-  if (closing > -5) {
-    // Moving toward the threat (or only slowly away): turn directly
-    // away from it and thrust hard.
-    const escapeAngle = Math.atan2(-nearest.dz, -nearest.dx);
-    targetDiff = wrapAngle(escapeAngle - facingAngle(ctx.aiYaw));
-  } else {
-    // Already moving away: thrust perpendicular to widen the gap
-    // while preserving escape velocity.
-    const threatAngle = Math.atan2(nearest.dz, nearest.dx);
-    const escapeAngle = threatAngle + Math.PI / 2;
-    targetDiff = wrapAngle(escapeAngle - facingAngle(ctx.aiYaw));
-  }
-
-  // Same angular-velocity prediction as steerToward to avoid overshoot.
-  const angularVel = ctx.aiAngularVel || 0;
-  const predictedDiff = wrapAngle(targetDiff + angularVel * YAW_INERTIA_TAU);
-  const yawDeadband = ctx.yawDeadband ?? 0.10;
-
-  // Thrust if roughly aligned, OR if the threat is very close and
-  // we need to get away now regardless of facing.
-  const veryClose = nearest.dist < ctx.evadeDist * 0.5;
-  const thrust = Math.abs(predictedDiff) < 0.6 || veryClose;
-
-  const reason = `nearest ${nearest.dist.toFixed(1)}u < evadeDist ${ctx.evadeDist.toFixed(1)}u`;
-
-  return {
-    yaw: predictedDiff > yawDeadband ? -1 : predictedDiff < -yawDeadband ? 1 : 0,
-    thrust,
+    yaw: steer.yaw,
+    thrust: steer.thrust,
     mode: 'evade',
-    fire: false,
-    braking: false,
-    reason,
+    reason: `asteroid ${a.dist.toFixed(1)}u < ${args.evadeDist.toFixed(1)}u`,
   };
 }
 
 /**
- * COLLECT behavior: chase and intercept a powerup.
- *
- * Uses a physics-based velocity-error controller:
- * 1. Predicts the powerup's position at an adaptive horizon using its
- *    current velocity and exponential drag (POWERUP_PUSH_DRAG).
- * 2. Computes a desired closing velocity that respects the ship's
- *    braking envelope (LINEAR_DRAG), so the ship arrives with low speed
- *    and does not overshoot the pickup radius.
- * 3. Steers toward the velocity-error vector (desired - current velocity),
- *    not just the position vector. This actively cancels tangential
- *    "orbiting" velocity and produces a smooth, deliberate approach.
- *
- * Each ctrl constant is sourced from ctx (not AI_TUNABLES directly),
- * so a tuner-panel drag updates behavior on the next tick.
+ * COLLECT behavior: reachable powerup → predict + steer + coast-in.
+ * Stationary powerups collapse `predictPosition` to current pos, but
+ * the same code path handles a moving powerup if powerups ever drift.
  */
-export function collectBehavior(ctx) {
-  if (!ctx.target || ctx.target.mode !== 'powerup') return null;
-
-  const targetPos = ctx.target.pos;
-  const aiPos = ctx.aiPos;
-  const aiYaw = ctx.aiYaw;
-  const powerupVel = ctx.powerupVel || { x: 0, z: 0 };
-  const aiVel = ctx.aiVel || { x: 0, z: 0 };
-
-  const ctxDefaults = {
-    // powerupThrustGate has no entry here on purpose — it falls
-    // through to AI_TUNABLES.powerupThrustGate below (the previous
-    // hardcoded duplicate of ctxDefaults.powerupCruiseSpeed was a
-    // silent fallback bug).
-    powerupThrustGate: AI_TUNABLES.powerupThrustGate,
-    powerupCruiseSpeed: AI_TUNABLES.powerupCruiseSpeed,
-    powerupMinApproachSpeed: AI_TUNABLES.powerupMinApproachSpeed,
-    powerupApproachGain: AI_TUNABLES.powerupApproachGain,
-    powerupBrakeSafetyFactor: AI_TUNABLES.powerupBrakeSafetyFactor,
-    powerupVelocityErrorThreshold: AI_TUNABLES.powerupVelocityErrorThreshold,
-    powerupFinalApproachDist: AI_TUNABLES.powerupFinalApproachDist,
-    powerupFinalApproachSpeed: AI_TUNABLES.powerupFinalApproachSpeed,
+function collectBehavior(snap, args) {
+  if (!snap.nearestPw || snap.nearestPw.dist >= args.powerupMaxChaseDist) return null;
+  const pw = snap.nearestPw;
+  const predicted = predictPosition(pw, args.aiPos, args.bulletSpeed);
+  if (!predicted) return null;
+  const dist = pw.dist;
+  const coastIn = dist < POWERUP_COAST_DIST;
+  const steer = steerTo(args, predicted, { forceThrust: false });
+  return {
+    yaw: steer.yaw,
+    thrust: !coastIn && steer.thrust,
+    mode: 'powerup',
+    reason: `powerup ${dist.toFixed(1)}u${coastIn ? ' (coast)' : ''}`,
   };
-
-  // 1. Adaptive intercept horizon.
-  const dx0 = targetPos.x - aiPos.x;
-  const dz0 = targetPos.z - aiPos.z;
-  const dist0 = Math.hypot(dx0, dz0);
-  const cruiseSpeed = ctx.powerupCruiseSpeed ?? ctxDefaults.powerupCruiseSpeed;
-  const minApproachSpeed = ctx.powerupMinApproachSpeed ?? ctxDefaults.powerupMinApproachSpeed;
-  const approachGain = ctx.powerupApproachGain ?? ctxDefaults.powerupApproachGain;
-  const desiredAvgSpeed = Math.min(
-    cruiseSpeed,
-    Math.max(minApproachSpeed, dist0 * approachGain),
-  );
-  const tGo = Math.max(0.2, dist0 / desiredAvgSpeed);
-
-  // 2. Predict powerup position at tGo with exponential drag.
-  const drag = POWERUP_PUSH_DRAG;
-  const decayFactor = 1 - Math.exp(-drag * tGo);
-  const predictedPos = {
-    x: targetPos.x + powerupVel.x * decayFactor / drag,
-    z: targetPos.z + powerupVel.z * decayFactor / drag,
-  };
-
-  // 3. Desired velocity to reach the predicted intercept point.
-  const dx = predictedPos.x - aiPos.x;
-  const dz = predictedPos.z - aiPos.z;
-  const dist = Math.hypot(dx, dz);
-
-  const brakeSafety = ctx.powerupBrakeSafetyFactor ?? ctxDefaults.powerupBrakeSafetyFactor;
-  const maxSafeSpeed = Math.max(0, dist * LINEAR_DRAG * brakeSafety);
-  const desiredSpeed = Math.min(maxSafeSpeed, cruiseSpeed);
-  const dirX = dist > 0.001 ? dx / dist : 0;
-  const dirZ = dist > 0.001 ? dz / dist : 0;
-
-  const vDesX = dirX * desiredSpeed;
-  const vDesZ = dirZ * desiredSpeed;
-
-  // 4. Velocity error = desired - current.
-  const vErrX = vDesX - aiVel.x;
-  const vErrZ = vDesZ - aiVel.z;
-  const vErrMag = Math.hypot(vErrX, vErrZ);
-
-  const finalApproachDist = ctx.powerupFinalApproachDist ?? ctxDefaults.powerupFinalApproachDist;
-  const inFinalApproach = dist0 < finalApproachDist;
-  const steerTarget = inFinalApproach
-    ? targetPos
-    : { x: aiPos.x + vErrX, z: aiPos.z + vErrZ };
-
-  const powerupThrustGate = ctx.powerupThrustGate ?? ctxDefaults.powerupThrustGate;
-  const steeringCtx = {
-    ...ctx,
-    aiPos,
-    aiYaw,
-    thrustHeadingGate: powerupThrustGate,
-  };
-  const steer = steerToward(steeringCtx, steerTarget, 'powerup');
-
-  const aligned = Math.abs(steer.predictedDiff) < powerupThrustGate;
-
-  const finalApproachSpeed = ctx.powerupFinalApproachSpeed ?? ctxDefaults.powerupFinalApproachSpeed;
-  const velErrThreshold = ctx.powerupVelocityErrorThreshold ?? ctxDefaults.powerupVelocityErrorThreshold;
-  let thrust;
-  if (inFinalApproach) {
-    const dir0X = dist0 > 0.001 ? dx0 / dist0 : 0;
-    const dir0Z = dist0 > 0.001 ? dz0 / dist0 : 0;
-    const closingSpeed = (aiVel.x * dir0X + aiVel.z * dir0Z);
-    thrust = aligned && closingSpeed < finalApproachSpeed;
-  } else {
-    thrust = aligned && vErrMag > velErrThreshold;
-  }
-
-  const closing0 = (aiVel.x * dx0 + aiVel.z * dz0) / Math.max(dist0, 0.001);
-  const reason = `powerup ${dist0.toFixed(1)}u, closing ${closing0.toFixed(1)}u/s${inFinalApproach ? ' (final)' : ''}`;
-
-  return { yaw: steer.yaw, thrust, mode: 'powerup', fire: false, braking: false, reason };
 }
 
 /**
- * ENGAGE behavior: chase the best asteroid with velocity-aware
- * approach control.
- *
- * Returns `{ yaw, thrust, mode: 'asteroid', reason }`.
+ * ENGAGE behavior: nearest asteroid → predict at bullet flight + steer.
+ * Same code path for moving and stationary asteroids.
  */
-export function engageBehavior(ctx) {
-  if (!ctx.target || ctx.target.mode !== 'asteroid') return null;
-  const targetPos = ctx.target.pos;
-
-  const dx = targetPos.x - ctx.aiPos.x;
-  const dz = targetPos.z - ctx.aiPos.z;
-  const dist = Math.hypot(dx, dz);
-
-  const minApproach = 5;
-  const maxApproach = 60;
-  const desiredClosing = Math.max(
-    minApproach,
-    Math.min(maxApproach, dist * 0.4),
-  );
-
-  const thrustGate = Math.min(0.5, (ctx.thrustHeadingGate ?? 0.2) * 2.5);
-
-  const steer = steerToward(ctx, targetPos, 'asteroid', {
-    desiredClosingSpeed: desiredClosing,
-    thrustGate,
-  });
-
-  // Find the size of the asteroid we're chasing for the reason text.
-  let sizeText = '?';
-  let targetAst = null;
-  for (const a of (ctx.asteroids || [])) {
-    if (!a || typeof a.getPosition !== 'function') continue;
-    const p = a.getPosition();
-    if (!p) continue;
-    if (Math.abs(p.x - targetPos.x) < 0.001 && Math.abs(p.z - targetPos.z) < 0.001) {
-      targetAst = a;
-      break;
-    }
-  }
-  if (targetAst && typeof targetAst.getSize === 'function') {
-    const s = targetAst.getSize();
-    sizeText = s === 0 ? 'L' : s === 1 ? 'M' : 'S';
-  }
-
-  const reason = `asteroid ${sizeText} @ ${dist.toFixed(1)}u, closing ${desiredClosing.toFixed(1)}u/s`;
-
+function engageBehavior(snap, args) {
+  if (!snap.nearestAst) return null;
+  const ast = snap.nearestAst;
+  const predicted = predictAsteroidPosition(ast.item, args.aiPos, args.bulletSpeed);
+  const targetPos = predicted || ast.pos;
+  const steer = steerTo(args, targetPos);
   return {
     yaw: steer.yaw,
     thrust: steer.thrust,
     mode: 'asteroid',
-    fire: false,
-    braking: false,
-    reason,
+    reason: `asteroid ${ast.dist.toFixed(1)}u`,
   };
 }
 
 /**
- * IDLE behavior: nothing to do. Returns `{ mode: 'idle', reason }`.
+ * IDLE behavior: fallback when no target is in range.
  */
-export function idleBehavior(ctx) {
-  const n = (ctx.asteroids || []).length;
-  const reason = n === 0 ? 'no asteroids in range' : `idle (${n} asteroids, none targetable)`;
-  return { yaw: 0, thrust: false, mode: 'idle', fire: false, braking: false, reason };
+function idleBehavior() {
+  return { yaw: 0, thrust: false, mode: 'idle', reason: 'no targets in range' };
 }
 
-// --------------------------------------------------------------------------
-// Arbitration
-// --------------------------------------------------------------------------
+// Priority order: EVADE wins (immediate threat), then COLLECT (user
+// priority per the spec), then ENGAGE, then IDLE as fallback. Insert
+// future behaviors (pirate, land) at the right priority slot here.
+const BEHAVIORS = [
+  { name: 'evade', run: evadeBehavior },
+  { name: 'collect', run: collectBehavior },
+  { name: 'engage', run: engageBehavior },
+  { name: 'idle', run: idleBehavior },
+];
 
-export const BEHAVIORS = [
-  { name: 'idle', run: idleBehavior, priority: 0 },
-  { name: 'engage', run: engageBehavior, priority: 10 },
-  // COLLECT outranks EVADE so the AI actually reaches powerups
-  // instead of forever dodging nearby asteroids. In DEMO the AI
-  // has no lives, so flying through a cluster to grab a pickup is
-  // the desired spectacle.
-  { name: 'collect', run: collectBehavior, priority: 110 },
-  { name: 'evade', run: evadeBehavior, priority: 100 },
-].sort((a, b) => b.priority - a.priority);
+// ------------------------------------------------------------------
+// Perception (snapshot of the world for the behavior layer)
+// ------------------------------------------------------------------
 
 /**
- * Select the active behavior for this tick.
- * Returns `{ behavior, decision }`.
+ * Evaluate perception — nearest asteroid, nearest powerup, future: ships,
+ * stations, etc. Returns a snapshot the behaviors read.
  */
-export function selectBehavior(ctx) {
-  for (const behavior of BEHAVIORS) {
-    const decision = behavior.run(ctx);
-    if (decision) {
-      return { behavior: behavior.name, decision };
-    }
-  }
-  return { behavior: 'idle', decision: idleBehavior(ctx) };
+function evaluatePerception(args) {
+  const nearestAst = findNearest(args.aiPos, args.asteroids || []);
+  const nearestPw = args.powerupPos
+    ? {
+        pos: args.powerupPos,
+        vel: args.powerupVel || { x: 0, z: 0 },
+        dist: Math.hypot(
+          args.powerupPos.x - args.aiPos.x,
+          args.powerupPos.z - args.aiPos.z,
+        ),
+      }
+    : null;
+  return { nearestAst, nearestPw };
 }
 
-// --------------------------------------------------------------------------
-// Fire loop
-// --------------------------------------------------------------------------
+// ------------------------------------------------------------------
+// Fire loop (independent of chase target)
+// ------------------------------------------------------------------
 
 /**
- * Decide whether the AI should fire this tick. Fire is independent of
- * the selected behavior so the ship can shoot asteroids while chasing
- * powerups.
+ * Decide whether the AI should fire this tick. Scans every asteroid,
+ * predicts its position at bullet flight time, and fires if any is
+ * in the forward cone + fire range. Independent of chase target so
+ * the ship can shoot while chasing a powerup.
  */
-export function evaluateFire(ctx) {
-  const { aiPos, aiYaw, asteroids, activeWeapon, laserFireHeadingGate } = ctx;
-
-  if (activeWeapon === 'laser') {
-    const nearest = ctx.nearest;
-    return nearest ? isTargetInFront(aiPos, aiYaw, nearest.pos, laserFireHeadingGate) : false;
-  }
-
-  for (const a of asteroids) {
+function evaluateFire(args) {
+  if (!args.asteroids) return false;
+  for (const a of args.asteroids) {
     if (!a || typeof a.getPosition !== 'function') continue;
-    const predicted = predictAsteroidPosition(a, aiPos, ctx.bulletSpeed);
+    const predicted = predictAsteroidPosition(a, args.aiPos, args.bulletSpeed);
     if (!predicted) continue;
-    const d = Math.hypot(predicted.x - aiPos.x, predicted.z - aiPos.z);
-    if (d < ctx.fireMinDist || d > ctx.fireMaxDist) continue;
-    if (isTargetInFront(aiPos, aiYaw, predicted, ctx.fireHeadingGate)) {
+    const d = Math.hypot(predicted.x - args.aiPos.x, predicted.z - args.aiPos.z);
+    if (d < args.fireMinDist || d > args.fireMaxDist) continue;
+    if (isTargetInFront(args.aiPos, args.aiYaw, predicted, args.fireHeadingGate)) {
       return true;
     }
   }
   return false;
 }
 
-// --------------------------------------------------------------------------
-// Public brain API
-// --------------------------------------------------------------------------
+// ------------------------------------------------------------------
+// Public brain
+// ------------------------------------------------------------------
 
 /**
- * Decide what the AI should do this tick.
+ * Decide what the AI should do this tick. Pure function.
  *
- * Every tunable arg has TWO layers:
- *   1. Caller-provided `args.X` (test/factory override — wins if set)
- *   2. Fallback to `AI_TUNABLES.X` (live tunable — visible in the
- *      tuner panel)
- *
- * The factory's `brainArgsFromShip()` already applies this pattern,
- * but the same defaults are replicated here so direct callers
- * (`aiBrainTick` in unit tests, e.g.) also get live-tunable behavior
- * when they don't pass a specific override.
+ * @param {object} args
+ * @param {{x,y,z}} args.aiPos — required
+ * @param {number} args.aiYaw  — required (radians, ship.js convention)
+ * @param {Array}  args.asteroids — required (array of duck-typed entities)
+ * @param {{x,z}?} args.powerupPos — optional; falling null = no powerup in scene
+ * @param {{x,z}?} args.powerupVel — optional; defaults to {0,0}
+ * @param {number} args.evadeDist, args.powerupMaxChaseDist,
+ *               args.thrustHeadingGate, args.yawDeadband,
+ *               args.fireHeadingGate, args.fireMinDist, args.fireMaxDist,
+ *               args.bulletSpeed — optional; fall through to AI_TUNABLES
+ * @returns {{ yaw, thrust, mode, fire, reason }}
  */
 export function aiBrainTick({
   aiPos,
@@ -708,9 +358,6 @@ export function aiBrainTick({
   asteroids,
   powerupPos = null,
   powerupVel = null,
-  stickyPowerupPos = null,
-  stickyPowerupTime = 0,
-  aiVel = null,
   evadeDist = AI_TUNABLES.evadeDist,
   powerupMaxChaseDist = AI_TUNABLES.powerupMaxChaseDist,
   thrustHeadingGate = AI_TUNABLES.thrustHeadingGate,
@@ -718,81 +365,42 @@ export function aiBrainTick({
   fireHeadingGate = AI_TUNABLES.fireHeadingGate,
   fireMinDist = AI_TUNABLES.fireMinDist,
   fireMaxDist = AI_TUNABLES.fireMaxDist,
-  activeWeapon = API_DEFAULTS.activeWeapon,
-  laserFireHeadingGate = AI_TUNABLES.laserFireHeadingGate,
   bulletSpeed = AI_TUNABLES.bulletSpeed,
-  asteroidSizeBias = AI_TUNABLES.asteroidSizeBias,
-  powerupThrustGate = AI_TUNABLES.powerupThrustGate,
-  powerupStickyTime = AI_TUNABLES.powerupStickyTime,
-  forwardConeHalfAngle = AI_TUNABLES.forwardConeHalfAngle,
-  powerupNearBehindThreshold = AI_TUNABLES.powerupNearBehindThreshold,
-  powerupCruiseSpeed = AI_TUNABLES.powerupCruiseSpeed,
-  powerupMinApproachSpeed = AI_TUNABLES.powerupMinApproachSpeed,
-  powerupApproachGain = AI_TUNABLES.powerupApproachGain,
-  powerupBrakeSafetyFactor = AI_TUNABLES.powerupBrakeSafetyFactor,
-  powerupVelocityErrorThreshold = AI_TUNABLES.powerupVelocityErrorThreshold,
-  powerupFinalApproachDist = AI_TUNABLES.powerupFinalApproachDist,
-  powerupFinalApproachSpeed = AI_TUNABLES.powerupFinalApproachSpeed,
-  aiAngularVel = API_DEFAULTS.aiAngularVel,
 } = {}) {
   if (!aiPos) throw new Error('aiBrainTick: aiPos is required');
   if (typeof aiYaw !== 'number') throw new Error('aiBrainTick: aiYaw must be a number');
   if (!Array.isArray(asteroids)) throw new Error('aiBrainTick: asteroids must be an array');
 
-  const ctx = buildContext({
-    aiPos,
-    aiYaw,
-    asteroids,
-    powerupPos,
-    powerupVel,
-    stickyPowerupPos,
-    stickyPowerupTime,
-    aiVel,
-    evadeDist,
-    powerupMaxChaseDist,
-    thrustHeadingGate,
-    yawDeadband,
-    fireHeadingGate,
-    fireMinDist,
-    fireMaxDist,
-    activeWeapon,
-    laserFireHeadingGate,
+  const args = {
+    aiPos, aiYaw, asteroids,
+    powerupPos, powerupVel,
+    evadeDist, powerupMaxChaseDist,
+    thrustHeadingGate, yawDeadband,
+    fireHeadingGate, fireMinDist, fireMaxDist,
     bulletSpeed,
-    asteroidSizeBias,
-    forwardConeHalfAngle,
-    powerupNearBehindThreshold,
-    powerupThrustGate,
-    powerupStickyTime,
-    powerupCruiseSpeed,
-    powerupMinApproachSpeed,
-    powerupApproachGain,
-    powerupBrakeSafetyFactor,
-    powerupVelocityErrorThreshold,
-    powerupFinalApproachDist,
-    powerupFinalApproachSpeed,
-    aiAngularVel,
-  });
-
-  const { decision } = selectBehavior(ctx);
-  decision.fire = evaluateFire(ctx);
-  return decision;
+  };
+  const snap = evaluatePerception(args);
+  for (const b of BEHAVIORS) {
+    const decision = b.run(snap, args);
+    if (decision) {
+      decision.fire = evaluateFire(args);
+      return decision;
+    }
+  }
+  // Should never reach here (idle always returns), but keep the
+  // fallback for behavior-registry safety.
+  return { yaw: 0, thrust: false, mode: 'idle', fire: false, reason: 'no behavior fired' };
 }
 
-// --------------------------------------------------------------------------
-// Factory helpers
-// --------------------------------------------------------------------------
+// ------------------------------------------------------------------
+// Factory helpers (unchanged API surface)
+// ------------------------------------------------------------------
 
-/**
- * Decide whether the AI has drifted too far from origin.
- */
 export function shouldResetAi(pos, resetDist = FACTORY_DEFAULTS.resetDist) {
   if (!pos) return false;
   return Math.hypot(pos.x, pos.z) > resetDist;
 }
 
-/**
- * Build a random spawn position within `radius` of the origin.
- */
 export function pickAiSpawn(radius = FACTORY_DEFAULTS.spawnRadius, rng = Math.random) {
   const angle = rng() * Math.PI * 2;
   const r = radius * (0.4 + rng() * 0.6);
@@ -802,32 +410,40 @@ export function pickAiSpawn(radius = FACTORY_DEFAULTS.spawnRadius, rng = Math.ra
   };
 }
 
-// --------------------------------------------------------------------------
-// Demo AI factory
-// --------------------------------------------------------------------------
+// ------------------------------------------------------------------
+// Demo AI factory (same API surface, simplified internals)
+// ------------------------------------------------------------------
 
 /**
- * Create a demo AI ship. Wires the brain to a live ship.
+ * Create a demo AI ship. Wires the pure brain to a live ship.
  *
  * @param {object} cfg
- * @param {THREE.Scene} cfg.scene            Required.
- * @param {Array}      cfg.asteroids         Required.
- * @param {object?}    cfg.weapon            Duck-typed `{ fire(opts) }`.
- * @param {function?}  cfg.getPowerupPos     () => { x, z } | null
- * @param {function?}  cfg.getPowerupVel     () => { x, z }
- * @param {function?}  cfg.getActiveWeapon   () => 'bullet' | 'laser'
- * @param {object?}    cfg.options           Per-AI overrides:
- *     - resetDist, spawnRadius (factory-only)
- *     - any brain tunable (overrides live AI_TUNABLES for tests)
+ * @param {THREE.Scene} cfg.scene — required.
+ * @param {Array}      cfg.asteroids — required.
+ * @param {object?}    cfg.weapon — duck-typed `{ fire(opts) }`.
+ * @param {function?}  cfg.getPowerupPos — () => { x, z } | null
+ * @param {function?}  cfg.getPowerupVel — () => { x, z }
+ * @param {function?}  cfg.getActiveWeapon — () => 'bullet' | 'laser'
+ * @param {object?}    cfg.options — per-AI overrides:
+ *     - resetDist, spawnRadius (factory-only, not in AI_TUNABLES)
+ *     - shipFactory, rng (test seam)
+ *     - any brain tunable (overrides AI_TUNABLES for this AI)
  */
-export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = null, getPowerupVel = null, getActiveWeapon = null, options = {} } = {}) {
+export function createDemoAi({
+  scene,
+  asteroids,
+  weapon = null,
+  getPowerupPos = null,
+  getPowerupVel = null,
+  getActiveWeapon = null,
+  options = {},
+} = {}) {
   if (!scene) throw new Error('createDemoAi: `scene` is required');
   if (!Array.isArray(asteroids)) throw new Error('createDemoAi: `asteroids` must be an array');
 
   const opts = { ...FACTORY_DEFAULTS, ...options };
   const rng = opts.rng || Math.random;
   const shipFactory = opts.shipFactory || createShip;
-  const brain = opts.brain || null;
 
   const initial = pickAiSpawn(opts.spawnRadius, rng);
   const ship = shipFactory({ scene, position: initial.position });
@@ -836,8 +452,6 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
   let time = 0;
   let enabled = true;
   let lastMode = 'idle';
-  let stickyPowerupPos = null;
-  let stickyPowerupSince = 0;
   let lastDecision = {
     mode: 'idle',
     yaw: 0,
@@ -846,6 +460,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     reason: 'not yet ticked',
     activeWeapon: 'bullet',
     target: null,
+    predictedPos: null,
     nearest: null,
     threatsCount: 0,
   };
@@ -856,29 +471,6 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     ship.rotation.yaw = opts.spawnYaw;
   }
 
-  /**
-   * Build a fresh brain-args object every tick. v0.49.0 simplification:
-   * the live-tunable lookup is delegated entirely to `aiBrainTick`'s
-   * default-parameter destructuring (`evadeDist = AI_TUNABLES.evadeDist,
-   * ...`), so this function only needs to forward the ship-derived
-   * runtime state + the explicitly-passed factory overrides from
-   * `opts` (resetDist, spawnRadius, spawnYaw, + any user-supplied
-   * per-AI overrides for tests).
-   *
-   * Precedence (unchanged from v0.47.0):
-   *   1. Caller explicitly passes `evadeDist: 50` (in args) → 50 wins.
-   *   2. Factory time: `options.evadeDist = 30` (via `opts`) → 30 wins.
-   *   3. Otherwise: `aiBrainTick`'s default destructures
-   *      `evadeDist = AI_TUNABLES.evadeDist`, reading the LIVE bag.
-   *      A slider drag (`AI_TUNABLES.evadeDist = 100`) is visible on
-   *      the very next brain frame.
-   *
-   * Previously this function enumerated 19 `o.X ?? AI_TUNABLES.X` lines
-   * inline. The duplication made the source of truth ambiguous and
-   * obscured a thin test-mock round-7 quirk (now resolved). The
-   * refactor keeps the line count low and ships a single fallback
-   * pathway through `aiBrainTick`.
-   */
   function brainArgsFromShip() {
     return {
       aiPos: ship.position,
@@ -886,15 +478,6 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       asteroids,
       powerupPos: getPowerupPos ? getPowerupPos() : null,
       powerupVel: getPowerupVel ? getPowerupVel() : { x: 0, z: 0 },
-      stickyPowerupPos,
-      stickyPowerupTime: time - stickyPowerupSince,
-      aiVel: ship.velocity,
-      aiAngularVel: ship.angularVelocity,
-      activeWeapon: getActiveWeapon ? getActiveWeapon() : API_DEFAULTS.activeWeapon,
-      // Factory overrides (resetDist, spawnRadius, spawnYaw, +
-      // any explicit per-AI overrides from `options`). The brain's
-      // default-parameter destructuring handles the live-bag fallback
-      // for unset keys.
       ...opts,
     };
   }
@@ -909,20 +492,26 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     }
 
     const args = brainArgsFromShip();
-    const decision = brain ? brain.tick(args) : aiBrainTick(args);
+    const decision = aiBrainTick(args);
     lastMode = decision.mode;
 
-    if (decision.mode === 'powerup' && args.powerupPos) {
-      stickyPowerupPos = args.powerupPos;
-      stickyPowerupSince = time;
-    } else if (stickyPowerupPos) {
-      const stickyAge = time - stickyPowerupSince;
-      if (stickyAge > args.powerupStickyTime) {
-        stickyPowerupPos = null;
-      }
+    // Build the debug-overlay-friendly snapshot (target + predictedPos
+    // + nearest + threatsCount). Kept identical to the previous
+    // API surface so the debug overlay continues to render.
+    const snap = evaluatePerception(args);
+    const nearest = snap.nearestAst;
+    let target = null;
+    if (decision.mode === 'powerup' && snap.nearestPw) {
+      target = { pos: snap.nearestPw.pos, mode: 'powerup', dist: snap.nearestPw.dist };
+    } else if ((decision.mode === 'asteroid' || decision.mode === 'evade') && nearest) {
+      target = { pos: nearest.pos, mode: 'asteroid', dist: nearest.dist };
     }
-
-    const nearest = findNearestAsteroid(ship.position, asteroids);
+    let predictedPos = null;
+    if (target && target.mode === 'asteroid') {
+      predictedPos = predictAsteroidPosition(nearest.item, args.aiPos, args.bulletSpeed);
+    } else if (target && target.mode === 'powerup') {
+      predictedPos = predictPosition(snap.nearestPw, args.aiPos, args.bulletSpeed);
+    }
     let threatsCount = 0;
     for (const a of asteroids) {
       if (!a || typeof a.getPosition !== 'function') continue;
@@ -932,42 +521,18 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       if (d < args.evadeDist) threatsCount += 1;
     }
 
-    const target = pickTarget({
-      aiPos: ship.position,
-      aiYaw: ship.rotation.yaw,
-      asteroids,
-      powerupPos: args.powerupPos,
-      stickyPowerupPos,
-      powerupMaxChaseDist: args.powerupMaxChaseDist,
-      asteroidSizeBias: args.asteroidSizeBias,
-      forwardConeHalfAngle: args.forwardConeHalfAngle,
-      powerupNearBehindThreshold: args.powerupNearBehindThreshold,
-    });
-
-    let predictedPos = null;
-    if (target && target.mode === 'asteroid') {
-      const targetAsteroid = asteroids.find((a) => {
-        if (!a || typeof a.getPosition !== 'function') return false;
-        const p = a.getPosition();
-        if (!p) return false;
-        return Math.hypot(p.x - target.pos.x, p.z - target.pos.z) < 0.001;
-      });
-      if (targetAsteroid) {
-        predictedPos = predictAsteroidPosition(targetAsteroid, ship.position, args.bulletSpeed);
-      }
-    }
-
     lastDecision = {
       mode: decision.mode,
       yaw: decision.yaw,
       thrust: decision.thrust,
       fire: decision.fire,
-      braking: !!decision.braking,
       reason: decision.reason || '',
-      activeWeapon: args.activeWeapon,
+      activeWeapon: getActiveWeapon ? getActiveWeapon() : 'bullet',
       target: target ? { pos: { ...target.pos }, mode: target.mode, dist: target.dist } : null,
       predictedPos: predictedPos ? { ...predictedPos } : null,
-      nearest: nearest ? { pos: { x: nearest.dx + ship.position.x, z: nearest.dz + ship.position.z }, dist: nearest.dist } : null,
+      nearest: nearest
+        ? { pos: { x: nearest.dx + ship.position.x, z: nearest.dz + ship.position.z }, dist: nearest.dist }
+        : null,
       threatsCount,
     };
 
@@ -999,10 +564,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     getShip: () => ship,
     setEnabled: (v) => { enabled = !!v; },
     isEnabled: () => enabled,
-    getMode: () => {
-      const args = brainArgsFromShip();
-      return brain ? brain.tick(args).mode : aiBrainTick(args).mode;
-    },
+    getMode: () => aiBrainTick(brainArgsFromShip()).mode,
     getLastMode: () => lastMode,
     getLastDecision: () => Object.freeze({
       mode: lastDecision.mode,
@@ -1017,6 +579,9 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
             mode: lastDecision.target.mode,
             dist: lastDecision.target.dist,
           })
+        : null,
+      predictedPos: lastDecision.predictedPos
+        ? Object.freeze({ ...lastDecision.predictedPos })
         : null,
       nearest: lastDecision.nearest
         ? Object.freeze({

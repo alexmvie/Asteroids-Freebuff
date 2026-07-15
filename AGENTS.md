@@ -471,6 +471,29 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
 
 
 - [x] **v0.33.x (Powerup-Priority + Coast-In Controller)** — `src/entities/ai.js` + `tests/ai.test.js` + `LOG.md` (NEW). Addresses two fundamental problems from v0.30.x–v0.32.x: (1) AI couldn't collect powerups efficiently (`powerupBiasU: 15` — purely opportunistic), (2) AI couldn't shoot all asteroids (fire cone 0.10 rad = 5.7°). v0.33.x strategy: powerups ALWAYS priority (`powerupBiasU: 9999`), wide fire cone (`fireHeadingGate: 0.35` rad = 20°), coast-in with closing-speed gate (`coastDist: 60u`, `COAST_SPEED_THRESHOLD: 30 u/s`), wide thrust gate (`thrustHeadingGate: 0.50`), no minimum fire distance (`fireMinDist: 0`), wider evade zone (`evadeDist: 12`). Mode priority: EVADE → POWERUP → ASTEROID → IDLE. Key innovation: coast-in uses CLOSING SPEED (dot product of velocity with line-of-sight direction) — perpendicular motion doesn't trigger coast-in. At low closing speed (<30 u/s) within coastDist, ship still thrusts (prevents creeping). **72 AI tests pass** (was 70, +2 net). **LOG.md** is a new performance protocol documenting tuning history, success criteria, and iteration guidelines. Browser smoke test: AI visibly chases powerups, score rises steadily.
+- [x] **v0.55.0 -- Clean-Room AI Rewrite (4 behaviors, 9 tunables, behavior registry for future extension)** -- `src/entities/ai.js` rewritten (~600 LOC from 1180 LOC), `src/entities/ai-tunables.js` slimmed to 9 keys (was 22), `tests/ai.test.js` rewritten (~40 tests, was ~85), `src/version-constants.js`, `LOG.md`, `AGENTS.md`. The user reported the demo AI was "still useless" and overcomplicated after v0.20.x-v0.54.x -- 17 minor revisions kept layering patches (BRAKE branch, lookahead dodge, target commitment, velocity-error controller, angular-velocity overshoot prediction, final-approach guard, sticky powerup commitment, size-bias, distance-gated fire, laser heading gate, per-behavior tunable overrides) on top of an already-fragile base. v0.55.0 deletes most of it. New brain is intentional-minimal:
+
+  **Architecture:** 1) Pure helpers (facingAngle, wrapAngle, predictPosition universal, isTargetInFront, findNearest). 2) `evaluatePerception(args)` -> snapshot { nearestAst, nearestPw }. Add fields here when new target types appear (ships, stations). 3) `BEHAVIORS` open-ended registry (priority-ordered): `[{ name:'evade', run }, { name:'collect', run }, { name:'engage', run }, { name:'idle', run }]`. Insert a new behavior at the right priority slot to add pirate/lander/formation-flying modes -- no other code changes needed. 4) `aiBrainTick(args)` pure decision mapper: build snapshot, walk BEHAVIORS in order, return first non-null decision with `fire` set by independent fire loop.
+
+  **Behavior details:**
+  - **EVADE**: nearest asteroid within `evadeDist` -> turn 90 degrees perpendicular, force-thrust (always, even if misaligned). Single tunable.
+  - **COLLECT**: reachable powerup -> `predictPosition` -> `steerTo` -> thrust when aligned. `POWERUP_COAST_DIST=5u` single hardcoded coast-in gate prevents overshoot at high cruise speed. Universal prediction code path handles moving powerups if they ever drift.
+  - **ENGAGE**: nearest asteroid -> `predictAsteroidPosition` (duck-typed -> universal predictPosition) -> `steerTo` -> thrust when aligned. Lead fire is automatic via the same universal prediction.
+  - **IDLE**: no targets in range -> do nothing.
+
+  **Universal `steerTo(args, targetPos, { forceThrust })`** is the single actuation helper. Computes `wrapAngle(targetAngle - facingAngle(aiYaw))`, returns `{ yaw: {-1,0,+1}, thrust, err }`. Yaw=0 inside `yawDeadband`, thrust=0 outside `thrustHeadingGate` (unless forced). One helper, three behaviors.
+
+  **Independent fire loop**: scans ALL asteroids, predicts each, fires on any in-cone in-range. Decoupled from chase target so the ship shoots while chasing powerups.
+
+  **Purged compared to v0.46.x-v0.49.x:** `pickTarget` with sticky commitment + size bias + stickyPowerupPos; `collectBehavior` 5-step velocity-error controller (adaptive horizon + exponential-drag prediction + braking-envelope velocity + velocity-error vector + final-approach guard); `engageBehavior` adaptive closing-speed throttle; `steerToward` angular-velocity (YAW_INERTIA_TAU) overshoot prediction; per-behavior tunable layers; 13 of 22 AI_TUNABLES keys.
+
+  **Honest pushback from the thinker**: pure "turn + thrust" without braking CAN overshoot at high cruise (200 u/s vs LINEAR_DRAG=0.4 gives 500u stopping distance). v0.55.0 addresses this with ONE honest brake -- the coast-in gate within `POWERUP_COAST_DIST=5u` of stationary pickups. Asteroids are predicted by bullet-arrival math, so they don't need a coast gate. Trade-off documented: this single brake beats the prior 5-step velocity-error controller that wasn't actually working.
+
+  **Files unchanged (consumer compat):** `src/main.js` (factory + close-hooks wiring), `src/ui/ai-debug-overlay.js` (`getLastDecision` shape preserved: `{ mode, yaw, thrust, fire, reason, activeWeapon, target, predictedPos, nearest, threatsCount }`), `src/systems/ai-flight-debug.js`, `src/ui/ai-tuners-panel.js` (live-bag contract unchanged -- sliders now drive 9 keys instead of 22). Ship factory (`src/entities/ship.js`) and `YAW_INERTIA_TAU` (=0.2) unchanged; AI no longer reads `angularVelocity`.
+
+  **What this unblocks**: pirate AI (`{ name:'pirate', run: (s, a) => steerTo(a, predictPosition(s.nearestShip, a.aiPos, a.bulletSpeed)) }`), station landing, formation flying, all without touching the core loop.
+
+
 ### ⏳ Next Steps (priority order)
 
 1. **Spatial hash** — `src/systems/collision.js` (broad-phase): uniform grid keyed by world position. The narrow-phase step is already in place; this is the O(1) candidate-selection layer above it.

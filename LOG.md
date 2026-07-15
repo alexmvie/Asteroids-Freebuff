@@ -1,3 +1,45 @@
+## v0.55.0 -- Clean-Room AI Rewrite (4 behaviors, 9 tunables, behavior registry for future extension)
+
+**User request:** "the current ai bahaviour is still useless. asteroids is really a simple game. the ship wanders through space. as a object is within radius it shoots or collects. priority to collect. it evades asteroids. it predicts the flight path of objects and moves to that target. that target is updated regularly as the flight path could change due colissions. so nothing fancy. what did you overcomplicate in our ai controller? keep it simple, let it open for adding features like not beeing a demo ship but beeing an ai pirate attacking other ships, asteroids, colelcting extras, landing on space stations, whatever we might come up with. but its important to have a perfect basement ai controller. spawn up whatever strong thinker you can get to plan this or enhance existing code"
+
+### What we overcomplicated (diagnosis)
+
+The v0.20.x-v0.54.x line layered 17+ minor patches onto a fragile base. Each fix added tunables and branching that interacted antagonistically:
+- `pickTarget` with stickyPowerupPos + size bias + stickyPowerupTime (state that survived across ticks)
+- `collectBehavior` 5-step velocity-error controller (adaptive horizon, exponential-drag prediction, braking-envelope velocity, velocity-error vector, final-approach guard) -- 6 inline magic numbers per call
+- `engageBehavior` adaptive closing-speed throttle + spin-brake prediction
+- `steerToward` with angular-velocity (YAW_INERTIA_TAU) overshoot counter-steer
+- 22 AI_TUNABLES keys, most of them behavior-specific
+- `buildContext` duplicates 19 tunable reads every tick
+- `brainArgsFromShip` threads ~20 keys from ship + opts + live bag
+
+### What shipped
+
+A clean 4-mode brain (IDLE / ENGAGE / COLLECT / EVADE) over universal `predictPosition` + `steerTo` helpers:
+1. **Perception** (`evaluatePerception`) turns raw world state into `{ nearestAst, nearestPw }`
+2. **Behavior registry** (`BEHAVIORS`) -- open-ended priority-ordered list. New behaviors slot in by appending.
+3. **Universal `steerTo(args, targetPos)`** computes `{ yaw, thrust, err }` from a single wrapAngle delta.
+4. **Independent fire loop** scans ALL asteroids, predicts each, fires on any in cone + range.
+
+`AI_TUNABLES` slimmed to 9 keys: `fireHeadingGate, fireMinDist, fireMaxDist, bulletSpeed, thrustHeadingGate, yawDeadband, evadeDist, powerupMaxChaseDist, shipMaxSpeed`.
+
+**Honest pushback acknowledged**: pure turn+thrust CAN overshoot at 200 u/s (LINEAR_DRAG=0.4 = 500u stopping distance). v0.55.0 adds ONE honest brake: a hardcoded `POWERUP_COAST_DIST=5u` that cuts thrust when within pickup radius. Asteroids don't need it (predicted at bullet flight time).
+
+### Future extension seam
+
+The behavior registry is the open-ended seam. Adding pirate AI / station lander / formation fly means appending to `BEHAVIORS`:
+```
+{ name:'pirate', run: (snap, args) => steerTo(args, predictPosition(snap.nearestShip, args.aiPos, args.bulletSpeed)) }
+```
+No core-loop changes.
+
+### Validation
+
+- 493/493 tests pass (`npm test`)
+- `npm run build` succeeds
+- Code-reviewer verdict: ship-able
+- AGENTS.md + LOG.md entries added
+
 ## v0.50.0 -- Collapsible Debug Column on Left + UV Editor/Viewer Cleanup
 
 **User request:** "remove the UV editor and viewer and all of its code from our project - we will not use it anymore - be sure not to destroy code. be sure not to leave zombie code" (previous turn, finished in this commit) + "combine the radar and ebug card to a column to the left screen. do not mix the code. jsut define a 2 row column and put them there in equal width. make them collapsible to a litte quad on the top left" (this turn).
