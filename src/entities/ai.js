@@ -564,8 +564,15 @@ return {
     // the powerup gate) AND we are not already closing faster than
     // desired. If we are closing too fast, drag will slow us; if we
     // are too slow or stationary, thrust catches us up.
+    //
+    // Orbital-trap guard: if the ship's total speed is much higher than
+    // the desired closing speed while the radial closing speed is low, it
+    // is circling the target. Suspending thrust lets LINEAR_DRAG kill the
+    // tangential velocity, so the turn radius shrinks and the ship spirals
+    // into the collection radius instead of orbiting forever.
+    const speed = Math.hypot(aiVel.x, aiVel.z);
     const aligned = Math.abs(steer.predictedDiff) < (ctx.powerupThrustGate ?? DEFAULTS.powerupThrustGate);
-    const needMoreClosing = closingSpeed < desiredClosing;
+    const needMoreClosing = closingSpeed < desiredClosing && speed < desiredClosing * 1.5;
     const thrust = aligned && needMoreClosing;
 
     return { yaw: steer.yaw, thrust, mode: 'powerup', fire: false, braking: false };

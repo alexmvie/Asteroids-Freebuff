@@ -789,6 +789,26 @@ test('collectBehavior: thrusts when aligned and closing slower than desired', ()
   assert.equal(result.thrust, true, 'must thrust when aligned and closing slowly');
 });
 
+test('collectBehavior: stops thrusting when orbiting a nearby powerup', () => {
+  // Orbital-trap scenario: ship is close to the powerup but moving
+  // sideways (high tangential velocity, near-zero closing speed).
+  // Thrusting would only sustain the orbit, so the AI must cut thrust
+  // and let LINEAR_DRAG kill the sideways velocity.
+  const ctx = {
+    target: { mode: 'powerup', pos: { x: 10, z: 0 } },
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 30 },
+    powerupVel: { x: 0, z: 0 },
+    powerupThrustGate: 0.10,
+    yawDeadband: 0.10,
+    aiAngularVel: 0,
+  };
+  const result = collectBehavior(ctx);
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.thrust, false, 'must not thrust while orbiting; let drag break the orbit');
+});
+
 test('collectBehavior: predicts powerup velocity', () => {
   const ctx = {
     target: { mode: 'powerup', pos: { x: 20, z: 0 } },

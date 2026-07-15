@@ -247,6 +247,23 @@ Drei Scripts für automatisierte Game-Analyse ohne manuelles Eingreifen:
 
 ---
 
+### v0.45.1 — AI Powerup Orbit Trap Fix
+
+**Problem:** User reported a powerup in short distance that the AI ship could not collect: the ship was under constant acceleration, flying in a circle, and the distance to the powerup did not change. This is a classic orbital trap caused by the powerup collection controller.
+
+**Root cause:** `collectBehavior` in `src/entities/ai.js` used `closingSpeed < desiredClosing` to decide whether to thrust. When the ship was circling a nearby powerup, its velocity was mostly tangential, so `closingSpeed` was near zero. The controller interpreted this as "too slow" and applied forward thrust, which acted as a centripetal force and sustained the orbit indefinitely.
+
+**Fix:**
+- Added an total-speed guard: `speed < desiredClosing * 1.5`.
+- When the ship's total speed is much higher than the desired radial closing speed while the closing speed is low, the ship is clearly orbiting. Suspending thrust lets `LINEAR_DRAG` decay the tangential velocity, shrinking the turn radius and allowing the ship to spiral into the collection radius.
+
+**Files changed:**
+- `src/entities/ai.js` — `collectBehavior` now computes `speed = Math.hypot(aiVel.x, aiVel.z)` and gates `needMoreClosing` on `speed < desiredClosing * 1.5`.
+- `tests/ai.test.js` — added regression test "collectBehavior: stops thrusting when orbiting a nearby powerup".
+
+**Validation:**
+- 487 tests pass, build succeeds.
+
 *Last updated: v0.43.0 — AI Powerup Collection Final Fix (485 tests)*
 
 ---
