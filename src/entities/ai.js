@@ -390,18 +390,49 @@ function buildContext(args) {
 // --------------------------------------------------------------------------
 
 /**
+ * Compute the signed heading error from the ship's facing to a target.
+ * Positive means the target is to the left of the facing vector.
+ */
+function headingErrorToTarget(ctx, targetPos) {
+  const dx = targetPos.x - ctx.aiPos.x;
+  const dz = targetPos.z - ctx.aiPos.z;
+  const faceAngle = Math.atan2(dz, dx);
+  return wrapAngle(faceAngle - facingAngle(ctx.aiYaw));
+}
+
+/**
+ * Compute the projection of the ship's velocity onto the line to the
+ * target. Positive = moving toward the target, negative = moving away.
+ */
+function closingSpeedToTarget(ctx, targetPos) {
+  const aiVel = ctx.aiVel || { x: 0, z: 0 };
+  const dx = targetPos.x - ctx.aiPos.x;
+  const dz = targetPos.z - ctx.aiPos.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist < 0.001) return 0;
+  return (aiVel.x * dx + aiVel.z * dz) / dist;
+}
+
+/**
  * Turn toward a target position and thrust when aligned.
  * Shared by ENGAGE and COLLECT.
  *
  * Uses angular-velocity prediction to counter-steer before the ship's
  * angular momentum can overshoot the target. This removes the visible
  * left/right wobble caused by YAW_INERTIA_TAU.
+ *
+ * If `opts.desiredClosingSpeed` is provided, thrust is gated on the
+ * current closing speed too: the ship coasts when it is already
+ * closing faster than desired, and thrusts when it is slower. This
+ * prevents overshoot and gives the AI real speed management.
  */
-export function steerToward(ctx, targetPos, mode) {
-  const dx = targetPos.x - ctx.aiPos.x;
-  const dz = targetPos.z - ctx.aiPos.z;
-  const faceAngle = Math.atan2(dz, dx);
-  const targetDiff = wrapAngle(faceAngle - facingAngle(ctx.aiYaw));
+export function steerToward(ctx, targetPos, mode, opts = {}) {
+  const {
+    desiredClosingSpeed = null,
+    thrustGate = ctx.thrustHeadingGate,
+  } = opts;
+
+  const targetDiff = headingErrorToTarget(ctx, targetPos);
 
   // Predict where the heading will be one yaw time-constant from now,
   // so the AI starts counter-steering before the ship overshoots.
@@ -412,34 +443,67 @@ export function steerToward(ctx, targetPos, mode) {
   const yaw = predictedDiff > yawDeadband ? -1 : predictedDiff < -yawDeadband ? 1 : 0;
   // Use the predicted heading for thrust too: if the ship is about to
   // overshoot the target, don't accelerate into the overshoot.
-  const thrust = Math.abs(predictedDiff) < ctx.thrustHeadingGate;
+  let thrust = Math.abs(predictedDiff) < thrustGate;
+
+  // Speed management: if a desired closing speed was requested, only
+  // thrust when we are closing slower than desired. Linear drag will
+  // naturally slow us down when thrust is off.
+  if (thrust && desiredClosingSpeed !== null) {
+    const closing = closingSpeedToTarget(ctx, targetPos);
+    thrust = closing < desiredClosingSpeed;
+  }
 
   return { yaw, thrust, mode, fire: false, braking: false, predictedDiff };
 }
 
 /**
- * EVADE behavior: something is very close — thrust perpendicular away.
+ * EVADE behavior: something is very close — get away safely.
+ *
+ * If the ship is drifting toward the threat, turn retrograde (away
+ * from the threat) and thrust to cancel the closing velocity. If the
+ * ship is already drifting away, thrust perpendicular to widen the
+ * gap. This is much safer than always thrusting 90° perpendicular,
+ * which can carry the ship straight into the threat if it was
+ * already moving toward it.
  */
 export function evadeBehavior(ctx) {
   const nearest = ctx.nearest;
   if (!nearest || nearest.dist >= ctx.evadeDist) return null;
 
+  const aiVel = ctx.aiVel || { x: 0, z: 0 };
+  const closing = (aiVel.x * nearest.dx + aiVel.z * nearest.dz) / Math.max(nearest.dist, 0.001);
+
+  let targetDiff;
+  if (closing > -5) {
+  // Moving toward the threat (or only slowly away): turn directly
+  // away from it and thrust hard.
+  const escapeAngle = Math.atan2(-nearest.dz, -nearest.dx);
+  targetDiff = wrapAngle(escapeAngle - facingAngle(ctx.aiYaw));
+} else {
+  // Already moving away: thrust perpendicular to widen the gap
+  // while preserving escape velocity.
   const threatAngle = Math.atan2(nearest.dz, nearest.dx);
   const escapeAngle = threatAngle + Math.PI / 2;
-  const targetDiff = wrapAngle(escapeAngle - facingAngle(ctx.aiYaw));
+  targetDiff = wrapAngle(escapeAngle - facingAngle(ctx.aiYaw));
+}
 
-  // Same angular-velocity prediction as steerToward to avoid overshoot.
-  const angularVel = ctx.aiAngularVel || 0;
-  const predictedDiff = wrapAngle(targetDiff + angularVel * YAW_INERTIA_TAU);
-  const yawDeadband = ctx.yawDeadband ?? 0.10;
+// Same angular-velocity prediction as steerToward to avoid overshoot.
+const angularVel = ctx.aiAngularVel || 0;
+const predictedDiff = wrapAngle(targetDiff + angularVel * YAW_INERTIA_TAU);
+const yawDeadband = ctx.yawDeadband ?? 0.10;
 
-  return {
-    yaw: predictedDiff > yawDeadband ? -1 : predictedDiff < -yawDeadband ? 1 : 0,
-    thrust: true,
-    mode: 'evade',
-    fire: false,
-    braking: false,
-  };
+// Thrust if roughly aligned, OR if the threat is very close and
+// we need to get away now regardless of facing.
+const veryClose = nearest.dist < ctx.evadeDist * 0.5;
+const thrust = Math.abs(predictedDiff) < 0.6 || veryClose;
+
+return {
+  yaw: predictedDiff > yawDeadband ? -1 : predictedDiff < -yawDeadband ? 1 : 0,
+  thrust,
+  mode: 'evade',
+  fire: false,
+  braking: false,
+};
 }  /**
    * COLLECT behavior: chase and collect a powerup.
    *
@@ -508,11 +572,44 @@ export function evadeBehavior(ctx) {
   }
 
 /**
- * ENGAGE behavior: chase the best asteroid.
+ * ENGAGE behavior: chase the best asteroid with velocity-aware
+ * approach control.
+ *
+ * Far away the ship sprints toward the target; close to the target
+ * it coasts in so it doesn't fly past. The desired closing speed is
+ * a function of distance: arrive fast, then brake with drag.
  */
 export function engageBehavior(ctx) {
   if (!ctx.target || ctx.target.mode !== 'asteroid') return null;
-  return steerToward(ctx, ctx.target.pos, 'asteroid');
+  const targetPos = ctx.target.pos;
+
+  const dx = targetPos.x - ctx.aiPos.x;
+  const dz = targetPos.z - ctx.aiPos.z;
+  const dist = Math.hypot(dx, dz);
+
+  // Desired closing speed ramps with distance:
+  //   - at 0u:  5 u/s (minimum, keeps the ship responsive)
+  //   - at 50u: 20 u/s
+  //   - at 150u+: 60 u/s cap
+  // This is intentionally conservative relative to MAX_SPEED so the
+  // ship can still turn and fire accurately.
+  const minApproach = 5;
+  const maxApproach = 60;
+  const desiredClosing = Math.max(
+    minApproach,
+    Math.min(maxApproach, dist * 0.4),
+  );
+
+  // Widen the thrust gate for asteroids so the ship can turn AND
+  // thrust at the same time (classic Asteroids feel). The old 0.2
+  // rad gate forced the ship to stop turning before thrusting,
+  // making it sluggish.
+  const thrustGate = Math.min(0.5, (ctx.thrustHeadingGate ?? 0.2) * 2.5);
+
+  return steerToward(ctx, targetPos, 'asteroid', {
+    desiredClosingSpeed: desiredClosing,
+    thrustGate,
+  });
 }
 
 /**
@@ -801,6 +898,21 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       powerupNearBehindThreshold: opts.powerupNearBehindThreshold,
     });
 
+    // Compute the lead-fire predicted intercept point for the chase
+    // target (asteroids only — powerups are static and don't need lead).
+    let predictedPos = null;
+    if (target && target.mode === 'asteroid') {
+      const targetAsteroid = asteroids.find((a) => {
+        if (!a || typeof a.getPosition !== 'function') return false;
+        const p = a.getPosition();
+        if (!p) return false;
+        return Math.hypot(p.x - target.pos.x, p.z - target.pos.z) < 0.001;
+      });
+      if (targetAsteroid) {
+        predictedPos = predictAsteroidPosition(targetAsteroid, ship.position, opts.bulletSpeed);
+      }
+    }
+
     lastDecision = {
       mode: decision.mode,
       yaw: decision.yaw,
@@ -809,6 +921,7 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       braking: !!decision.braking,
       activeWeapon: args.activeWeapon,
       target: target ? { pos: { ...target.pos }, mode: target.mode, dist: target.dist } : null,
+      predictedPos: predictedPos ? { ...predictedPos } : null,
       nearest: nearest ? { pos: { x: nearest.dx + ship.position.x, z: nearest.dz + ship.position.z }, dist: nearest.dist } : null,
       threatsCount,
     };

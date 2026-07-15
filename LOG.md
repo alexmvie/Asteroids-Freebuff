@@ -311,3 +311,35 @@ Drei Scripts für automatisierte Game-Analyse ohne manuelles Eingreifen:
 - 544 tests pass, build succeeds.
 - 60s browser capture: score 270, 4 asteroids destroyed, 2/3 powerups collected (was 0/0/0 before the fixes).
 
+
+---
+
+### v0.45.0 — AI Flight Maneuver Debug + Velocity-Aware Steering
+
+**Problem:** User reported the demo AI's flight maneuvers were still "unbrauchbar" — the ship wobbled, circled, or thrust without purpose.
+
+**Fixes:**
+- **`src/entities/ai.js` — velocity-aware steering:**
+  - `steerToward` now accepts `opts` with `desiredClosingSpeed` and `thrustGate`.
+  - `engageBehavior` uses distance-adaptive approach speed: `desiredClosing = clamp(dist * 0.4, 5, 60)` u/s. Far targets get a sprint; close targets coast in.
+  - `evadeBehavior` now reads the ship's closing velocity toward the threat. Moving toward the threat → turn retrograde and thrust away. Already moving away → thrust perpendicular to widen the gap.
+  - Angular-velocity prediction (`predictedDiff = wrapAngle(targetDiff + angularVel * YAW_INERTIA_TAU)`) is reused in evade to avoid overshoot.
+
+- **`src/systems/ai-flight-debug.js` — new 3D debug overlay:**
+  - Green line = ship velocity vector.
+  - Cyan line = ship forward heading.
+  - Yellow cross = current chase target.
+  - Magenta cross = lead-fire predicted intercept point.
+  - Red ring = emergency evade radius.
+
+- **`src/main.js` + `index.html` — wiring + toggle:**
+  - Added `AI FLIGHT: ON/OFF` button to the debug HUD.
+  - Exposed `window.AI_FLIGHT_DEBUG` getter/setter.
+  - Wired `predictedPos` from the AI's `lastDecision` into the overlay.
+
+- **Cleanup:**
+  - Removed orphaned `collision-cage-debug` references and duplicate `captureMarkers` declaration.
+  - Removed orphaned `debug-toggle-cage` button from `index.html`.
+
+**Validation:**
+- 486 tests pass, build succeeds.

@@ -41,6 +41,8 @@ import { createEditObjectScreen } from './systems/edit-object-screen.js';
 import { createPowerUpSystem } from './systems/powerup-system.js';
 import { createParticleSystem } from './systems/particles.js';
 import { createCaptureMarkers } from './systems/capture-markers.js';
+import { createAiFlightDebug } from './systems/ai-flight-debug.js';
+import { AI_TUNABLES } from './entities/ai-tunables.js';
 
 // ---- Power-up drop frequency -------------------------------------------
 // Probability (0.0–1.0) that an asteroid destroy spawns a laser
@@ -372,27 +374,18 @@ const particles = createParticleSystem({ scene });
 // debug HUD and via `window.CAPTURE_MARKERS`.
 const captureMarkers = createCaptureMarkers({ scene });
 
-// ---- Debug HUD: Collision cage toggle button ------------------------
-// Toggles the wireframe collision-sphere debugger. The button label
-// and `.debug-hud__toggle--on` class stay in sync when the state is
-// changed from the console via `window.COLLISION_CAGE`.
-const cageBtn = document.getElementById('debug-toggle-cage');
-if (cageBtn) {
-  const updateCageBtn = () => {
-    const on = collisionCage.isEnabled();
-    cageBtn.textContent = `CAGES: ${on ? 'ON' : 'OFF'}`;
-    cageBtn.classList.toggle('debug-hud__toggle--on', on);
-  };
-  cageBtn.addEventListener('click', () => {
-    collisionCage.setEnabled(!collisionCage.isEnabled());
-    updateCageBtn();
+// ---- AI flight debug (3D overlay) --------------------------------------
+// Visualises the AI's velocity vector, desired heading, and chase
+// target so bad maneuvers are obvious at a glance. Toggled via the
+// left debug HUD and via `window.AI_FLIGHT_DEBUG`.
+const aiFlightDebug = createAiFlightDebug({ scene });
+if (typeof window !== 'undefined') {
+  Object.defineProperty(window, 'AI_FLIGHT_DEBUG', {
+    configurable: true,
+    enumerable: true,
+    get() { return aiFlightDebug.isEnabled(); },
+    set(v) { aiFlightDebug.setEnabled(!!v); },
   });
-  const originalSetEnabled = collisionCage.setEnabled;
-  collisionCage.setEnabled = (v) => {
-    originalSetEnabled(v);
-    updateCageBtn();
-  };
-  updateCageBtn();
 }
 
 // ---- Debug HUD: Capture markers toggle button -------------------------
@@ -413,6 +406,26 @@ if (captureBtn) {
     updateCaptureBtn();
   };
   updateCaptureBtn();
+}
+
+// ---- Debug HUD: AI flight debug toggle button --------------------------
+const aiFlightBtn = document.getElementById('debug-toggle-ai-flight');
+if (aiFlightBtn) {
+  const updateAiFlightBtn = () => {
+    const on = aiFlightDebug.isEnabled();
+    aiFlightBtn.textContent = `AI FLIGHT: ${on ? 'ON' : 'OFF'}`;
+    aiFlightBtn.classList.toggle('debug-hud__toggle--on', on);
+  };
+  aiFlightBtn.addEventListener('click', () => {
+    aiFlightDebug.setEnabled(!aiFlightDebug.isEnabled());
+    updateAiFlightBtn();
+  });
+  const originalSetEnabled = aiFlightDebug.setEnabled;
+  aiFlightDebug.setEnabled = (v) => {
+    originalSetEnabled(v);
+    updateAiFlightBtn();
+  };
+  updateAiFlightBtn();
 }
 
 // ---- Demo AI -----------------------------------------------------------
@@ -1110,6 +1123,24 @@ function tick(dt) {
         powerup: powerupSystem.getPendingSpawn(),
       });
     }
+  }
+
+  // ---- AI flight debug (3D overlay) ------------------------------------
+  // Follow the AI demo ship in DEMO state and draw velocity + heading +
+  // target vectors. Toggle via `window.AI_FLIGHT_DEBUG = false`.
+  if (stateMachine.getState() === State.DEMO) {
+    const aiShipForDebug = (demoAi && demoAi.getShip()) || ship;
+    const aiDecision = demoAi && typeof demoAi.getLastDecision === 'function'
+      ? demoAi.getLastDecision()
+      : null;
+    aiFlightDebug.update({
+      shipPos: aiShipForDebug.position,
+      shipVel: aiShipForDebug.velocity,
+      shipYaw: aiShipForDebug.rotation.yaw,
+      targetPos: aiDecision && aiDecision.target ? aiDecision.target.pos : null,
+      predictedPos: aiDecision && aiDecision.predictedPos ? aiDecision.predictedPos : null,
+      evadeDist: AI_TUNABLES.evadeDist,
+    });
   }
 
   // Push the latest diagnostic snapshot to the debug HUD. The HUD

@@ -119,7 +119,7 @@ test('aiBrainTick: throws on non-array asteroids', () => {
 // aiBrainTick: EVADE branch
 // --------------------------------------------------------------------------
 
-test('aiBrainTick: nearest within evadeDist -> mode=evade, thrust=true', () => {
+test('aiBrainTick: nearest within evadeDist -> mode=evade, turns away', () => {
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
@@ -128,9 +128,26 @@ test('aiBrainTick: nearest within evadeDist -> mode=evade, thrust=true', () => {
     evadeDist: 12,
   });
   assert.equal(result.mode, 'evade');
-  assert.equal(result.thrust, true);
+  // When not yet facing away from the threat, the ship turns first
+  // and only thrusts once roughly aligned. The important thing is
+  // that it turns away (yaw != 0) and does not fire.
   assert.ok(result.yaw === -1 || result.yaw === 1);
   assert.equal(result.fire, false);
+});
+
+test('aiBrainTick: evade thrusts once facing away from threat', () => {
+  // Ship already facing -X (yaw = PI/2), threat at +X (5,0).
+  // The escape direction is -X, which the ship is already facing.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: Math.PI / 2,
+    asteroids: [mockAsteroid(5, 0)],
+    time: 0,
+    evadeDist: 12,
+  });
+  assert.equal(result.mode, 'evade');
+  assert.equal(result.yaw, 0);
+  assert.equal(result.thrust, true);
 });
 
 test('aiBrainTick: evade steers ~90 degrees from threat', () => {
