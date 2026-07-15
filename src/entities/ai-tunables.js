@@ -127,6 +127,18 @@ export const AI_TUNABLE_DEFAULTS = Object.freeze({
 
   /** Powerups that are near-behind are still chased (world units). */
   powerupNearBehindThreshold: 40,
+
+  // ----------------------------------------------------------------
+  // Ship flight feel (v0.49.0)
+  // ----------------------------------------------------------------
+  // The ship is owned by `src/entities/ship.js`, but the same
+  // live-tunable bag drives it the same way it drives the AI: a
+  // per-tick read with `?? MAX_SPEED` fallback. Adding a slider
+  // for this in `src/ui/ai-tuners-panel.js` lets the user feel the
+  // cap change in real time without an app reload.
+
+  /** Ship max flight speed (XZ plane, u/s). */
+  shipMaxSpeed: 200,
 });
 
 const LIVE_TUNABLES = { ...AI_TUNABLE_DEFAULTS };

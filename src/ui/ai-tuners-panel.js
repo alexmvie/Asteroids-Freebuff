@@ -97,6 +97,10 @@ export const TUNER_GROUPS = Object.freeze([
     name: 'Laser',
     keys: ['laserFireHeadingGate'],
   },
+  {
+    name: 'Ship',
+    keys: ['shipMaxSpeed'],
+  },
 ]);
 
 // ===========================================================================
@@ -177,6 +181,18 @@ export const TUNER_SPECS = Object.freeze({
     format: (v) => `${Math.round(v)}u`,
     help: 'Below this distance from nearest asteroid → EVADE mode.',
     guideType: 'circle',
+  },
+  // Ship feel (v0.49.0) ------------------------------------------------
+  // Ship max-speed is owned by ship.js (which reads `AI_TUNABLES.shipMaxSpeed`
+  // per tick), but the panel hosts the slider so the user can feel the
+  // change in real time. Defensive: ship.js falls back to the frozen
+  // `MAX_SPEED` constant if the bag is missing/invalid.
+  shipMaxSpeed: {
+    label: 'SHIP MAX SPEED',
+    min: 50, max: 400, step: 10,
+    format: (v) => `${Math.round(v)} u/s`,
+    help: 'Top speed (XZ plane). Drag down to feel the ship slow down.',
+    guideType: 'speedometer',
   },
   // Powerup -------------------------------------------------------------
   powerupMaxChaseDist: {

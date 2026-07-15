@@ -857,13 +857,29 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
   }
 
   /**
-   * Build a fresh brain-args object every tick. Factory-time
-   * overrides (via `options`) win for any key the caller explicitly
-   * set; otherwise the live `AI_TUNABLES` value flows through so a
-   * slider drag is visible on the very next frame.
+   * Build a fresh brain-args object every tick. v0.49.0 simplification:
+   * the live-tunable lookup is delegated entirely to `aiBrainTick`'s
+   * default-parameter destructuring (`evadeDist = AI_TUNABLES.evadeDist,
+   * ...`), so this function only needs to forward the ship-derived
+   * runtime state + the explicitly-passed factory overrides from
+   * `opts` (resetDist, spawnRadius, spawnYaw, + any user-supplied
+   * per-AI overrides for tests).
+   *
+   * Precedence (unchanged from v0.47.0):
+   *   1. Caller explicitly passes `evadeDist: 50` (in args) → 50 wins.
+   *   2. Factory time: `options.evadeDist = 30` (via `opts`) → 30 wins.
+   *   3. Otherwise: `aiBrainTick`'s default destructures
+   *      `evadeDist = AI_TUNABLES.evadeDist`, reading the LIVE bag.
+   *      A slider drag (`AI_TUNABLES.evadeDist = 100`) is visible on
+   *      the very next brain frame.
+   *
+   * Previously this function enumerated 19 `o.X ?? AI_TUNABLES.X` lines
+   * inline. The duplication made the source of truth ambiguous and
+   * obscured a thin test-mock round-7 quirk (now resolved). The
+   * refactor keeps the line count low and ships a single fallback
+   * pathway through `aiBrainTick`.
    */
   function brainArgsFromShip() {
-    const o = opts;
     return {
       aiPos: ship.position,
       aiYaw: ship.rotation.yaw,
@@ -873,32 +889,13 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
       stickyPowerupPos,
       stickyPowerupTime: time - stickyPowerupSince,
       aiVel: ship.velocity,
-
-      // Factory wins || live tunable.
-      evadeDist:                o.evadeDist                ?? AI_TUNABLES.evadeDist,
-      powerupMaxChaseDist:      o.powerupMaxChaseDist      ?? AI_TUNABLES.powerupMaxChaseDist,
-      thrustHeadingGate:        o.thrustHeadingGate        ?? AI_TUNABLES.thrustHeadingGate,
-      yawDeadband:              o.yawDeadband              ?? AI_TUNABLES.yawDeadband,
-      fireHeadingGate:          o.fireHeadingGate          ?? AI_TUNABLES.fireHeadingGate,
-      fireMinDist:              o.fireMinDist              ?? AI_TUNABLES.fireMinDist,
-      fireMaxDist:              o.fireMaxDist              ?? AI_TUNABLES.fireMaxDist,
-      activeWeapon:             getActiveWeapon ? getActiveWeapon() : API_DEFAULTS.activeWeapon,
-      laserFireHeadingGate:     o.laserFireHeadingGate     ?? AI_TUNABLES.laserFireHeadingGate,
-      bulletSpeed:              o.bulletSpeed              ?? AI_TUNABLES.bulletSpeed,
-      asteroidSizeBias:         o.asteroidSizeBias         ?? AI_TUNABLES.asteroidSizeBias,
-      forwardConeHalfAngle:     o.forwardConeHalfAngle     ?? AI_TUNABLES.forwardConeHalfAngle,
-      powerupNearBehindThreshold: o.powerupNearBehindThreshold ?? AI_TUNABLES.powerupNearBehindThreshold,
-      powerupThrustGate:        o.powerupThrustGate        ?? AI_TUNABLES.powerupThrustGate,
-      powerupStickyTime:        o.powerupStickyTime        ?? AI_TUNABLES.powerupStickyTime,
-      powerupCruiseSpeed:       o.powerupCruiseSpeed       ?? AI_TUNABLES.powerupCruiseSpeed,
-      powerupMinApproachSpeed:  o.powerupMinApproachSpeed  ?? AI_TUNABLES.powerupMinApproachSpeed,
-      powerupApproachGain:      o.powerupApproachGain      ?? AI_TUNABLES.powerupApproachGain,
-      powerupBrakeSafetyFactor: o.powerupBrakeSafetyFactor ?? AI_TUNABLES.powerupBrakeSafetyFactor,
-      powerupVelocityErrorThreshold: o.powerupVelocityErrorThreshold ?? AI_TUNABLES.powerupVelocityErrorThreshold,
-      powerupFinalApproachDist: o.powerupFinalApproachDist ?? AI_TUNABLES.powerupFinalApproachDist,
-      powerupFinalApproachSpeed: o.powerupFinalApproachSpeed ?? AI_TUNABLES.powerupFinalApproachSpeed,
-
       aiAngularVel: ship.angularVelocity,
+      activeWeapon: getActiveWeapon ? getActiveWeapon() : API_DEFAULTS.activeWeapon,
+      // Factory overrides (resetDist, spawnRadius, spawnYaw, +
+      // any explicit per-AI overrides from `options`). The brain's
+      // default-parameter destructuring handles the live-bag fallback
+      // for unset keys.
+      ...opts,
     };
   }
 

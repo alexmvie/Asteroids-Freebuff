@@ -456,14 +456,6 @@ const aiWeapon = {
   },
 };
 
-// ---- Demo AI brain info (debug HUD) -----------------------------------
-// The demo AI is hard-coded (see src/entities/ai.js) — there is no
-// trained-brain path on this branch. The debug HUD shows the kind +
-// placeholder generation/fitness so the row stays meaningful; future
-// AI implementations that want to surface their identity here can
-// swap this object for a richer one.
-const AI_BRAIN_KIND = 'hand-coded';
-
 const demoAi = createDemoAi({
   scene,
   asteroids: field.getEntities(),
@@ -1262,12 +1254,6 @@ function tick(dt) {
     // the cached mode from the AI's most recent update(). When the
     // AI is disabled (outside DEMO) it returns the seed 'wander'
     // from the closure initial value.
-    aiBrain: AI_BRAIN_KIND,
-    aiGen: null,
-    aiFitness: null,
-    aiMode: demoAi && typeof demoAi.getLastMode === 'function'
-      ? demoAi.getLastMode()
-      : null,
     captureState: (typeof window !== 'undefined' && window._captureState)
       ? window._captureState.recording ? 'REC' : 'OFF'
       : 'OFF',

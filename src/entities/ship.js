@@ -24,6 +24,11 @@ import {
 // PLAY_PLANE_Y is owned by the world data-model layer (the play plane
 // is a world concept, not a ship concept). See ../world/chunk-constants.js.
 import { PLAY_PLANE_Y } from '../world/chunk-constants.js';
+// v0.49.0: live-tunable ship max-speed. The panel writes
+// `AI_TUNABLES.shipMaxSpeed`; the ship read falls back to the
+// frozen `MAX_SPEED` constant if the bag is absent or the value
+// is non-finite.
+import { AI_TUNABLES } from './ai-tunables.js';
 
 /**
  * Ship entity — a self-contained 3D ship with a 2DOF controller.
@@ -363,10 +368,19 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
     state.velocity.x *= dragFactor;
     state.velocity.z *= dragFactor;
 
-    // Speed cap (XZ plane only)
+    // Speed cap (XZ plane only). v0.49.0: live-tunable via the
+    // `AI_TUNABLES.shipMaxSpeed` slider in the tuner panel —
+    // immediate per-frame effect with no app reload. The frozen
+    // `MAX_SPEED` constant from ship-constants.js is the canonical
+    // fallback used when the bag is missing or its value is
+    // non-finite (defensive: a stale number from a buggy caller
+    // would silently neuter the cap).
     const speed = Math.hypot(state.velocity.x, state.velocity.z);
-    if (speed > MAX_SPEED) {
-      const k = MAX_SPEED / speed;
+    const liveMaxSpeed = (AI_TUNABLES && Number.isFinite(AI_TUNABLES.shipMaxSpeed))
+      ? AI_TUNABLES.shipMaxSpeed
+      : MAX_SPEED;
+    if (speed > liveMaxSpeed) {
+      const k = liveMaxSpeed / speed;
       state.velocity.x *= k;
       state.velocity.z *= k;
     }

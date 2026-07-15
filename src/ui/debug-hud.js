@@ -132,18 +132,6 @@ export function createDebugHud({
       setText('subjectY', fmtNum(s.ship.y));
       setText('subjectZ', fmtNum(s.ship.z));
     }
-    if (typeof s.aiBrain === 'string') {
-      setText('aiBrain', s.aiBrain);
-    }
-    if (s.aiGen != null) {
-      setText('aiGen', String(Math.floor(s.aiGen)));
-    }
-    if (typeof s.aiFitness === 'number') {
-      setText('aiFitness', s.aiFitness.toFixed(1));
-    }
-    if (typeof s.aiMode === 'string') {
-      setText('aiMode', s.aiMode);
-    }
     if (typeof s.captureState === 'string') {
       setText('captureState', s.captureState);
     }
@@ -177,7 +165,6 @@ export function createDebugHud({
       'sceneVerts', 'sceneTris',
       'camX', 'camY', 'camZ',
       'subjectX', 'subjectY', 'subjectZ',
-      'aiBrain', 'aiGen', 'aiFitness', 'aiMode',
       'captureState', 'captureRemaining', 'captureMode',
     ];
     for (const n of names) els[n] = findEl(n);
@@ -197,10 +184,6 @@ export function createDebugHud({
    *   sceneTris?: number,
    *   camera?: { x: number, y: number, z: number },
    *   ship?: { x: number, y: number, z: number },
-   *   aiBrain?: string,
-   *   aiGen?: number,
-   *   aiFitness?: number,
-   *   aiMode?: string,
    *   captureState?: string,
    *   captureRemaining?: number,
    *   captureMode?: string,

@@ -1,3 +1,21 @@
+## v0.49.0 -- AI Slider Live-Bag Wiring Cleanup + Ship Max-Speed Slider + Debug-HUD Layout Cleanup
+
+**User request:** "i am not sure if the ai reacts on any of the sliders. i saw no difference in collecting extras or atacking asteroids. also the ship speed is not adjustable (max speed should also be adjustable i think)" / "the layout needs to be better . reduce debug infos - delete the AI BRAIN, AI ... section there"
+
+### What changed
+
+1. **Bug 1 fix: AI sliders react on next frame.** Simplified `brainArgsFromShip()` in `src/entities/ai.js` — dropped the verbose 19-line explicit `o.X ?? AI_TUNABLES.X` chain in favor of a clean `...opts` spread + delegation to `aiBrainTick`'s default-parameter destructuring. The live-bag fallback now has a single pathway (through `aiBrainTick`'s defaults) instead of two parallel ones. **Honest note:** the original wiring was already correct (call-time `AI_TUNABLES.X` evaluation made slider drags effective immediately). The refactor is readability cleanup, not a behavior change. The user's "no visible effect" was likely a perception issue (e.g., dragging `fireMinDist` 25→50 has no visible impact over a few seconds). 3 regression tests in `tests/ai.test.js` pin the live-bag flow-through contract with try/finally restore so the singleton doesn't leak.
+
+2. **Bug 2 fix: Ship max-speed now live-tunable.** Added `shipMaxSpeed: 200` to `AI_TUNABLE_DEFAULTS`, added Ship group to `TUNER_GROUPS` + `shipMaxSpeed` spec to `TUNER_SPECS` (speedometer guide, range 50–400u/s, step 10), and wired `src/entities/ship.js` to read the live value per tick via `(AI_TUNABLES && Number.isFinite(AI_TUNABLES.shipMaxSpeed)) ? AI_TUNABLES.shipMaxSpeed : MAX_SPEED`. The frozen `MAX_SPEED` (200u/s) is the defensive fallback for missing or NaN values. 2 regression tests in `tests/ship.test.js` (cap clamps at live value, fallback works). **Known UX nit:** default 200 = `MAX_SPEED`, so the user has to drag away from center to feel the change.
+
+3. **Layout cleanup.** Removed the AI Brain / Gen / Fitness / Mode section from `#debug-hud`. Files: `index.html` (dividers + 4 AI rows), `src/main.js` (deleted `AI_BRAIN_KIND` const + 4-line block in `debugHud.update()` call), `src/ui/debug-hud.js` (deleted 4 `setText` if-statements + 4 keys list entries + 4 JSDoc entries). Final layout: FPS/State/Score/Lives/Asteroids/Live-chunks/Verts/Tris | divider | Cam X/Y/Z | divider | Subject X/Y/Z | divider | Capture/Cap-Time/Cap-Mode | divider | buttons.
+
+### Validation
+
+- `npm test`: 561/561 green (was 556 at v0.48.0; +5 net: 3 ai + 2 ship).
+- `npm run build`: clean.
+- Test delta: +5 net vs v0.48.0's 556.
+
 ## v0.48.0 -- Visual Guides per Slider + Master Flag
 
 **User request:** "i tried all sliders but see no feedback. can you add some visual guides also to see what i am controlling? be sure AL that stuff is optional and can be enabled and disabled by just one flag".

@@ -34,6 +34,7 @@ import {
   facingAngle,
   collectBehavior,
 } from '../src/entities/ai.js';
+import { AI_TUNABLES, AI_TUNABLE_DEFAULTS } from '../src/entities/ai-tunables.js';
 
 // --------------------------------------------------------------------------
 // Mock helpers
@@ -954,4 +955,111 @@ test('facingAngle: yaw=0 faces -Z', () => {
 
 test('facingAngle: yaw=-PI/2 faces +X', () => {
   assert.ok(Math.abs(facingAngle(-Math.PI / 2)) < 1e-9);
+});
+
+// ===========================================================================
+// Bug 1 regression tests — live AI_TUNABLES bag flow-through
+// ===========================================================================
+// v0.47.x shipped the live tuner panel under the claim that
+// `brainArgsFromShip` reads `opts.X ?? AI_TUNABLES.X` so slider drags
+// should be visible on the very next brain frame. v0.49.0 verifies
+// the claim with explicit regression tests: mutate the live bag, tick
+// the brain with no factory override, verify the decision reflects
+// the live value. Restores the mutated value at the end so the test
+// doesn't leak into other tests (the bag is a module-level singleton).
+
+test('ai live-bag flow-through: AI_TUNABLES.evadeDist mutation changes evade behavior', () => {
+  const POS = { x: 0, y: 0, z: 0 };
+  // 15u asteroid. The evade predicate is `nearest.dist < ctx.evadeDist`,
+  // so a HIGHER evadeDist = wider evade radius. Picking 15u lets us
+  // verify both directions cleanly:
+  //   - default evadeDist=10 -> 15<10 false -> no evade (baseline)
+  //   - raise to evadeDist=20   -> 15<20 true  -> evade fires
+  const ASTEROID_AT_15U = {
+    getPosition: () => ({ x: 15, z: 0 }),
+    getVelocity: () => ({ x: 0, z: 0 }),
+    getSize: () => 0,
+  };
+
+  // Default evadeDist is 10u. 15u is just outside -> NO evade.
+  const beforeTweak = aiBrainTick({
+    aiPos: POS, aiYaw: 0, asteroids: [ASTEROID_AT_15U],
+  });
+  assert.notEqual(
+    beforeTweak.mode, 'evade',
+    'sanity: 15u asteroid should NOT trigger default 10u evade threshold',
+  );
+
+  // Bump the live bag to 20u. 15u is now INSIDE the threshold -> evade.
+  AI_TUNABLES.evadeDist = 20;
+  try {
+    const afterTweak = aiBrainTick({
+      aiPos: POS, aiYaw: 0, asteroids: [ASTEROID_AT_15U],
+    });
+    assert.equal(
+      afterTweak.mode, 'evade',
+      'after live-bag evadeDist = 20, the brain SHOULD evade at 15u',
+    );
+    assert.match(
+      afterTweak.reason, /evadeDist 20\.0u/,
+      'reason text should reflect the LIVE threshold, not the canonical default',
+    );
+  } finally {
+    AI_TUNABLES.evadeDist = AI_TUNABLE_DEFAULTS.evadeDist;
+  }
+});
+
+test('ai live-bag flow-through: AI_TUNABLES.fireMaxDist mutation changes fire behavior', () => {
+  const POS = { x: 0, y: 0, z: 0 };
+  const ASTEROID_AT_50U = {
+    getPosition: () => ({ x: 50, z: 0 }),
+    getVelocity: () => ({ x: 0, z: 0 }),
+    getSize: () => 0,
+  };
+
+  // Wide heading gate so the asteroid is on-axis.
+  AI_TUNABLES.fireHeadingGate = Math.PI;
+  // Default fireMaxDist = 200, fireMinDist = 20: 50u is in range -> fire.
+  const beforeSqueeze = aiBrainTick({
+    aiPos: POS, aiYaw: 0, asteroids: [ASTEROID_AT_50U],
+  });
+  assert.equal(beforeSqueeze.fire, true, 'sanity: 50u asteroid should fire under wide heading gate');
+
+  // Squish the max range to 30u: 50u is now out of range -> no fire.
+  AI_TUNABLES.fireMaxDist = 30;
+  try {
+    const afterSqueeze = aiBrainTick({
+      aiPos: POS, aiYaw: 0, asteroids: [ASTEROID_AT_50U],
+    });
+    assert.equal(
+      afterSqueeze.fire, false,
+      'after live-bag fireMaxDist = 30, the AI should NOT fire at 50u',
+    );
+  } finally {
+    AI_TUNABLES.fireMaxDist = AI_TUNABLE_DEFAULTS.fireMaxDist;
+    AI_TUNABLES.fireHeadingGate = AI_TUNABLE_DEFAULTS.fireHeadingGate;
+  }
+});
+
+test('ai precedence: explicit factory override wins over live AI_TUNABLES bag', () => {
+  // Defense: the live-bag fix must NOT break the existing precedence
+  // contract. Tests/AI passing `evadeDist: 50` in args must still win
+  // over the bag.
+  const POS = { x: 0, y: 0, z: 0 };
+  const ASTEROID_AT_30U = {
+    getPosition: () => ({ x: 30, z: 0 }),
+    getVelocity: () => ({ x: 0, z: 0 }),
+    getSize: () => 0,
+  };
+  AI_TUNABLES.evadeDist = 1000;
+  try {
+    const d = aiBrainTick({
+      aiPos: POS, aiYaw: 0,
+      asteroids: [ASTEROID_AT_30U],
+      evadeDist: 50,
+    });
+    assert.equal(d.mode, 'evade', 'explicit evadeDist: 50 wins over live bag 1000');
+  } finally {
+    AI_TUNABLES.evadeDist = AI_TUNABLE_DEFAULTS.evadeDist;
+  }
 });
