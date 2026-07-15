@@ -37,7 +37,7 @@ exportAITunables()  = JSON.stringify(AI_TUNABLES, null, 2);
 
 #### 2. Live Tuner Panel (`src/ui/ai-tuners-panel.js`)
 
-New bottom-right panel above the AI debug overlay. 22 sliders in 6 groups:
+New bottom-right panel above the AI debug overlay. 21 sliders in 6 groups:
 
 | Group    | Sliders |
 |----------|---------|
@@ -69,12 +69,12 @@ The `update()` function previously used a global 80ms throttle that could swallo
 
 - `src/entities/ai-tunables.js` — mutable bag + frozen DEFAULTS + reset/export helpers.
 - `src/entities/ai.js` — every tunable now reads via `opts.X ?? AI_TUNABLES.X`; every behavior returns a `reason` string.
-- `src/ui/ai-tuners-panel.js` — **new**, 22 sliders + reset + copy-json buttons.
+- `src/ui/ai-tuners-panel.js` — **new**, 21 sliders + reset + copy-json buttons.
 - `src/ui/ai-debug-overlay.js` — WHY row + per-cell skip; chip extension for evade mode.
 - `src/main.js` — wires tuner panel mount, hooks `resetAITunables()` + `exportAITunables()` for the buttons.
 - `index.html` — `#ai-tuners` container.
 - `src/styles.css` — `.ai-tuners` BEM block (.ai-tuner__row, .ai-tuner__slider, .ai-tuner__value, action buttons, status).
-- `tests/ai-tunables.test.js` — **new**, 21 tests for live mutability + reset + export.
+- `tests/ai-tunables.test.js` — **new**, 17 tests for live mutability + reset + export.
 - `tests/ai-tuners-panel.test.js` — **new**, 29 tests for pure helpers + factory smoke + setValue/reset/dispose.
 - `tests/ai-debug-overlay.test.js` — extended with WHY row + per-cell update verification.
 - `src/version-constants.js` — bumped to `v0.47.0`.
