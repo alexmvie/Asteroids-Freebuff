@@ -62,6 +62,23 @@ def main():
         for i in range(args.seconds * args.fps):
             path = out_dir / f'frame_{i:03d}.jpg'
             frame_start = time.time()
+            remaining_s = max(0.0, args.seconds - (i / args.fps))
+
+            # Inject capture state so the in-game debug HUD can show
+            # REC / remaining time / mode. This also lets the frame
+            # analysis script verify that the capture was active.
+            try:
+                state_json = json.dumps({
+                    'recording': True,
+                    'remainingS': remaining_s,
+                    'mode': 'AI TUNING',
+                    'enabled': True,
+                    'fps': args.fps,
+                    'totalS': args.seconds,
+                })
+                page.evaluate(f'window._captureState = {state_json};')
+            except Exception as e:
+                print(f'Warning: could not inject _captureState: {e}', file=sys.stderr)
 
             # Capture the largest canvas by asking the page to serialize it
             # as a JPEG data URL. This bypasses Playwright's screenshot
@@ -97,6 +114,12 @@ def main():
             sleep_time = frame_interval - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
+
+        # Clear the capture state so the HUD returns to OFF after the run.
+        try:
+            page.evaluate("""if (window._captureState) { window._captureState.recording = false; window._captureState.remainingS = 0; window._captureState.mode = 'OFF'; }""")
+        except Exception:
+            pass
 
         browser.close()
 

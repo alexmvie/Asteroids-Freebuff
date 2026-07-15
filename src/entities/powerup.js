@@ -58,6 +58,13 @@ const POWERUP_GLB_URL = '/models/powerup-laser.glb';
 const POWERUP_RADIUS = 1.5;
 
 /**
+ * Exponential drag applied to push velocity each frame.
+ * `v(t+dt) = v(t) * exp(-POWERUP_PUSH_DRAG * dt)`.
+ * Exported so the AI can predict how far a pushed powerup will drift.
+ */
+export const POWERUP_PUSH_DRAG = 3.0;
+
+/**
  * v0.11.0 powerup type registry — selects the procedural fallback
  * mesh + halo tint per powerup type. Bump this map when adding a new
  * type; add to POWERUP_SPAWN_WEIGHTS in src/systems/powerup-system.js and
@@ -317,7 +324,9 @@ export function createPowerUp({ scene, spec } = {}) {
   // Bob phase offset so two power-ups spawned at the same moment don't
   // bob in lockstep. `spec.spawnTime` is optional; default 0.
   const phase = ((spec.spawnTime ?? 0) * BOB_FREQUENCY * Math.PI * 2) % (Math.PI * 2);
-  const baseY = spec.position.y;
+  // Powerups live on the play plane (y = 0) so they can be collected
+  // reliably and collide with asteroids on the same plane as the ship.
+  const baseY = 0;
 
   /**
    * Advance the spin + bob animation. `dt` in seconds.
@@ -346,7 +355,7 @@ export function createPowerUp({ scene, spec } = {}) {
     if (_pushVx !== 0 || _pushVz !== 0) {
       group.position.x += _pushVx * dt;
       group.position.z += _pushVz * dt;
-      const drag = Math.exp(-3.0 * dt);
+      const drag = Math.exp(-POWERUP_PUSH_DRAG * dt);
       _pushVx *= drag;
       _pushVz *= drag;
     }

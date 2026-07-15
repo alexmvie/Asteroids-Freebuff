@@ -1612,6 +1612,38 @@ canvas {
   border-bottom: var(--border-width) solid var(--color-primary-soft);
 }
 
+.ai-debug__mode-toggle {
+  pointer-events: auto;
+  display: block;
+  width: 100%;
+  margin: var(--space-1) 0 0;
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-bg-tint-primary-soft);
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-md);
+  color: var(--color-fg);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base);
+}
+
+.ai-debug__mode-toggle:hover {
+  background: var(--color-bg-tint-primary-base);
+  border-color: var(--color-primary-bright);
+}
+
+.ai-debug__mode-toggle:active {
+  transform: translateY(1px);
+}
+
 .ai-debug__radar {
   display: block;
   margin: 0 auto;

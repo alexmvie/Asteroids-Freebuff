@@ -92,6 +92,7 @@
 import { createPowerUp, POWERUP_LIFETIME_S } from '../entities/powerup.js';
 import { chunkKey, getActiveChunks } from '../world/world.js';
 import { CHUNK_SIZE } from '../world/chunk-constants.js';
+import { SHIP_RADIUS } from './collision.js';
 
 /**
  * Per-type spawn weights for the powerup system. Each spawn (natural
@@ -282,7 +283,7 @@ export function createPowerUpSystem({
       const angle = rng() * Math.PI * 2;
       return {
         x: anchorPos.x + Math.cos(angle) * spawnMinDist,
-        y: 2,
+        y: 0,
         z: anchorPos.z + Math.sin(angle) * spawnMinDist,
       };
     }
@@ -295,14 +296,14 @@ export function createPowerUpSystem({
       const dz = z - anchorPos.z;
       const dist = Math.hypot(dx, dz);
       if (dist >= spawnMinDist && dist <= spawnMaxDist) {
-        return { x, y: 2, z };
+        return { x, y: 0, z };
       }
     }
     // Fallback: spawnMinDist in a random direction from the anchor.
     const angle = rng() * Math.PI * 2;
     return {
       x: anchorPos.x + Math.cos(angle) * spawnMinDist,
-      y: 2,
+      y: 0,
       z: anchorPos.z + Math.sin(angle) * spawnMinDist,
     };
   }
@@ -359,7 +360,7 @@ export function createPowerUpSystem({
   function spawnAtPosition(position) {
     if (pending) return false;
     if (!position || typeof position.x !== 'number') return false;
-    const pos = { x: position.x, y: position.y ?? 2, z: position.z };
+    const pos = { x: position.x, y: position.y ?? 0, z: position.z };
     createPowerUpEntity(pos);
     return true;
   }
@@ -491,7 +492,7 @@ export function createPowerUpSystem({
           const dx = sp.x - pp.x;
           const dz = sp.z - pp.z;
           const distSq = dx * dx + dz * dz;
-          const r = pending.getRadius() + 0.5; // small grace for the collector's nose
+          const r = pending.getRadius() + SHIP_RADIUS + 2.0; // generous grace so high-speed flybys still collect
           if (distSq < r * r) {
             // Picked up! Capture the spec.type BEFORE clearPending
             // so activate() can record the actual picked-up type

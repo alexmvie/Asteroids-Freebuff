@@ -2,6 +2,13 @@
 """
 Analyze captured game frames to extract AI behavior metrics.
 Run: python3 scripts/analyze_frames.py <frames-dir> [--fps 3]
+
+Dependencies:
+    pip install numpy pillow scipy
+
+`scipy.ndimage.label` is used for fast connected-component labeling of
+optical markers. If scipy is not installed, a pure-Python fallback is
+used, but it is much slower on large frames.
 """
 import sys
 import json
@@ -9,6 +16,96 @@ import argparse
 from pathlib import Path
 import numpy as np
 from PIL import Image
+
+# ---------------------------------------------------------------------------
+# Optical marker detection (capture-markers.js)
+# ---------------------------------------------------------------------------
+# The game renders high-contrast wireframe markers for video analysis:
+#   - Ship:     bright green  (0x00ff00)
+#   - Asteroid: bright red    (0xff0000)
+#   - Powerup:  bright yellow (0xffff00)
+# JPEG compression creates artifacts, so we use a generous RGB threshold.
+
+MARKER_COLORS = {
+    'ship': np.array([0, 255, 0], dtype=np.int16),
+    'asteroid': np.array([255, 0, 0], dtype=np.int16),
+    'powerup': np.array([255, 255, 0], dtype=np.int16),
+}
+
+
+def _label_blobs(mask):
+    """Simple 4-connected component labeling without scipy."""
+    h, w = mask.shape
+    labels = np.zeros((h, w), dtype=np.int32)
+    current = 0
+    for y in range(h):
+        for x in range(w):
+            if not mask[y, x] or labels[y, x]:
+                continue
+            current += 1
+            stack = [(y, x)]
+            labels[y, x] = current
+            while stack:
+                cy, cx = stack.pop()
+                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not labels[ny, nx]:
+                        labels[ny, nx] = current
+                        stack.append((ny, nx))
+    return labels, current
+
+
+def detect_markers(img_array, threshold=60, min_pixels=20):
+    """
+    Detect colored markers in a frame.
+
+    Returns a dict with per-color stats:
+        { color_name: { count, centroid_x, centroid_y, bbox } }
+    For asteroids, count is the number of connected red blobs.
+    """
+    img = img_array.astype(np.int16)
+    h, w = img.shape[:2]
+    result = {}
+
+    for name, color in MARKER_COLORS.items():
+        diff = np.abs(img - color)
+        mask = np.all(diff <= threshold, axis=-1)
+        pixels = int(mask.sum())
+
+        centroid = None
+        bbox = None
+        blob_count = 0
+
+        if pixels >= min_pixels:
+            # Connected-component labeling (4-connectivity) to count blobs.
+            # Fallback to a simple scan if scipy is not installed.
+            try:
+                from scipy import ndimage
+                labeled, num_features = ndimage.label(mask)
+                blob_count = int(num_features)
+            except Exception:
+                blob_count = _label_blobs(mask)
+
+            # Compute centroid and bounding box of all marker pixels.
+            ys, xs = np.where(mask)
+            if len(xs):
+                centroid = (float(xs.mean()), float(ys.mean()))
+                bbox = {
+                    'x': int(xs.min()),
+                    'y': int(ys.min()),
+                    'w': int(xs.max() - xs.min() + 1),
+                    'h': int(ys.max() - ys.min() + 1),
+                }
+
+        result[name] = {
+            'count': blob_count if name == 'asteroid' else (1 if pixels >= min_pixels else 0),
+            'pixels': pixels,
+            'centroid': centroid,
+            'bbox': bbox,
+        }
+
+    return result
+
 
 def analyze_frames(frames_dir, fps=3):
     frames_dir = Path(frames_dir)
@@ -42,11 +139,15 @@ def analyze_frames(frames_dir, fps=3):
             motion = float(np.mean(np.abs(gray - prev)))
             center_motion = float(np.mean(np.abs(center - prev[hc-h//4:hc+h//4, wc-w//4:wc+w//4])))
 
+        # Optical marker detection for video analysis
+        markers = detect_markers(img)
+
         metrics.append({
             "idx": i,
             "bright": round(bright, 2),
             "center_bright": round(center_bright, 2),
             "motion": round(motion, 2),
+            "markers": markers,
         })
         prev_img = img
 
@@ -66,6 +167,13 @@ def analyze_frames(frames_dir, fps=3):
     print(f"Brightness:   mean={np.mean(brights):.1f}  min={min(brights):.1f}  max={max(brights):.1f}")
     print(f"CenterBright: mean={np.mean(center_brights):.1f}  min={min(center_brights):.1f}  max={max(center_brights):.1f}")
     print(f"Motion:       mean={np.mean(motions):.1f}  min={min(motions):.1f}  max={max(motions):.1f}")
+
+    # Marker-based object counts (median per frame to ignore transient drops)
+    for color in ['ship', 'asteroid', 'powerup']:
+        counts = [m['markers'][color]['count'] for m in metrics]
+        pixels = [m['markers'][color]['pixels'] for m in metrics]
+        print(f"{color.capitalize():10} count median={int(np.median(counts))}  "
+              f"pixels/frame median={int(np.median(pixels))}")
 
     # Detect idle periods (low motion sustained)
     idle_threshold = 0.5
@@ -143,6 +251,20 @@ def analyze_frames(frames_dir, fps=3):
             "bright_std": round(bright_std, 2),
             "idle_streaks": len(idle_streaks),
             "max_idle_streak_s": round(max(idle_streaks) / fps, 1) if idle_streaks else 0,
+            "markers": {
+                "ship": {
+                    "median_count": int(np.median([m["markers"]["ship"]["count"] for m in metrics])),
+                    "median_pixels": int(np.median([m["markers"]["ship"]["pixels"] for m in metrics])),
+                },
+                "asteroid": {
+                    "median_count": int(np.median([m["markers"]["asteroid"]["count"] for m in metrics])),
+                    "median_pixels": int(np.median([m["markers"]["asteroid"]["pixels"] for m in metrics])),
+                },
+                "powerup": {
+                    "median_count": int(np.median([m["markers"]["powerup"]["count"] for m in metrics])),
+                    "median_pixels": int(np.median([m["markers"]["powerup"]["pixels"] for m in metrics])),
+                },
+            },
             "game_metrics": game_metrics,
         }, f, indent=2)
     print(f"\nDetailed analysis saved to {out_path}")

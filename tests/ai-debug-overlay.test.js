@@ -298,6 +298,10 @@ function buildMockRoot() {
       if (sel.includes('canvas') && sel.includes('ai-debug__radar')) {
         return makeCanvas();
       }
+      // radar mode toggle button
+      if (sel.includes('radarModeToggle')) {
+        return makeButton('radarModeToggle');
+      }
       // Bare canonical selectors the panels sub-views query:
       if (sel === '[data-ai-debug="mode"]') return elements.get('dbg:mode') || makeCell('dbg:mode');
       if (sel === '[data-ai-debug="yaw"]') return elements.get('dbg:yaw') || makeCell('dbg:yaw');
@@ -354,6 +358,37 @@ function buildMockRoot() {
       width: 0, height: 0, style: {},
       getContext: () => null, // null context → radarView.draw is a no-op
     };
+  }
+  function makeButton(key) {
+    const el = {
+      textContent: '',
+      classList: {
+        _set: new Set(),
+        add(c) { this._set.add(c); },
+        remove(c) { this._set.delete(c); },
+        contains(c) { return this._set.has(c); },
+        toggle(c, v) {
+          if (v === true) this._set.add(c);
+          else if (v === false) this._set.delete(c);
+          else if (this._set.has(c)) this._set.delete(c);
+          else this._set.add(c);
+        },
+      },
+      style: { setProperty: () => {} },
+      _key: key,
+      _listeners: {},
+      addEventListener(type, fn) {
+        this._listeners[type] = this._listeners[type] || [];
+        this._listeners[type].push(fn);
+      },
+      removeEventListener(type, fn) {
+        if (!this._listeners[type]) return;
+        const idx = this._listeners[type].indexOf(fn);
+        if (idx >= 0) this._listeners[type].splice(idx, 1);
+      },
+    };
+    elements.set(key, el);
+    return el;
   }
   root._rebuildMap();
   return root;

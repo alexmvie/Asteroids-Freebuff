@@ -40,6 +40,7 @@ import { createUvUnwrapViewer } from './systems/uv-unwrap-viewer.js';
 import { createEditObjectScreen } from './systems/edit-object-screen.js';
 import { createPowerUpSystem } from './systems/powerup-system.js';
 import { createParticleSystem } from './systems/particles.js';
+import { createCaptureMarkers } from './systems/capture-markers.js';
 
 // ---- Power-up drop frequency -------------------------------------------
 // Probability (0.0–1.0) that an asteroid destroy spawns a laser
@@ -136,6 +137,7 @@ if (typeof window !== 'undefined') {
     get() { return asteroidUvDebug.getCapsulePlane(); },
     set(v) { asteroidUvDebug.setCapsulePlane(v); },
   });
+
 }
 
 // ---- UV unwrap viewer --------------------------------------------------
@@ -358,6 +360,60 @@ const field = createAsteroidField({ scene, uvDebugOverlay: asteroidUvDebug });
 // frame in the render loop; emits on each asteroid kill in
 // processCollisions. See src/systems/particles.js.
 const particles = createParticleSystem({ scene });
+
+// ---- Collision cage debugger -------------------------------------------
+// Wireframe spheres around every collision hull (ship, asteroids,
+// power-up, bullets). Toggled via the left debug HUD. Useful for
+// verifying that visual overlap matches the collision spheres.
+
+// ---- Capture markers ---------------------------------------------------
+// High-contrast overlays (green ship ring, red asteroid wireframes,
+// yellow powerup ring) for video analysis. Toggled via the left
+// debug HUD and via `window.CAPTURE_MARKERS`.
+const captureMarkers = createCaptureMarkers({ scene });
+
+// ---- Debug HUD: Collision cage toggle button ------------------------
+// Toggles the wireframe collision-sphere debugger. The button label
+// and `.debug-hud__toggle--on` class stay in sync when the state is
+// changed from the console via `window.COLLISION_CAGE`.
+const cageBtn = document.getElementById('debug-toggle-cage');
+if (cageBtn) {
+  const updateCageBtn = () => {
+    const on = collisionCage.isEnabled();
+    cageBtn.textContent = `CAGES: ${on ? 'ON' : 'OFF'}`;
+    cageBtn.classList.toggle('debug-hud__toggle--on', on);
+  };
+  cageBtn.addEventListener('click', () => {
+    collisionCage.setEnabled(!collisionCage.isEnabled());
+    updateCageBtn();
+  });
+  const originalSetEnabled = collisionCage.setEnabled;
+  collisionCage.setEnabled = (v) => {
+    originalSetEnabled(v);
+    updateCageBtn();
+  };
+  updateCageBtn();
+}
+
+// ---- Debug HUD: Capture markers toggle button -------------------------
+const captureBtn = document.getElementById('debug-toggle-capture');
+if (captureBtn) {
+  const updateCaptureBtn = () => {
+    const on = captureMarkers.isEnabled();
+    captureBtn.textContent = `CAPTURE: ${on ? 'ON' : 'OFF'}`;
+    captureBtn.classList.toggle('debug-hud__toggle--on', on);
+  };
+  captureBtn.addEventListener('click', () => {
+    captureMarkers.setEnabled(!captureMarkers.isEnabled());
+    updateCaptureBtn();
+  });
+  const originalSetEnabled = captureMarkers.setEnabled;
+  captureMarkers.setEnabled = (v) => {
+    originalSetEnabled(v);
+    updateCaptureBtn();
+  };
+  updateCaptureBtn();
+}
 
 // ---- Demo AI -----------------------------------------------------------
 // NPC ship that hunts the nearest asteroid and shoots at it when the
@@ -977,6 +1033,7 @@ function tick(dt) {
 
   processCollisions(dt);
   particles.update(dt);
+
   updateCamera(dt);
 
   // ---- NEBULA_RENDER_THRESHOLD wiring --------------------------------
@@ -1031,6 +1088,30 @@ function tick(dt) {
     ? (demoAi && demoAi.getShip()) || ship
     : ship;
 
+  // ---- Capture markers -------------------------------------------------
+  // High-contrast overlays for video analysis. Updated every frame so
+  // the markers follow moving objects. The `window._captureState`
+  // object is written by the browser automation scripts to surface
+  // recording status + remaining time in the debug HUD. We cache the
+  // last seen enabled state locally so we don't read the global every
+  // frame.
+  if (typeof window !== 'undefined') {
+    const cs = window._captureState;
+    const wantEnabled = cs ? !!cs.enabled : false;
+    if (wantEnabled !== captureMarkers.isEnabled()) {
+      captureMarkers.setEnabled(wantEnabled);
+    }
+    // Only update markers when they are enabled; the helper is a no-op
+    // when disabled, but skipping the call avoids the entity iteration.
+    if (wantEnabled) {
+      captureMarkers.update({
+        subject,
+        asteroids: field.getEntities(),
+        powerup: powerupSystem.getPendingSpawn(),
+      });
+    }
+  }
+
   // Push the latest diagnostic snapshot to the debug HUD. The HUD
   // throttles its DOM writes to ~12Hz internally.
   debugHud.update({
@@ -1061,6 +1142,15 @@ function tick(dt) {
     aiMode: demoAi && typeof demoAi.getLastMode === 'function'
       ? demoAi.getLastMode()
       : null,
+    captureState: (typeof window !== 'undefined' && window._captureState)
+      ? window._captureState.recording ? 'REC' : 'OFF'
+      : 'OFF',
+    captureRemaining: (typeof window !== 'undefined' && window._captureState)
+      ? window._captureState.remainingS
+      : undefined,
+    captureMode: (typeof window !== 'undefined' && window._captureState)
+      ? window._captureState.mode
+      : undefined,
   });
 
   // v0.23.x AI Debug Overlay per-frame tick.

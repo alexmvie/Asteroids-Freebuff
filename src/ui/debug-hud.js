@@ -144,6 +144,15 @@ export function createDebugHud({
     if (typeof s.aiMode === 'string') {
       setText('aiMode', s.aiMode);
     }
+    if (typeof s.captureState === 'string') {
+      setText('captureState', s.captureState);
+    }
+    if (typeof s.captureRemaining === 'number') {
+      setText('captureRemaining', `${Math.max(0, s.captureRemaining).toFixed(1)}s`);
+    }
+    if (typeof s.captureMode === 'string') {
+      setText('captureMode', s.captureMode);
+    }
   }
 
   function scheduleWrite() {
@@ -169,6 +178,7 @@ export function createDebugHud({
       'camX', 'camY', 'camZ',
       'subjectX', 'subjectY', 'subjectZ',
       'aiBrain', 'aiGen', 'aiFitness', 'aiMode',
+      'captureState', 'captureRemaining', 'captureMode',
     ];
     for (const n of names) els[n] = findEl(n);
   }
@@ -191,6 +201,9 @@ export function createDebugHud({
    *   aiGen?: number,
    *   aiFitness?: number,
    *   aiMode?: string,
+   *   captureState?: string,
+   *   captureRemaining?: number,
+   *   captureMode?: string,
    * }} snapshot
    */
   function update(snapshot) {

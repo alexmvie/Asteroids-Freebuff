@@ -228,7 +228,55 @@ Drei Scripts für automatisierte Game-Analyse ohne manuelles Eingreifen:
 
 ---
 
-*Last updated: v0.41.x — AI Powerup Collection Fix (543 tests)*
+### v0.43.0 — AI Powerup Collection Final Fix
+
+**Problem:** After v0.42.0 the AI still collected **0 of 1–2 powerups** in 60s browser captures. It destroyed asteroids and scored well, but ignored extras.
+
+**Root causes & fixes (cumulative):**
+1. **Collection radius too small** — `src/systems/powerup-system.js` only checked the powerup's own radius. Added `SHIP_RADIUS` so the effective pickup radius became ~6.5u.
+2. **Powerup prediction wrong** — `src/entities/ai.js` extrapolated powerup velocity linearly up to 2s, but pushed powerups decelerate exponentially (`drag = 3.0`). Replaced with the exact remaining-distance bound `v0 / POWERUP_PUSH_DRAG`.
+3. **Orbiting / overshoot** — custom `collectBehavior` speed-cap logic caused thrust-while-turning, making the ship curve past the powerup. Radically simplified `collectBehavior` to reuse `steerToward` with a tight `powerupThrustGate`.
+4. **Speed control** — added distance-adaptive closing-speed control (`5–30 u/s`) so the ship approaches fast from far away but slows down before entering the pickup radius.
+5. **Magic-number coupling removed** — exported `POWERUP_PUSH_DRAG` from `src/entities/powerup.js` and imported it in `src/entities/ai.js`.
+
+**Validation:**
+- 485 tests pass, build succeeds.
+- 60s browser capture: **1 of 2 powerups collected** (was 0 of 2), 39 asteroids destroyed, score 2560.
+
+**Remaining gap:** 50% collection rate. The second powerup was missed because the AI was still moving too fast or slightly off-center as it crossed the pickup radius. Further improvement options: tighten thrust gate further, add a final creep-in phase, or widen the pickup radius.
+
+---
+
+*Last updated: v0.43.0 — AI Powerup Collection Final Fix (485 tests)*
+
+---
+
+### v0.44.0 — Automated AI Tuning + Video Analysis Pipeline
+
+**Goal:** Give the user a repeatable, automated way to measure AI performance against a mathematical model and tune the AI toward that model.
+
+**New files:**
+- `src/systems/capture-markers.js` — high-contrast wireframe markers (green ship ring, red asteroid spheres, yellow powerup ring) for reliable video analysis.
+- `src/entities/ai-tunables.js` — small SSOT module for AI constants the tuning loop can adjust without touching `ai.js`.
+- `scripts/ai_tuning_loop.py` — automated tuning loop:
+  - Runs a baseline browser capture.
+  - Derives realistic targets from that baseline (capped by a theoretical model).
+  - Uses random search + hill-climbing over `ai-tunables.js`.
+  - Runs captures, analyzes frames, keeps the best parameter set.
+  - Restores the original `ai-tunables.js` on Ctrl-C.
+- `scripts/analyze_frames.py` — extended with optical marker detection (ship/asteroid/powerup counts + pixel coverage) using color thresholding and connected-component labeling.
+- `scripts/ai_browser_capture.py` — injects `window._captureState` so the in-game debug HUD shows REC status, remaining time, and capture mode.
+- `src/ui/debug-hud.js` + `index.html` — new Capture / Cap Time / Cap Mode rows in the debug HUD.
+- `src/main.js` — wires capture markers, reads `window._captureState`, and updates the debug HUD capture fields.
+
+**Mathematical model (targets):**
+- Asteroids/min: 120 (theoretical ceiling ≈ 166; baseline + 30 % capped).
+- Powerups/min: 8 (theoretical ceiling ≈ 10 from spawn delay + travel time).
+
+**Validation:**
+- 485 tests pass, build succeeds.
+- 15s browser capture on `localhost:5175` successfully records frames, injects `_captureState`, and `analyze_frames.py` detects markers.
+
 ---
 
 ### v0.41.x+ — Frame Capture Fix

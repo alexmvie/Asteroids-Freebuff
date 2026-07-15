@@ -330,6 +330,25 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
   - Tests updated: powerup coast behavior, swept-sphere regression, SHIP_RADIUS assertions.
   - Validation: **544 tests pass**, build succeeds, 60s browser capture shows score 270, 4 asteroids destroyed, 2/3 powerups collected (was 0/0/0 before the fixes).
 
+- [x] **v0.43.0 — AI Powerup Collection Final Fix** — `src/entities/ai.js` + `src/systems/powerup-system.js` + `src/entities/powerup.js`. The demo AI still collected 0 of 1–2 powerups in 60s captures. Fixes:
+  - `src/systems/powerup-system.js`: Added `SHIP_RADIUS` to the pickup radius check so effective pickup radius became ~6.5u.
+  - `src/entities/ai.js`: Replaced linear powerup velocity extrapolation with the exact remaining-distance bound `v0 / POWERUP_PUSH_DRAG` because pushed powerups decelerate exponentially.
+  - `src/entities/ai.js`: Simplified `collectBehavior` to reuse `steerToward` with a tight `powerupThrustGate` and distance-adaptive closing-speed control (5–30 u/s).
+  - `src/entities/powerup.js`: Exported `POWERUP_PUSH_DRAG` and imported it in `ai.js` to remove magic-number coupling.
+  - Validation: **485 tests pass**, build succeeds, 60s browser capture: 1 of 2 powerups collected, 39 asteroids destroyed, score 2560.
+
+- [x] **v0.44.0 — Automated AI Tuning + Video Analysis Pipeline** — new `src/systems/capture-markers.js`, `src/entities/ai-tunables.js`, `scripts/ai_tuning_loop.py`, `scripts/analyze_frames.py`, `scripts/ai_browser_capture.py`, `src/ui/debug-hud.js`, `index.html`, `src/main.js`. Built a repeatable, automated way to measure AI performance against a mathematical model and tune the AI toward it:
+  - `src/systems/capture-markers.js`: High-contrast wireframe markers (green ship ring, red asteroid spheres, yellow powerup ring) for reliable video analysis.
+  - `src/entities/ai-tunables.js`: Small SSOT module for AI constants the tuning loop can adjust without touching `ai.js`.
+  - `scripts/ai_tuning_loop.py`: Automated tuning loop — baseline capture → target derivation → random search + hill-climbing over `ai-tunables.js` → capture → frame analysis → keep best params → restore original on Ctrl-C.
+  - `scripts/analyze_frames.py`: Optical marker detection (ship/asteroid/powerup counts + pixel coverage) via color thresholding and connected-component labeling.
+  - `scripts/ai_browser_capture.py`: Injects `window._captureState` so the in-game debug HUD shows REC status, remaining time, and capture mode.
+  - `src/ui/debug-hud.js` + `index.html`: New Capture / Cap Time / Cap Mode rows in the debug HUD.
+  - `src/main.js` + `src/styles.css`: Wires capture markers, reads `window._captureState`, updates the debug HUD capture fields; CSS styles the capture toggle button and debug HUD capture rows.
+  - Mathematical model targets: asteroids/min = 120 (theoretical ceiling ≈ 166), powerups/min = 8 (theoretical ceiling ≈ 10).
+  - Validation: **485 tests pass**, build succeeds, 15s browser capture on `localhost:5175` records frames, injects `_captureState`, and `analyze_frames.py` detects markers.
+
+
 - [x] **v0.41.x+ — Frame Capture Fix** — `src/scene.js` + `scripts/analyze_frames.py`. Fixed black frames in AI video captures by adding `preserveDrawingBuffer: true` to the WebGL renderer. WebGL clears its drawing buffer after presentation by default; calling `canvas.toDataURL()` asynchronously from Playwright reads an already-cleared buffer, producing entirely black frames. `preserveDrawingBuffer: true` retains the buffer contents until the next explicit clear. `analyze_frames.py` now detects and warns when all frames are black, pointing to the renderer setting. Validation: 543 tests pass, build succeeds, 30s browser capture shows mean brightness ~28.5 and mean motion 5.4 (27% high-motion frames).
 
 - [x] **Particle system (smoke + debris)** — `src/systems/particles.js`. Complete overhaul with performance optimization and visual upgrade:

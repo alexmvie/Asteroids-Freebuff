@@ -106,9 +106,23 @@
         <span class="debug-hud__value" data-debug="aiMode">wander</span>
       </div>
       <div class="debug-hud__divider"></div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Capture</span>
+        <span class="debug-hud__value" data-debug="captureState">OFF</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Cap Time</span>
+        <span class="debug-hud__value" data-debug="captureRemaining">--</span>
+      </div>
+      <div class="debug-hud__row">
+        <span class="debug-hud__label">Cap Mode</span>
+        <span class="debug-hud__value" data-debug="captureMode">--</span>
+      </div>
+      <div class="debug-hud__divider"></div>
       <button class="debug-hud__toggle" id="debug-toggle-uv" type="button" data-debug="uvToggle">UV GRID: OFF</button>
       <button class="debug-hud__toggle" id="debug-toggle-uv-viewer" type="button" data-debug="uvViewerToggle">UV UNWRAP: OFF</button>
       <button class="debug-hud__toggle" id="debug-toggle-edit" type="button" data-debug="editToggle">EDIT OBJECT</button>
+      <button class="debug-hud__toggle" id="debug-toggle-capture" type="button" data-debug="captureToggle">CAPTURE: OFF</button>
     </div>
     <!-- Bottom-right version chip. Populated by src/main.js so the
          version string lives in a single SSOT (GAME_VERSION constant).

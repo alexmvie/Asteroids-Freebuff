@@ -649,6 +649,8 @@ export function createAsteroidFromSpec({ spec, scene, uvDebugOverlay }) {
     dispose,
     /** @returns {number} collision radius in world units */
     getRadius() { return spec.radius; },
+    /** @returns {number} asteroid size class (0=large, 1=medium, 2=small) */
+    getSize() { return spec.size; },
     /** @returns {{x:number,y:number,z:number}} live world position (mutated) */
     getPosition() { return mesh.position; },
     /**

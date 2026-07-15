@@ -89,6 +89,11 @@ const OVERLAY_CONFIG = Object.freeze({
    *  'compass' mode will swap the radar canvas for a compass dial;
    *  feature is owned by this overlay's displayMode option. */
   displayMode: 'radar',
+  /** Radar orientation mode.
+   *   - 'rotate': ship's forward cone rotates with yaw (world north stays up).
+   *   - 'north-up': ship always faces canvas-up; the world rotates around it.
+   * Designed to be extensible — more radar types/views can be added here. */
+  radarMode: 'rotate',
 });
 
 // ===========================================================================
@@ -269,33 +274,35 @@ export function formatBool(v) {
 // Sub-view: Radar (Canvas2D drawing)
 // ===========================================================================
 
-/**
- * Build the radar sub-view. Reads live state via the injected getter
- * hooks (per-frame closures) and redraws the canvas on each `draw()`.
- * Returns a small surface: { draw, resize, dispose }. No global state —
- * each call to `draw()` reads the live state fresh.
- *
- * Future: the draw function can be swapped for a compass dial when
- * `displayMode === 'compass'`. That swap happens in the composing
- * factory, NOT here.
- *
- * @param {{
- *   canvas: HTMLCanvasElement,
- *   getSubject: () => { position?: {x:number,y:number,z:number}, rotation?: {yaw:number} } | null,
- *   getAiShip: () => any,
- *   getAsteroids: () => Array<{ getPosition: () => any }>,
- *   getPowerupPos: () => {x:number,z:number} | null,
- *   getLastDecision: () => { mode?: string, target?: {pos,mode,dist} | null, nearest?: {pos,dist} | null },
- *   getActiveWeapon: () => 'bullet' | 'laser',
- *   worldRadius?: number,
- * }} deps
- */
+  /**
+   * Build the radar sub-view. Reads live state via the injected getter
+   * hooks (per-frame closures) and redraws the canvas on each `draw()`.
+   * Returns a small surface: { draw, resize, dispose, setRadarMode }. No global state —
+   * each call to `draw()` reads the live state fresh.
+   *
+   * Future: the draw function can be swapped for a compass dial when
+   * `displayMode === 'compass'`. That swap happens in the composing
+   * factory, NOT here.
+   *
+   * @param {{
+   *   canvas: HTMLCanvasElement,
+   *   getSubject: () => { position?: {x:number,y:number,z:number}, rotation?: {yaw:number} } | null,
+   *   getAiShip: () => any,
+   *   getAsteroids: () => Array<{ getPosition: () => any }>,
+   *   getPowerupPos: () => {x:number,z:number} | null,
+   *   getLastDecision: () => { mode?: string, target?: {pos,mode,dist} | null, nearest?: {pos,dist} | null },
+   *   getActiveWeapon: () => 'bullet' | 'laser',
+   *   worldRadius?: number,
+   *   radarMode?: 'rotate' | 'north-up',
+   * }} deps
+   */
 function createRadarView(deps) {
   const {
     canvas, getSubject, getAiShip, getAsteroids, getPowerupPos,
     getLastDecision, getActiveWeapon,
     worldRadius = OVERLAY_CONFIG.worldRadius,
   } = deps;
+  let radarMode = deps.radarMode || OVERLAY_CONFIG.radarMode;
   const ctx = canvas && typeof canvas.getContext === 'function'
     ? canvas.getContext('2d')
     : null;
@@ -347,12 +354,15 @@ function createRadarView(deps) {
   }
 
   /** Draw the subject (camera target) at center + a forward-cone overlay. */
-  function drawSubject(subject, weapon) {
+  function drawSubject(subject, weapon, mode) {
     if (!ctx || !subject || !subject.position) return;
     const yaw = (subject.rotation && typeof subject.rotation.yaw === 'number')
       ? subject.rotation.yaw
       : 0;
-    const facing = facingAngle(yaw); // rad in (-PI, PI], -PI/2 = facing -Z
+    // In 'rotate' mode the cone rotates with the ship's yaw.
+    // In 'north-up' mode the ship always faces canvas-up, so the cone
+    // rotation is fixed to -PI/2 (pointing up).
+    const facing = mode === 'north-up' ? -Math.PI / 2 : facingAngle(yaw);
 
     ctx.save();
     // Subject center dot.
@@ -365,16 +375,6 @@ function createRadarView(deps) {
     //   - laser mode:  tight (~3° half-angle, matches laserFireConeHalfAngle=0.05)
     const halfAngle = weapon === 'laser' ? 0.05 : 0.20;
     const coneLength = cssSize / 2 - 6; // won't reach the outer ring
-    // facingAngle returns radians in (-PI, PI] which IS the canvas
-    // angle of the ship's forward direction (because world Z maps
-    // directly to canvas py: north = -Z = canvas-up, and the cone
-    // is drawn along its local +X axis which is canvas angle 0).
-    // Rotating the local frame by `facing` aligns the cone's apex
-    // with the ship's forward: for yaw=0, facing=-PI/2, so the cone
-    // points canvas-up (north). For yaw=PI, facing=PI/2, cone points
-    // canvas-down (south). For yaw=PI/2, facing=PI, cone points
-    // canvas-left (west). For yaw=3PI/2, facing=0, cone points
-    // canvas-right (east). All four corners check out.
     ctx.translate(cssSize / 2, cssSize / 2);
     ctx.rotate(facing);
     ctx.fillStyle = weapon === 'laser'
@@ -382,9 +382,6 @@ function createRadarView(deps) {
       : 'rgba(72,219,251,0.10)'; // faint cyan — bullet
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    // Triangle from (0,0) → (coneLength, coneLength*tan(halfAngle))
-    // on the right, and mirrored on the left. The cone points along
-    // +Y (which, after our rotation, is the facing direction).
     const t = Math.tan(halfAngle);
     ctx.lineTo(coneLength, coneLength * t);
     ctx.lineTo(coneLength, -coneLength * t);
@@ -400,13 +397,27 @@ function createRadarView(deps) {
     ctx.save();
     ctx.translate(cssSize / 2 + px, cssSize / 2 + py);
     if (kind === 'powerup') {
-      // Gold cross-hair (small + symbol).
-      ctx.strokeStyle = color;
+      // Powerup: bright gold diamond + pulsing ring for visibility.
+      const now = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now() / 1000
+        : 0;
+      const pulse = 0.7 + 0.3 * Math.sin(now * 6);
+      // Outer pulsing ring.
+      ctx.strokeStyle = `rgba(250, 204, 21, ${0.5 + 0.3 * pulse})`;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(-5, 0); ctx.lineTo(5, 0);
-      ctx.moveTo(0, -5); ctx.lineTo(0, 5);
+      ctx.arc(0, 0, 8 + 3 * pulse, 0, Math.PI * 2);
       ctx.stroke();
+      // Inner solid diamond.
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      const s = 5;
+      ctx.moveTo(0, -s);
+      ctx.lineTo(s, 0);
+      ctx.lineTo(0, s);
+      ctx.lineTo(-s, 0);
+      ctx.closePath();
+      ctx.fill();
     } else {
       // Asteroid: filled circle, size scaled by world radius.
       ctx.fillStyle = color;
@@ -469,6 +480,9 @@ function createRadarView(deps) {
     }
     const sx = subject.position.x;
     const sz = subject.position.z;
+    const subjectYaw = (subject.rotation && typeof subject.rotation.yaw === 'number')
+      ? subject.rotation.yaw
+      : 0;
 
     // Asteroids.
     const asteroids = safeCall(getAsteroids) || [];
@@ -477,7 +491,20 @@ function createRadarView(deps) {
       if (!a || typeof a.getPosition !== 'function') continue;
       const p = a.getPosition();
       if (!p) continue;
-      const { px, py, dist } = worldToRadar(p, sx, sz, worldRadius, halfSize);
+      let { px, py, dist } = worldToRadar(p, sx, sz, worldRadius, halfSize);
+      // In north-up mode, rotate the world around the subject by +yaw
+      // so the ship's forward vector (world -Z for yaw=0) aligns with
+      // canvas-up. The forward vector in radar px/py is
+      // (-sin(yaw), -cos(yaw)); rotating it by +yaw gives (0, -1),
+      // i.e. canvas-top.
+      if (radarMode === 'north-up') {
+        const cos = Math.cos(subjectYaw);
+        const sin = Math.sin(subjectYaw);
+        const rx = px * cos - py * sin;
+        const ry = px * sin + py * cos;
+        px = rx;
+        py = ry;
+      }
       if (dist > worldRadius * 1.5) continue; // far enough to skip
       const color = colorForThreatDistance(dist, worldRadius);
       if (dist > worldRadius) {
@@ -493,7 +520,15 @@ function createRadarView(deps) {
     // Power-up (pending spawn). Always a gold cross-hair.
     const pup = safeCall(getPowerupPos);
     if (pup && typeof pup.x === 'number' && typeof pup.z === 'number') {
-      const { px, py, dist } = worldToRadar(pup, sx, sz, worldRadius, halfSize);
+      let { px, py, dist } = worldToRadar(pup, sx, sz, worldRadius, halfSize);
+      if (radarMode === 'north-up') {
+        const cos = Math.cos(subjectYaw);
+        const sin = Math.sin(subjectYaw);
+        const rx = px * cos - py * sin;
+        const ry = px * sin + py * cos;
+        px = rx;
+        py = ry;
+      }
       const clipped = dist > worldRadius
         ? clipToRadarEdge({ px, py }, halfSize, 4)
         : { px, py };
@@ -502,18 +537,23 @@ function createRadarView(deps) {
 
     // Subject + forward-cone overlay (drawn LAST so it sits on top).
     const weapon = safeCall(getActiveWeapon) || 'bullet';
-    drawSubject(subject, weapon);
+    drawSubject(subject, weapon, radarMode);
 
     // Target bracket on top of the chase target.
     const dec = safeCall(getLastDecision);
     if (dec && dec.target && dec.target.pos) {
-      const { px, py, dist } = worldToRadar(
+      let { px, py, dist } = worldToRadar(
         dec.target.pos, sx, sz, worldRadius, halfSize,
       );
+      if (radarMode === 'north-up') {
+        const cos = Math.cos(subjectYaw);
+        const sin = Math.sin(subjectYaw);
+        const rx = px * cos - py * sin;
+        const ry = px * sin + py * cos;
+        px = rx;
+        py = ry;
+      }
       const bracketColor = dec.target.mode === 'powerup' ? '#c084fc' : '#48dbfb';
-      // If the target is out of the radar scope, clip it to the edge
-      // so the bracket is still drawn (player sees "target is just
-      // off the map, the bracket is on the edge").
       const finalPos = dist > worldRadius
         ? clipToRadarEdge({ px, py }, halfSize, 12)
         : { px, py };
@@ -521,14 +561,21 @@ function createRadarView(deps) {
     }
   }
 
+  function setRadarMode(mode) {
+    radarMode = mode === 'north-up' ? 'north-up' : 'rotate';
+  }
+
   function resize() { fitCanvas(); }
+  function getRadarMode() {
+    return radarMode;
+  }
   function dispose() {
     // No listeners of our own to remove here; the canvas element is
     // owned by the caller (the DOM root). The composing factory
     // clears the children on dispose.
   }
 
-  return { draw, resize, dispose };
+  return { draw, resize, setRadarMode, getRadarMode, dispose };
 }
 
 // ===========================================================================
@@ -775,6 +822,7 @@ export function createAiDebugOverlay(deps = {}) {
     rootElArg.innerHTML = `
       <div class="ai-debug__title">AI DEBUG</div>
       <canvas class="ai-debug__radar" data-ai-debug="radarCanvas"></canvas>
+      <button class="ai-debug__mode-toggle" type="button" data-ai-debug="radarModeToggle" title="Toggle radar orientation">RADAR: ROTATE</button>
       <div class="ai-debug__chip" data-ai-debug="mode" data-ai-debug-panel="">IDLE</div>
       <div class="ai-debug__panel" data-ai-debug-panel="decision">
         <div class="ai-debug__row"><span class="ai-debug__row__key">MODE</span><span class="ai-debug__row__value" data-ai-debug="mode">IDLE</span></div>
@@ -817,6 +865,16 @@ export function createAiDebugOverlay(deps = {}) {
       getSubject, getAiShip, getAsteroids, getPowerupPos,
       getLastDecision, getActiveWeapon, worldRadius,
     });
+    const modeBtn = rootEl.querySelector('[data-ai-debug="radarModeToggle"]');
+    if (modeBtn && typeof modeBtn.addEventListener === 'function') {
+      modeBtn.addEventListener('click', () => {
+        const next = radarView && radarView.getRadarMode
+          ? (radarView.getRadarMode() === 'rotate' ? 'north-up' : 'rotate')
+          : 'rotate';
+        if (radarView) radarView.setRadarMode(next);
+        modeBtn.textContent = `RADAR: ${next === 'north-up' ? 'NORTH-UP' : 'ROTATE'}`;
+      });
+    }
     chipView = createChipView({ rootEl: () => rootEl, getLastDecision });
     panelsView = createPanelsView({
       rootEl: () => rootEl,
@@ -831,6 +889,13 @@ export function createAiDebugOverlay(deps = {}) {
     // Radar: cheap Canvas2D redraw. Per frame is fine (<0.3ms at
     // ~300 asteroids on a 200x200 canvas).
     if (radarView) radarView.draw();
+    // Sync the radar mode button label (in case the mode was changed
+    // programmatically or on first mount).
+    const modeBtn = rootEl.querySelector('[data-ai-debug="radarModeToggle"]');
+    if (modeBtn && radarView && radarView.getRadarMode) {
+      const mode = radarView.getRadarMode();
+      modeBtn.textContent = `RADAR: ${mode === 'north-up' ? 'NORTH-UP' : 'ROTATE'}`;
+    }
     // Panels: throttle DOM writes. The first update after mount
     // bypasses the throttle so the initial state is visible
     // immediately.

@@ -73,18 +73,26 @@ test('initial state: visible, position set, not expired, has radius', () => {
   pu.dispose();
 });
 
-test('update advances rotation and bobs the Y position', () => {
+test('update keeps powerup bobbing around the play plane (y=0)', () => {
   const pu = createPowerUp({
     scene: makeScene(),
-    spec: { type: 'laser', position: { x: 0, y: 2, z: 0 } },
+    spec: { type: 'laser', position: { x: 0, y: 0, z: 0 } },
   });
   const p = pu.getPosition();
-  const y0 = p.y;
-  // Several updates over 1 second — bob should move Y by a non-zero amount
-  for (let i = 0; i < 60; i++) pu.update(1 / 60);
-  // Bob amplitude is 0.35, so we expect |Δy| <= 0.7
-  assert.notEqual(p.y, y0, 'Y should have moved by the bob');
-  assert.ok(Math.abs(p.y - y0) <= 0.7, `bob within 0.7 of baseY, got Δy=${p.y - y0}`);
+  // The powerup bobs around the play plane (y=0) so it stays on the
+  // same plane as the ship/asteroids on average while keeping the
+  // visual bobbing animation.
+  const ys = [];
+  for (let i = 0; i < 60; i++) {
+    pu.update(1 / 60);
+    ys.push(p.y);
+  }
+  const min = Math.min(...ys);
+  const max = Math.max(...ys);
+  const avg = ys.reduce((a, b) => a + b, 0) / ys.length;
+  assert.ok(min < -0.1, 'powerup should bob below the play plane');
+  assert.ok(max > 0.1, 'powerup should bob above the play plane');
+  assert.ok(Math.abs(avg) < 0.05, 'powerup should average around the play plane');
   pu.dispose();
 });
 
