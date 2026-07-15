@@ -34,4 +34,34 @@ export const AI_TUNABLES = Object.freeze({
 
   /** Bias for asteroid size when choosing a chase target. */
   asteroidSizeBias: 12,
+
+  // ------------------------------------------------------------------
+  // Powerup velocity-error controller tunables
+  // ------------------------------------------------------------------
+
+  /** Cruise speed cap when approaching a powerup (u/s). */
+  powerupCruiseSpeed: 60,
+
+  /** Minimum average approach speed used to compute the intercept
+   *  horizon (u/s). Lower = more accurate prediction for close powerups. */
+  powerupMinApproachSpeed: 5,
+
+  /** Gain that maps distance to desired average approach speed
+   *  (u/s per unit distance). */
+  powerupApproachGain: 0.5,
+
+  /** Braking safety factor (0..1). Multiplies the theoretical max
+   *  safe speed (dist * LINEAR_DRAG) to leave margin for errors. */
+  powerupBrakeSafetyFactor: 0.8,
+
+  /** Velocity-error magnitude below which the AI coasts (u/s).
+   *  Prevents tiny thrust pulses when already on the right velocity. */
+  powerupVelocityErrorThreshold: 5,
+
+  /** Distance at which the AI switches to final-approach mode (u/s). */
+  powerupFinalApproachDist: 5,
+
+  /** Minimum closing speed to maintain during final approach (u/s).
+   *  Prevents stalling just outside the collection radius. */
+  powerupFinalApproachSpeed: 3,
 });

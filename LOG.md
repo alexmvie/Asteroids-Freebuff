@@ -7,7 +7,44 @@
 
 ---
 
-## Current State: v0.38.1 — Predictive Evade Tuning (Lookahead 0.8s + Buffer 1.5u)
+## Current State: v0.46.0 — Physics-Based Powerup Intercept Controller
+
+**Status:** ✅ 488 tests pass, build succeeds.
+
+### v0.46.0 Changes
+
+**Problem:** User reported that powerup approach was not fluid — the AI would orbit or fail to collect a nearby powerup despite knowing its velocity and trajectory.
+
+**Root cause:** `collectBehavior` in `src/entities/ai.js` was position-only. It turned toward the powerup and thrust when aligned, but it did not account for the ship's existing velocity or the powerup's motion. When the ship circled a powerup, forward thrust acted as centripetal force and sustained the orbit.
+
+**Fix:**
+- Replaced the position-only controller with a **velocity-error intercept controller**.
+- Predicts the powerup's future position using its current velocity and exponential drag (`POWERUP_PUSH_DRAG`).
+- Computes a desired closing velocity bounded by the ship's braking envelope (`LINEAR_DRAG`).
+- Steers toward the **velocity-error vector** (`desired - current velocity`), actively cancelling tangential orbit velocity.
+- Added a final-approach guard to maintain minimum closing speed when very close, preventing the ship from stalling just outside the collection radius.
+- Extracted all controller constants into `AI_TUNABLES` (`src/entities/ai-tunables.js`) so the tuning loop can adjust them:
+  - `powerupCruiseSpeed`
+  - `powerupMinApproachSpeed`
+  - `powerupApproachGain`
+  - `powerupBrakeSafetyFactor`
+  - `powerupVelocityErrorThreshold`
+  - `powerupFinalApproachDist`
+  - `powerupFinalApproachSpeed`
+
+**Files changed:**
+- `src/entities/ai.js` — rewrote `collectBehavior` with velocity-error controller.
+- `src/entities/ai-tunables.js` — added powerup controller tunables.
+- `tests/ai.test.js` — updated existing tests, added tangential-velocity regression test.
+- `src/version-constants.js` — bumped to `v0.46.0`.
+
+**Validation:**
+- 488 tests pass, build succeeds.
+- Browser capture pending.
+
+---
+
+## Previous State: v0.38.1 — Predictive Evade Tuning (Lookahead 0.8s + Buffer 1.5u)
 
 **Status:** ✅ 519 tests pass, build succeeds. Frame analysis showed 88% high-motion
 (84% in v0.38.0) — the problem shifted: wider thrustHeadingGate (0.10→0.25) makes

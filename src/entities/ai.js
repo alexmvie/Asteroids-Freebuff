@@ -24,7 +24,7 @@
  */
 
 import { createShip } from './ship.js';
-import { YAW_INERTIA_TAU } from './ship-constants.js';
+import { YAW_INERTIA_TAU, LINEAR_DRAG } from './ship-constants.js';
 import { POWERUP_PUSH_DRAG } from './powerup.js';
 import { AI_TUNABLES } from './ai-tunables.js';
 
@@ -505,14 +505,17 @@ return {
   braking: false,
 };
 }  /**
-   * COLLECT behavior: chase and collect a powerup.
+   * COLLECT behavior: chase and intercept a powerup.
    *
-   * Turn toward the powerup and thrust with a distance-adaptive
-   * approach speed. Far away the ship is allowed to cruise faster;
-   * close to the pickup it slows down so it doesn't overshoot the
-   * generous collection radius. This prevents the "thrust while
-   * turning → curve past → loop" failure mode while still reaching
-   * distant powerups before they expire.
+   * Uses a physics-based velocity-error controller:
+   * 1. Predicts the powerup's position at an adaptive horizon using its
+   *    current velocity and exponential drag (POWERUP_PUSH_DRAG).
+   * 2. Computes a desired closing velocity that respects the ship's
+   *    braking envelope (LINEAR_DRAG), so the ship arrives with low speed
+   *    and does not overshoot the pickup radius.
+   * 3. Steers toward the velocity-error vector (desired - current velocity),
+   *    not just the position vector. This actively cancels tangential
+   *    "orbiting" velocity and produces a smooth, deliberate approach.
    */
   export function collectBehavior(ctx) {
     if (!ctx.target || ctx.target.mode !== 'powerup') return null;
@@ -523,57 +526,79 @@ return {
     const powerupVel = ctx.powerupVel || { x: 0, z: 0 };
     const aiVel = ctx.aiVel || { x: 0, z: 0 };
 
-    // Short prediction: powerups are kicked by asteroid collisions but
-    // decay their push velocity exponentially (drag = POWERUP_PUSH_DRAG),
-    // so the maximum distance they can travel from a push is |v0|/drag.
-    // Use that bound instead of a naive linear extrapolation.
-    const PREDICTION_TIME = 1.0 / POWERUP_PUSH_DRAG;
+    // 1. Adaptive intercept horizon.
+    // Use a conservative average approach speed so we can still brake.
+    const dx0 = targetPos.x - aiPos.x;
+    const dz0 = targetPos.z - aiPos.z;
+    const dist0 = Math.hypot(dx0, dz0);
+    const cruiseSpeed = AI_TUNABLES.powerupCruiseSpeed;
+    const minApproachSpeed = AI_TUNABLES.powerupMinApproachSpeed;
+    const approachGain = AI_TUNABLES.powerupApproachGain;
+    const desiredAvgSpeed = Math.min(
+      cruiseSpeed,
+      Math.max(minApproachSpeed, dist0 * approachGain),
+    );
+    const tGo = Math.max(0.2, dist0 / desiredAvgSpeed);
+
+    // 2. Predict powerup position at tGo with exponential drag.
+    // p(t) = p0 + v0 * (1 - exp(-drag*t)) / drag
+    const drag = POWERUP_PUSH_DRAG;
+    const decayFactor = 1 - Math.exp(-drag * tGo);
     const predictedPos = {
-      x: targetPos.x + powerupVel.x * PREDICTION_TIME,
-      z: targetPos.z + powerupVel.z * PREDICTION_TIME,
+      x: targetPos.x + powerupVel.x * decayFactor / drag,
+      z: targetPos.z + powerupVel.z * decayFactor / drag,
     };
 
-    // Reuse the shared steering helper for yaw. Keep the heading
-    // error so we can gate thrust independently.
+    // 3. Desired velocity to reach the predicted intercept point.
+    const dx = predictedPos.x - aiPos.x;
+    const dz = predictedPos.z - aiPos.z;
+    const dist = Math.hypot(dx, dz);
+
+    // Braking guard: under exponential drag, stopping distance from
+    // speed v is v / LINEAR_DRAG. So the max safe speed at distance D
+    // is D * LINEAR_DRAG. Apply a safety factor for margin.
+    const brakeSafety = AI_TUNABLES.powerupBrakeSafetyFactor;
+    const maxSafeSpeed = Math.max(0, dist * LINEAR_DRAG * brakeSafety);
+    const desiredSpeed = Math.min(maxSafeSpeed, cruiseSpeed);
+    const dirX = dist > 0.001 ? dx / dist : 0;
+    const dirZ = dist > 0.001 ? dz / dist : 0;
+
+    const vDesX = dirX * desiredSpeed;
+    const vDesZ = dirZ * desiredSpeed;
+
+    // 4. Velocity error = desired - current. Steering toward this vector
+    // cancels tangential momentum and aligns the ship for the intercept.
+    const vErrX = vDesX - aiVel.x;
+    const vErrZ = vDesZ - aiVel.z;
+    const vErrMag = Math.hypot(vErrX, vErrZ);
+
+    const steerTarget = {
+      x: aiPos.x + vErrX,
+      z: aiPos.z + vErrZ,
+    };
+
     const steeringCtx = {
       ...ctx,
       aiPos,
       aiYaw,
       thrustHeadingGate: ctx.powerupThrustGate ?? DEFAULTS.powerupThrustGate,
     };
-    const steer = steerToward(steeringCtx, predictedPos, 'powerup');
+    const steer = steerToward(steeringCtx, steerTarget, 'powerup');
 
-    // Distance-adaptive approach speed. We want to arrive at the
-    // pickup with a controlled speed so the ship doesn't fly
-    // straight through the collection radius.
-    //   - far away: up to maxApproachSpeed
-    //   - close: down to minApproachSpeed
-    const dx = predictedPos.x - aiPos.x;
-    const dz = predictedPos.z - aiPos.z;
-    const dist = Math.hypot(dx, dz);
-    const closingSpeed = dist > 0.001 ? (aiVel.x * dx + aiVel.z * dz) / dist : 0;
+    // 5. Thrust only when aligned with the velocity-error direction and
+    // there is still a meaningful velocity error to correct.
+    const aligned = Math.abs(steer.predictedDiff) < steeringCtx.thrustHeadingGate;
+    let thrust = aligned && vErrMag > AI_TUNABLES.powerupVelocityErrorThreshold;
 
-    const minApproachSpeed = 5;
-    const maxApproachSpeed = 30;
-    const desiredClosing = Math.max(
-      minApproachSpeed,
-      Math.min(maxApproachSpeed, dist * 0.3),
-    );
-
-    // Only thrust if we are facing the target (|predictedDiff| within
-    // the powerup gate) AND we are not already closing faster than
-    // desired. If we are closing too fast, drag will slow us; if we
-    // are too slow or stationary, thrust catches us up.
-    //
-    // Orbital-trap guard: if the ship's total speed is much higher than
-    // the desired closing speed while the radial closing speed is low, it
-    // is circling the target. Suspending thrust lets LINEAR_DRAG kill the
-    // tangential velocity, so the turn radius shrinks and the ship spirals
-    // into the collection radius instead of orbiting forever.
-    const speed = Math.hypot(aiVel.x, aiVel.z);
-    const aligned = Math.abs(steer.predictedDiff) < (ctx.powerupThrustGate ?? DEFAULTS.powerupThrustGate);
-    const needMoreClosing = closingSpeed < desiredClosing && speed < desiredClosing * 1.5;
-    const thrust = aligned && needMoreClosing;
+    // Final-approach guard: when very close to the raw powerup position,
+    // maintain a minimum closing speed so the ship doesn't coast to a halt
+    // just outside the collection radius.
+    if (!thrust && aligned && dist0 < AI_TUNABLES.powerupFinalApproachDist) {
+      const dir0X = dist0 > 0.001 ? dx0 / dist0 : 0;
+      const dir0Z = dist0 > 0.001 ? dz0 / dist0 : 0;
+      const closingSpeed = (aiVel.x * dir0X + aiVel.z * dir0Z);
+      thrust = closingSpeed < AI_TUNABLES.powerupFinalApproachSpeed;
+    }
 
     return { yaw: steer.yaw, thrust, mode: 'powerup', fire: false, braking: false };
   }

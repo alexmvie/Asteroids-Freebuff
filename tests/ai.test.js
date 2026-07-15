@@ -768,7 +768,8 @@ test('collectBehavior: does not thrust when already closing too fast', () => {
   };
   const result = collectBehavior(ctx);
   assert.equal(result.mode, 'powerup');
-  assert.equal(result.yaw, 0);
+  // The velocity-error controller sees the ship is overshooting and
+  // commands a yaw to cancel the excess closing velocity.
   assert.equal(result.thrust, false, 'must not thrust when already closing faster than desired');
 });
 
@@ -824,6 +825,27 @@ test('collectBehavior: predicts powerup velocity', () => {
   assert.equal(result.mode, 'powerup');
   // Powerup is moving right, so the ship should still turn toward +X.
   assert.equal(result.yaw, 0);
+});
+
+test('collectBehavior: velocity-error controller cancels tangential orbit velocity', () => {
+  // Ship is close to the powerup but moving sideways (high tangential
+  // velocity, near-zero closing speed). The velocity-error controller
+  // should command a yaw that cancels the sideways motion, not thrust
+  // forward into an orbit.
+  const ctx = {
+    target: { mode: 'powerup', pos: { x: 10, z: 0 } },
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    aiVel: { x: 0, z: 30 },
+    powerupVel: { x: 0, z: 0 },
+    powerupThrustGate: 0.10,
+    yawDeadband: 0.10,
+    aiAngularVel: 0,
+  };
+  const result = collectBehavior(ctx);
+  assert.equal(result.mode, 'powerup');
+  assert.notEqual(result.yaw, 0, 'must turn to cancel tangential velocity');
+  assert.equal(result.thrust, false, 'must not thrust while misaligned with velocity error');
 });
 
 // --------------------------------------------------------------------------
