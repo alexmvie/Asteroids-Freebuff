@@ -28,6 +28,12 @@ import { createStateMachine, State } from './systems/state.js';
 import { createHud } from './ui/hud.js';
 import { createDebugHud } from './ui/debug-hud.js';
 import { createAiDebugOverlay } from './ui/ai-debug-overlay.js';
+import {
+  AI_TUNABLES,
+  resetAITunables,
+  exportAITunables,
+} from './entities/ai-tunables.js';
+import { createAiTunersPanel } from './ui/ai-tuners-panel.js';
 import { VERSION } from './version-constants.js';
 // __BRANCH__ + __COMMIT__ are Vite-define globals, populated from git at
 // config-load time in vite.config.js. See that file for the rationale
@@ -42,7 +48,6 @@ import { createPowerUpSystem } from './systems/powerup-system.js';
 import { createParticleSystem } from './systems/particles.js';
 import { createCaptureMarkers } from './systems/capture-markers.js';
 import { createAiFlightDebug } from './systems/ai-flight-debug.js';
-import { AI_TUNABLES } from './entities/ai-tunables.js';
 
 // ---- Power-up drop frequency -------------------------------------------
 // Probability (0.0–1.0) that an asteroid destroy spawns a laser
@@ -935,6 +940,22 @@ const aiDebugOverlay = createAiDebugOverlay({
 {
   const root = document.querySelector('[data-ai-debug-root]');
   if (root) aiDebugOverlay.mount(root);
+}
+
+// v0.46.x AI Live Tuners Panel (right of the AI debug overlay, OR
+// stacked below on narrow viewports). Writes directly to the
+// mutable AI_TUNABLES bag; src/entities/ai.js reads those keys each
+// tick so a slider drag is visible on the next brain frame. RESET
+// restores frozen defaults (see AI_TUNABLE_DEFAULTS). COPY JSON
+// writes the current snapshot to clipboard + console.
+const aiTunersPanel = createAiTunersPanel({
+  tunables: AI_TUNABLES,
+  resetFn: () => resetAITunables(),
+  exportFn: () => exportAITunables(),
+});
+{
+  const root = document.querySelector('[data-ai-tuners-root]');
+  if (root) aiTunersPanel.mount(root);
 }
 
 // ---- Render loop ---------------------------------------------------------

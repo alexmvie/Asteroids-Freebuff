@@ -184,6 +184,7 @@ test('colorForThreatDistance: monotonic t progression — r decreases, b increas
 
 test('modeToBadgeClass: known modes map to known modifiers', () => {
   assert.equal(modeToBadgeClass('dodge'),    'ai-debug__chip--dodge');
+  assert.equal(modeToBadgeClass('evade'),    'ai-debug__chip--evade');
   assert.equal(modeToBadgeClass('asteroid'), 'ai-debug__chip--asteroid');
   assert.equal(modeToBadgeClass('powerup'),  'ai-debug__chip--powerup');
   assert.equal(modeToBadgeClass('idle'),     'ai-debug__chip--idle');
@@ -193,6 +194,13 @@ test('modeToBadgeClass: unknown mode falls back to idle', () => {
   assert.equal(modeToBadgeClass(''),     'ai-debug__chip--idle');
   assert.equal(modeToBadgeClass('flarb'), 'ai-debug__chip--idle');
   assert.equal(modeToBadgeClass(null),   'ai-debug__chip--idle');
+});
+
+test('modeToBadgeClass: evade mode maps to the v0.46.x evade modifier', () => {
+  // The brain returns 'evade' (not 'dodge') on this branch; the chip
+  // must render ``--evade`` (orange pulse) — not ``--idle`` (gray).
+  assert.equal(modeToBadgeClass('evade'), 'ai-debug__chip--evade');
+  assert.notEqual(modeToBadgeClass('evade'), 'ai-debug__chip--idle');
 });
 
 // ---------------------------------------------------------------------------
@@ -314,11 +322,11 @@ function buildMockRoot() {
       // Build a synthetic map of the elements we expect to query, so
       // we don't have to parse the HTML. This emulates what index.html
       // provides for the live app.
-      const names = [
-        'mode', 'yaw', 'thrust', 'fire', 'weapon', 'target',
-        'threats', 'lookahead', 'state', 'score', 'energyBar',
-        'energyVal', 'energyMax',
-      ];
+    const names = [
+      'mode', 'yaw', 'thrust', 'fire', 'weapon', 'target',
+      'threats', 'lookahead', 'reason', 'state', 'score', 'energyBar',
+      'energyVal', 'energyMax',
+    ];
       for (const n of names) elements.set(`dbg:${n}`, makeCell(`dbg:${n}`));
       elements.set('panel:decision', makePanel('panel:decision'));
       elements.set('panel:state',    makePanel('panel:state'));
@@ -546,4 +554,89 @@ test('createAiDebugOverlay: dispose unmounts (subsequent update does not throw b
   ai.mount(root);
   ai.dispose();
   assert.doesNotThrow(() => ai.update(), 'update after dispose should be a no-op');
+});
+
+// =============================================================================
+// v0.46.x — WHY row (decision.reason)
+// =============================================================================
+// The user explicitly asked for "damit ich sehe was die AI macht". Every
+// behavior (evade / engage / collect / idle) returns a `reason` string
+// explaining which threshold fired. This row pins the wiring contract:
+// when getLastDecision returns { ..., reason }, the [data-ai-debug=reason]
+// cell must show that exact text. Empty / missing reason shows '—'.
+
+test('createAiDebugOverlay: WHY row populated from getLastDecision.reason', () => {
+  const ai = createAiDebugOverlay({
+    getSubject: () => ({ position: { x: 0, y: 0, z: 0 }, rotation: { yaw: 0 } }),
+    getLastDecision: () => ({
+      mode: 'evade',
+      yaw: 1,
+      thrust: true,
+      fire: false,
+      activeWeapon: 'bullet',
+      target: null,
+      nearest: { pos: { x: 5, z: 0 }, dist: 5 },
+      threatsCount: 1,
+      reason: 'nearest 5.0u < evadeDist 10.0u',
+    }),
+    getActiveWeapon: () => 'bullet',
+    getAsteroids: () => [],
+  });
+  const root = buildMockRoot();
+  ai.mount(root);
+  ai.update();
+  const reasonCell = root.querySelector('[data-ai-debug="reason"]');
+  assert.equal(reasonCell.textContent, 'nearest 5.0u < evadeDist 10.0u', 'WHY row must mirror decision.reason verbatim');
+  ai.dispose();
+});
+
+test('createAiDebugOverlay: WHY row shows em-dash when reason is missing', () => {
+  const ai = createAiDebugOverlay({
+    getSubject: () => ({ position: { x: 0, y: 0, z: 0 }, rotation: { yaw: 0 } }),
+    getLastDecision: () => ({
+      mode: 'idle',
+      yaw: 0,
+      thrust: false,
+      fire: false,
+      activeWeapon: 'bullet',
+      target: null,
+      nearest: null,
+      threatsCount: 0,
+      // reason intentionally omitted.
+    }),
+  });
+  const root = buildMockRoot();
+  ai.mount(root);
+  ai.update();
+  const reasonCell = root.querySelector('[data-ai-debug="reason"]');
+  assert.equal(reasonCell.textContent, '—', 'no reason → em-dash');
+  ai.dispose();
+});
+
+test('createAiDebugOverlay: WHY row refreshes on subsequent updates', () => {
+  let reasonText = 'idle (no asteroids in range)';
+  const ai = createAiDebugOverlay({
+    getSubject: () => ({ position: { x: 0, y: 0, z: 0 }, rotation: { yaw: 0 } }),
+    getLastDecision: () => ({
+      mode: 'idle',
+      yaw: 0,
+      thrust: false,
+      fire: false,
+      activeWeapon: 'bullet',
+      target: null,
+      nearest: null,
+      threatsCount: 0,
+      reason: reasonText,
+    }),
+  });
+  const root = buildMockRoot();
+  ai.mount(root);
+  ai.update();
+  const reasonCell = root.querySelector('[data-ai-debug="reason"]');
+  assert.equal(reasonCell.textContent, reasonText);
+
+  reasonText = 'asteroid L @ 24.0u, closing 20.0u/s';
+  ai.update();
+  assert.equal(reasonCell.textContent, reasonText, 'WHY row must update on every tick');
+  ai.dispose();
 });

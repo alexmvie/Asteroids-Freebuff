@@ -1767,6 +1767,295 @@ canvas {
 }
 
 /* ============================================================================
+   Block: ai-debug__chip--evade (v0.46.x — added when EVADE mode
+   replaced DODGE on the ai.js branch). Pulse animation distinguishes
+   it from idle so the user can tell apart "I'm not doing anything"
+   from "I'm actively escaping a threat".
+   ============================================================================ */
+.ai-debug__chip--evade {
+  color: var(--color-warn);
+  background: rgba(255, 136, 68, 0.12);
+  border-color: var(--color-warn);
+  animation: ai-debug-chip-pulse 0.5s ease-in-out infinite alternate;
+}
+
+/* ============================================================================
+   Block: ai-debug__row--why (v0.46.x — short text explaining WHY
+   the AI chose its current mode). Sits at the bottom of the decision
+   panel as a 2-line wraparound row so the explanation doesn't crowd
+   the chip + radar. The text is short by design (the behavior's
+   `reason` string never exceeds ~40 chars).
+   ============================================================================ */
+.ai-debug__row--why .ai-debug__row__value {
+  flex: 1;
+  text-align: right;
+  color: var(--color-fg-dim);
+  font-weight: var(--font-weight-normal);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--letter-spacing-tight);
+  /* Allow long reason strings to wrap to a second line. */
+  white-space: normal;
+  max-width: 60%;
+}
+
+/* ============================================================================
+   Block: ai-tuners (v0.46.x — Live AI Tuners panel)
+   ----------------------------------------------------------------------------
+   Always-visible (no toggle, matches the .ai-debug overlay above it).
+   Bottom-right column stack: AI Debug Overlay (top) → AI Tuners (below).
+   The panel hosts a per-group set of sliders that write directly to
+   the mutable AI_TUNABLES bag. Sized to the same width as the AI
+   debug overlay (~200px) so they read as one cohesive unit.
+   ============================================================================ */
+
+.ai-tuners {
+  position: fixed;
+  /* Sit ABOVE the AI Debug Overlay so the two bottom-right panels
+     don't pile on top of each other. The debug overlay is at
+     `bottom: 60px` and stacks ~480px of content (title + radar 200px
+     + chip + 8 decision rows + divider + 3 state rows). Add ~40px
+     margin between them so the buttons at the top of the tuner
+     panel stay reachable on a 900px+ viewport. */
+  bottom: 540px;
+  right: var(--space-3);
+  z-index: var(--z-hud);
+  font-family: var(--font-family);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-md);
+  color: var(--color-fg);
+  pointer-events: none;
+  /* Fixed width matches the AI Debug Overlay so they read as one
+     stack. tall vertical max-height keeps runtime sliders in
+     reach on standard 900px+ viewports; the inner .ai-tuners__groups
+     scrolls if the user is on a smaller viewport. */
+  min-width: 220px;
+  max-width: 220px;
+  /* Cap so the panel never bleeds off the top. On small viewports
+     the inner .ai-tuners__groups scrolls. */
+  max-height: calc(100vh - 580px);
+  font-size: var(--font-size-sm);
+}
+
+.ai-tuners--mounted {
+  /* Same trick as .ai-debug--mounted: a class the JS can target so
+     CSS-only styling can hook into "factory has finished building
+     the panel". */
+}
+
+.ai-tuner__title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  color: var(--color-primary);
+  text-shadow: 0 0 var(--space-2) var(--color-primary-glow-soft);
+  text-align: center;
+  padding-bottom: var(--space-half);
+  border-bottom: var(--border-width) solid var(--color-primary-soft);
+}
+
+.ai-tuner__actions {
+  display: flex;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  pointer-events: auto;
+}
+
+.ai-tuner__btn {
+  flex: 1;
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-bg-tint-primary-soft);
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-md);
+  color: var(--color-fg);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base);
+}
+
+.ai-tuner__btn:hover {
+  background: var(--color-bg-tint-primary-base);
+  border-color: var(--color-primary-bright);
+  color: var(--color-fg-on-primary);
+}
+
+.ai-tuner__btn:active {
+  transform: translateY(1px);
+}
+
+.ai-tuner__groups {
+  /* Scrollable inner area so 22 sliders fit on a 900px-tall viewport
+     without making the panel itself overflow. */
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-primary-soft) transparent;
+  pointer-events: auto;
+  padding-right: var(--space-1);
+}
+
+.ai-tuner__groups::-webkit-scrollbar {
+  width: 4px;
+}
+.ai-tuner__groups::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ai-tuner__groups::-webkit-scrollbar-thumb {
+  background: var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+}
+
+.ai-tuner__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1) 0;
+  border: 0;
+  border-top: var(--border-width) dashed var(--color-primary-soft);
+  margin: 0;
+  min-width: 0;
+}
+
+.ai-tuner__group-legend {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  color: var(--color-primary);
+  padding: var(--space-quarter) 0;
+}
+
+.ai-tuner__row {
+  display: grid;
+  grid-template-columns: 70px 1fr 56px;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+}
+
+.ai-tuner__label {
+  color: var(--color-primary);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-tight);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-tuner__slider {
+  width: 100%;
+  height: var(--space-3);
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  margin: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  /* Slim track; cyan fill matches the project's primary color. */
+}
+
+.ai-tuner__slider::-webkit-slider-runnable-track {
+  height: 2px;
+  background: var(--color-primary-soft);
+  border-radius: 1px;
+}
+.ai-tuner__slider::-moz-range-track {
+  height: 2px;
+  background: var(--color-primary-soft);
+  border-radius: 1px;
+}
+
+.ai-tuner__slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: var(--space-3);
+  height: var(--space-3);
+  background: var(--color-primary);
+  border: 1px solid var(--color-fg-on-primary);
+  border-radius: 50%;
+  cursor: grab;
+  margin-top: -6px;
+  box-shadow: 0 0 var(--space-1) var(--color-primary-glow-soft);
+  transition:
+    box-shadow var(--transition-base),
+    transform var(--transition-fast);
+}
+.ai-tuner__slider:hover::-webkit-slider-thumb {
+  box-shadow: 0 0 var(--space-3) var(--color-primary-glow);
+  transform: scale(1.1);
+}
+.ai-tuner__slider:active::-webkit-slider-thumb {
+  cursor: grabbing;
+  transform: scale(1.2);
+  background: var(--color-fg-on-primary);
+  box-shadow: 0 0 var(--space-3) var(--color-primary-bright);
+}
+
+.ai-tuner__slider::-moz-range-thumb {
+  width: var(--space-3);
+  height: var(--space-3);
+  background: var(--color-primary);
+  border: 1px solid var(--color-fg-on-primary);
+  border-radius: 50%;
+  cursor: grab;
+  box-shadow: 0 0 var(--space-1) var(--color-primary-glow-soft);
+}
+.ai-tuner__slider:hover::-moz-range-thumb {
+  box-shadow: 0 0 var(--space-3) var(--color-primary-glow);
+}
+
+.ai-tuner__value {
+  color: var(--color-fg);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-bold);
+  text-align: right;
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-tuner__status {
+  min-height: var(--space-3);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-tight);
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--color-primary);
+  pointer-events: none;
+}
+
+.ai-tuner__status:empty {
+  display: none;
+}
+
+.ai-tuner__status--error {
+  color: var(--color-warn);
+}
+
+/* ============================================================================
    Block: game-version (bottom-right HUD)
    ----------------------------------------------------------------------------
    Display-only chip that always shows the live build version + branch

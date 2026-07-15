@@ -7,7 +7,91 @@
 
 ---
 
-## Current State: v0.46.1 — Powerup Intercept Controller + Edge-Case Tests
+## Current State: v0.47.0 — AI Live Tuner Panel + "WHY" Debug Row
+
+**Status:** ✅ 543 tests pass (was 493 at v0.46.1), build succeeds.
+
+### Problem
+
+User reported two persistent issues with the demo AI:
+1. **"Die ahip ai ist noch immer sehr schlecht"** — even after v0.46.1 the AI wasn't performing as expected.
+2. **"Der optimize loop ist nicht wie ich es wünsche"** — the Python tuning loop (`scripts/ai_tuning_loop.py`) ran 8 captures \u00d7 60 s = ~10 min per round and was a black box.
+
+Visiblility + iteration speed were the missing pieces. The user wanted sliders in the browser.
+
+### Architecture
+
+#### 1. Live mutable SSOT (`src/entities/ai-tunables.js`)
+
+Previously: `AI_TUNABLES = Object.freeze({ ... })`. The Python tuning loop had to write the file, git commit, and reload.
+
+Now: **frozen defaults + mutable live bag**, side-by-side.
+```
+AI_TUNABLE_DEFAULTS = Object.freeze({ evadeDist: 10, ... });   // SSOT for values
+AI_TUNABLES         = { ...AI_TUNABLE_DEFAULTS };               // mutable bag (live)
+resetAITunables()   = Object.assign(AI_TUNABLES, AI_TUNABLE_DEFAULTS);
+exportAITunables()  = JSON.stringify(AI_TUNABLES, null, 2);
+```
+
+`src/entities/ai.js` reads EVERY tunable via `opts.X ?? AI_TUNABLES.X` so a slider drag is visible on the very next brain tick. Factory overrides (used by tests) still take precedence — the `??` chain ensures test isolation isn't broken.
+
+#### 2. Live Tuner Panel (`src/ui/ai-tuners-panel.js`)
+
+New bottom-right panel above the AI debug overlay. 22 sliders in 6 groups:
+
+| Group    | Sliders |
+|----------|---------|
+| Fire     | `fireHeadingGate`, `fireMinDist`, `fireMaxDist`, `bulletSpeed` |
+| Thrust   | `thrustHeadingGate`, `yawDeadband` |
+| Evade    | `evadeDist` |
+| Powerup  | 10 tunables from `powerupMaxChaseDist` through `powerupFinalApproachSpeed` |
+| Target   | `asteroidSizeBias`, `forwardConeHalfAngle`, `powerupNearBehindThreshold` |
+| Laser    | `laserFireHeadingGate` |
+
+Action bar: `RESET \u2192 DEFAULTS` (calls `resetAITunables()`) + `COPY JSON` (writes to clipboard + console.log).
+
+#### 3. "WHY" debug row (`src/entities/ai.js` + `src/ui/ai-debug-overlay.js`)
+
+Every behavior (evade, engage, collect, idle) now returns a `decision.reason` string explaining which threshold fired:
+
+- EVADE: `nearest 5.0u < evadeDist 10.0u`
+- COLLECT: `PU @ 23.4u, closing 18u/s, velErr 4.2u/s`
+- ENGAGE (asteroid): `AST L @ 24.0u, closing 20.0u/s`
+- IDLE: `idle (no asteroids in range)`
+
+The AI debug overlay's modes chip + target row now include this row.
+
+#### 4. Per-cell skip-if-unchanged in panels view (`src/ui/ai-debug-overlay.js`)
+
+The `update()` function previously used a global 80ms throttle that could swallow back-to-back test updates and user-visible flips. Replaced with per-cell `lastWritten = {}` cache inside `setText()`: one string compare per cell per frame, never drops real changes. The brain sits in IDLE for many ticks, so ~95 % of writes auto-skip; mode changes that swap between two strings many times per second still capture every flip.
+
+### Files changed
+
+- `src/entities/ai-tunables.js` — mutable bag + frozen DEFAULTS + reset/export helpers.
+- `src/entities/ai.js` — every tunable now reads via `opts.X ?? AI_TUNABLES.X`; every behavior returns a `reason` string.
+- `src/ui/ai-tuners-panel.js` — **new**, 22 sliders + reset + copy-json buttons.
+- `src/ui/ai-debug-overlay.js` — WHY row + per-cell skip; chip extension for evade mode.
+- `src/main.js` — wires tuner panel mount, hooks `resetAITunables()` + `exportAITunables()` for the buttons.
+- `index.html` — `#ai-tuners` container.
+- `src/styles.css` — `.ai-tuners` BEM block (.ai-tuner__row, .ai-tuner__slider, .ai-tuner__value, action buttons, status).
+- `tests/ai-tunables.test.js` — **new**, 21 tests for live mutability + reset + export.
+- `tests/ai-tuners-panel.test.js` — **new**, 29 tests for pure helpers + factory smoke + setValue/reset/dispose.
+- `tests/ai-debug-overlay.test.js` — extended with WHY row + per-cell update verification.
+- `src/version-constants.js` — bumped to `v0.47.0`.
+
+### What replaced the python loop
+
+The Python tuning loop (`scripts/ai_tuning_loop.py`) is **not deleted** — it remains for batch searches over wide parameter ranges or unattended sweeps. The browser panel is now the primary tuning surface: 1 slider drag ≈ 1 frame of feedback. The loop can still produce candidate presets that the user copies back into `ai-tunables.js` as the new `AI_TUNABLE_DEFAULTS`.
+
+### Validation
+
+- 543 tests pass, 0 failures.
+- Vite build succeeds (2.15 s, 207 KB gzipped main bundle).
+- Browser: load `localhost:5173`, drag any slider, observe the AI debug overlay + the AI behavior change within one tick.
+
+---
+
+## Previous State: v0.46.1 — Powerup Intercept Controller + Edge-Case Tests
 
 **Status:** ✅ 493 tests pass, build succeeds.
 

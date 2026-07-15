@@ -223,6 +223,7 @@ export function colorForThreatDistance(dist, maxDist) {
 export function modeToBadgeClass(mode) {
   switch (mode) {
     case 'dodge':   return 'ai-debug__chip--dodge';
+    case 'evade':   return 'ai-debug__chip--evade';
     case 'asteroid':return 'ai-debug__chip--asteroid';
     case 'powerup': return 'ai-debug__chip--powerup';
     case 'idle':    return 'ai-debug__chip--idle';
@@ -584,6 +585,7 @@ function createRadarView(deps) {
 
 const MODE_CHIP_LABELS = Object.freeze({
   dodge: 'DODGE',
+  evade: 'EVADE',
   asteroid: 'ASTEROID',
   powerup: 'POWERUP',
   idle: 'IDLE',
@@ -608,11 +610,9 @@ function createChipView(deps) {
     const mode = (dec && dec.mode) || 'idle';
     el.textContent = MODE_CHIP_LABELS[mode] || mode.toUpperCase();
     // Strip all chip modifier classes first so we don't pile up.
-    for (const cls of Object.values(MODE_CHIP_LABELS).map((_l, i) => i)) {
-      // nop placeholder for clarity
-    }
     el.classList.remove(
       'ai-debug__chip--dodge',
+      'ai-debug__chip--evade',
       'ai-debug__chip--asteroid',
       'ai-debug__chip--powerup',
       'ai-debug__chip--idle',
@@ -643,6 +643,13 @@ function createPanelsView(deps) {
   // Cache of { name → element } — first read seeds; later reads use
   // the cache (no re-query per frame).
   let els = null;
+  // Per-cell last-written string. setText() short-circuits when the
+  // new value matches the cached one — this is the real throttle:
+  // dropping a real change is worse than a few extra string compares
+  // per frame (the brain sits in IDLE for many ticks, so we skip
+  // ~95% of writes naturally; reason-mode changes that swap between
+  // two strings many times per second still capture every flip).
+  let lastWritten = null;
 
   function refreshEls() {
     const r = typeof rootEl === 'function' ? rootEl() : rootEl;
@@ -658,12 +665,14 @@ function createPanelsView(deps) {
       target: r.querySelector('[data-ai-debug="target"]'),
       threats: r.querySelector('[data-ai-debug="threats"]'),
       lookahead: r.querySelector('[data-ai-debug="lookahead"]'),
+      reason: r.querySelector('[data-ai-debug="reason"]'),
       state: r.querySelector('[data-ai-debug="state"]'),
       score: r.querySelector('[data-ai-debug="score"]'),
       energyVal: r.querySelector('[data-ai-debug="energyVal"]'),
       energyMax: r.querySelector('[data-ai-debug="energyMax"]'),
       energyBar: r.querySelector('[data-ai-debug="energyBar"]'),
     };
+    lastWritten = {};
     return els;
   }
   refreshEls();
@@ -672,7 +681,12 @@ function createPanelsView(deps) {
     if (!els) refreshEls();
     if (!els || !els[name]) return;
     if (typeof text !== 'string') text = String(text ?? '');
+    // Per-cell skip-if-unchanged. Single string-compare per cell per
+    // frame; cheaper than the global time-based throttle it replaced
+    // AND guaranteed to never drop a real change.
+    if (lastWritten && lastWritten[name] === text) return;
     if ('textContent' in els[name]) els[name].textContent = text;
+    if (lastWritten) lastWritten[name] = text;
   }
   function setStyle(name, prop, value) {
     if (!els) refreshEls();
@@ -702,6 +716,12 @@ function createPanelsView(deps) {
     const la = (dec && typeof dec.lookaheadThreats === 'number') ? dec.lookaheadThreats : 0;
     setText('threats', String(tc));
     setText('lookahead', String(la));
+    // WHY row — short text explaining which threshold fired. This
+    // is the one the user explicitly asked for ("damit ich sehe, was
+    // die ai logik macht"). Behaviors return `decision.reason`
+    // (see src/entities/ai.js) — empty fallback so missing values
+    // do not show stale text.
+    setText('reason', dec && dec.reason ? String(dec.reason) : '—');
     // Highlight weapon row when laser active (cyan→orange tint).
     const weaponEl = els?.weapon;
     if (weaponEl && weaponEl.classList) {
@@ -734,6 +754,7 @@ function createPanelsView(deps) {
 
   function dispose() {
     els = null;
+    lastWritten = null;
   }
 
   return { update, dispose };
@@ -816,7 +837,6 @@ export function createAiDebugOverlay(deps = {}) {
   let radarView = null;
   let chipView = null;
   let panelsView = null;
-  let lastPanelWriteAt = 0;
 
   function buildDom(rootElArg) {
     rootElArg.innerHTML = `
@@ -833,6 +853,7 @@ export function createAiDebugOverlay(deps = {}) {
         <div class="ai-debug__row"><span class="ai-debug__row__key">TARGET</span><span class="ai-debug__row__value" data-ai-debug="target">—</span></div>
         <div class="ai-debug__row"><span class="ai-debug__row__key">THREATS</span><span class="ai-debug__row__value" data-ai-debug="threats">0</span></div>
         <div class="ai-debug__row"><span class="ai-debug__row__key">LOOKAHEAD</span><span class="ai-debug__row__value" data-ai-debug="lookahead">0</span></div>
+        <div class="ai-debug__row ai-debug__row--why"><span class="ai-debug__row__key">WHY</span><span class="ai-debug__row__value" data-ai-debug="reason">—</span></div>
       </div>
       <div class="ai-debug__divider"></div>
       <div class="ai-debug__panel" data-ai-debug-panel="state">
@@ -896,17 +917,15 @@ export function createAiDebugOverlay(deps = {}) {
       const mode = radarView.getRadarMode();
       modeBtn.textContent = `RADAR: ${mode === 'north-up' ? 'NORTH-UP' : 'ROTATE'}`;
     }
-    // Panels: throttle DOM writes. The first update after mount
-    // bypasses the throttle so the initial state is visible
-    // immediately.
-    const now = (typeof performance !== 'undefined' && performance.now)
-      ? performance.now()
-      : Date.now();
-    if (lastPanelWriteAt === 0 || now - lastPanelWriteAt >= OVERLAY_CONFIG.panelUpdateIntervalMs) {
-      lastPanelWriteAt = now;
-      if (chipView) chipView.update();
-      if (panelsView) panelsView.update();
-    }
+    // Panels: write on every tick. setText() does per-cell skip-if-
+    // unchanged internally (one string-compare per cell) so
+    // duplicate writes are essentially free, while real changes
+    // (the WHY row toggling between two reasons many times per
+    // second) ALWAYS land on the very next update. The previous
+    // 80 ms global throttle could swallow back-to-back test updates
+    // AND user-visible flips; per-cell caching is strictly better.
+    if (chipView) chipView.update();
+    if (panelsView) panelsView.update();
   }
 
   function dispose() {
@@ -924,7 +943,6 @@ export function createAiDebugOverlay(deps = {}) {
     radarView = null;
     chipView = null;
     panelsView = null;
-    lastPanelWriteAt = 0;
   }
 
   return { mount, update, dispose };

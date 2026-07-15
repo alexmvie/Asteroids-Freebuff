@@ -137,6 +137,14 @@
          attribute instead of getElementById (consistent with how
          debug-hud is wired). -->
     <div id="ai-debug-overlay" class="ai-debug" data-ai-debug-root></div>
+    <!-- v0.46.x AI Live Tuners Panel — bottom-right, mounted BELOW
+         the AI Debug Overlay. Visible by default (matches the
+         always-visible pattern of the overlay above). Wired to
+         write directly to the mutable AI_TUNABLES bag so a slider
+         drag is visible on the very next brain tick. RESET restores
+         the frozen defaults; COPY JSON writes the current snapshot
+         to the clipboard + console. -->
+    <div id="ai-tuners" class="ai-tuners" data-ai-tuners-root></div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
