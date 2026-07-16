@@ -440,14 +440,14 @@ function buildMockRoot() {
     // Idempotent — the canvas is queried twice (once by the factory's
     // mount(), once during the compile-time v0.63.0 round-3 bug fix
     // below). Returning the same instance w/ the same width/height
-    // keeps the mock consistent. Namespaced key avoids collisions
-    // with any future canvas-bearing fixture.
-    if (elements.has('mock:canvas-radar')) return elements.get('mock:canvas-radar');
+    // keeps the mock consistent. Prefix `canvas:` matches the
+    // existing `dbg:` / `panel:` convention in this mock.
+    if (elements.has('canvas:radar')) return elements.get('canvas:radar');
     const el = {
       width: 0, height: 0, style: {},
       getContext: () => null, // null context → radarView.draw is a no-op
     };
-    elements.set('mock:canvas-radar', el);
+    elements.set('canvas:radar', el);
     return el;
   }
   function makeButton(key) {
@@ -555,17 +555,24 @@ test('createAiDebugOverlay: dispose before mount is a no-op (does not throw)', (
 // precedence rule so a future refactor (alphabetical ordering,
 // "tidy these up", etc.) doesn't silently break the v0.63.0
 // toggle-button contract.
-test('v0.63.0 round-3d regression guard: querySelector("[data-ai-debug=radarModeToggle]") returns a BUTTON (has addEventListener), not a CELL', () => {
+//
+// Pins BOTH ends of the decision: the toggle must be a BUTTON, AND
+// other `[data-ai-debug="..."]` selectors must still resolve to CELLs
+// (the inverse). A future refactor that returned the wrong kind of
+// element for EITHER selector would trip the regression guard.
+test('v0.63.0 round-3d regression guard: querySelector button-vs-cell precedence is intact', () => {
   const root = buildMockRoot();
-  const el = root.querySelector('[data-ai-debug="radarModeToggle"]');
-  assert.ok(el, 'radarModeToggle selector must return an element');
-  // A BUTTON has addEventListener; a CELL does not. This is the
-  // single distinguishing feature the factory keys on (see
-  // createAiDebugOverlay.mount()'s `if (modeBtn && typeof
-  // modeBtn.addEventListener === 'function')`). When this assertion
-  // FAILS, the mock ordering has been silently broken.
-  assert.equal(typeof el.addEventListener, 'function',
-    'radarModeToggle selector must return a BUTTON (with addEventListener), not a CELL');
+  // Radar toggle: BUTTON. The factory keys on this in mount():
+  // `if (modeBtn && typeof addEventListener === 'function')`.
+  const toggle = root.querySelector('[data-ai-debug="radarModeToggle"]');
+  assert.ok(toggle, 'radarModeToggle selector must return an element');
+  assert.equal(typeof toggle.addEventListener, 'function',
+    'radarModeToggle must return BUTTON (has addEventListener)');
+  // State cell: CELL (no addEventListener). Pins the inverse branch.
+  const state = root.querySelector('[data-ai-debug="state"]');
+  assert.ok(state, 'state selector must return an element');
+  assert.equal(typeof state.addEventListener, 'undefined',
+    'state must return CELL (no addEventListener)');
 });
 
 test('createAiDebugOverlay: update populates cell text from getLastDecision closures', () => {
@@ -890,10 +897,7 @@ test('v0.63.0: worldBearingToCanvasAngle: dead-behind target returns +PI/2 (6 o\
 });
 
 test('v0.63.0: worldBearingToCanvasAngle: dead-left target returns \u00B1PI (9 o\u2019clock, wrap-equivalent)', () => {
-  // yaw=0, target at dx=-1, dz=0 (west). atan2(-1, 0) = -PI. -PI - PI/2 = -3PI/2.
-  // 3PI/2 is a valid angle but canvas-arc-equivalent to PI/2-rotated
-  // (i.e. equivalent to PI on the [0, 2PI) circle). Round to [-PI, PI]
-  // via wrapping to confirm visual correctness.
+  // Dead-left target at world west: helper returns canvas-arc ±PI (sin ≈ 0, cos = -1); full IEEE-754 / sign-of-zero analysis lives with the helper.
   const result = worldBearingToCanvasAngle(0, -1, 0);
   // Either -3PI/2 (preserved wrap) or equivalently +PI/2 after
   // canvas-arc normalization. cos/sin equivalence is what matters.
