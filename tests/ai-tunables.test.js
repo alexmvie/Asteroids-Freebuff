@@ -224,3 +224,61 @@ test('applyAITunables round-trip: export → apply → export yields equivalent 
   assert.deepStrictEqual(snap1, snap2);
   reset();
 });
+
+// ---------------------------------------------------------------------------
+// v0.62.0 — adjustable radar scope
+// ---------------------------------------------------------------------------
+
+test('v0.62.0: radarBubbleMultiplier default is 3 (the "3× ship sight" baseline)', () => {
+  reset();
+  assert.equal(
+    AI_TUNABLE_DEFAULTS.radarBubbleMultiplier,
+    3,
+    'radarBubbleMultiplier default must be 3 to match the v0.59.0 user-stated intent',
+  );
+  assert.equal(AI_TUNABLES.radarBubbleMultiplier, 3);
+});
+
+test('v0.62.0: radarBubbleMultiplier is live-mutable across the full [0.5, 8] range', () => {
+  reset();
+  // Tight zoom (0.5× — see only what's near the ship)
+  AI_TUNABLES.radarBubbleMultiplier = 0.5;
+  assert.equal(AI_TUNABLES.radarBubbleMultiplier, 0.5);
+  // Default (3× — generous outer ring)
+  AI_TUNABLES.radarBubbleMultiplier = 3;
+  assert.equal(AI_TUNABLES.radarBubbleMultiplier, 3);
+  // Wide map (8× — far threats visible)
+  AI_TUNABLES.radarBubbleMultiplier = 8;
+  assert.equal(AI_TUNABLES.radarBubbleMultiplier, 8);
+  reset();
+});
+
+test('v0.62.0: applyAITunables accepts radarBubbleMultiplier snapshots (no special-case filtering)', () => {
+  reset();
+  applyAITunables({ radarBubbleMultiplier: 1.5 });
+  assert.equal(AI_TUNABLES.radarBubbleMultiplier, 1.5);
+  applyAITunables({ radarBubbleMultiplier: 0.5 });
+  assert.equal(AI_TUNABLES.radarBubbleMultiplier, 0.5);
+  applyAITunables({ radarBubbleMultiplier: 8 });
+  assert.equal(AI_TUNABLES.radarBubbleMultiplier, 8);
+  // NaN must be rejected: the rejected write does NOT mutate the
+  // live bag, so the prior value (8) is preserved. Critically,
+  // NaN as a value would be `!== NaN` due to IEEE 754 — using 8 as
+  // the sentinel works for THIS test only because the prior write
+  // actually mutated. Reset to a known fixture first to make the
+  // assertion independent of mutation order.
+  reset();
+  applyAITunables({ radarBubbleMultiplier: NaN });
+  assert.equal(
+    AI_TUNABLES.radarBubbleMultiplier,
+    AI_TUNABLE_DEFAULTS.radarBubbleMultiplier,
+    'NaN must NOT mutate radarBubbleMultiplier (must remain at the canonical default)',
+  );
+  reset();
+});
+
+test('v0.62.0: resetAITunables restores radarBubbleMultiplier to its frozen default', () => {
+  AI_TUNABLES.radarBubbleMultiplier = 5;
+  resetAITunables();
+  assert.equal(AI_TUNABLES.radarBubbleMultiplier, AI_TUNABLE_DEFAULTS.radarBubbleMultiplier);
+});

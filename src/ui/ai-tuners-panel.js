@@ -98,6 +98,15 @@ export const TUNER_GROUPS = Object.freeze([
     name: 'Ship',
     keys: ['shipMaxSpeed'],
   },
+  // v0.62.0 — adjustable radar scope. The radar (and future
+  // compass) draw entities within `radarBubbleMultiplier ×
+  // streaming-bubble-radius`. Lower for a tight zoom (see only
+  // what's near the ship); higher for a wide map (see threats
+  // coming from far away).
+  {
+    name: 'Radar',
+    keys: ['radarBubbleMultiplier'],
+  },
 ]);
 
 // ===========================================================================
@@ -206,6 +215,21 @@ export const TUNER_SPECS = Object.freeze({
     format: (v) => `${Math.round(v)}u`,
     help: 'Nearest ship within this distance triggers the pirate behavior. 0 = pacifist (demo AI). 300+ = aggressive.',
     guideType: 'circle',
+  },
+  // v0.62.0: adjustable radar scope. Multiplier on the streaming
+  // bubble radius — the radar (and future compass) draw entities
+  // within this multiplier of the streamed chunk radius. 0.5× =
+  // tight zoom (only what's near the ship; pure-tactical); 3× =
+  // generous outer ring (default since v0.59.0; balance of
+  // awareness + clarity); 8× = "wide map" (far threats visible).
+  // Live-tunable so the user can dial during play without a
+  // reload.
+  radarBubbleMultiplier: {
+    label: 'RADAR SCOPE',
+    min: 0.5, max: 8, step: 0.5,
+    format: (v) => `${v.toFixed(1)}×`,
+    help: 'Multiplier on streaming bubble radius. 0.5× tight zoom, 3× default, 8× wide map.',
+    guideType: 'bar',
   },
 });
 

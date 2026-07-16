@@ -221,6 +221,29 @@ test('regression (render-path): every slider value is a numeric string in [min, 
   }
 });
 
+test('v0.62.0: Radar group is the last panel group (scope group appears at the bottom)', () => {
+  // UI invariant: the adjustable scope slider was added LAST and
+  // pins the v0.62.0 ordering contract. A future refactor that
+  // moves it earlier (e.g. to sit between Ship and Powerup) would
+  // be a UI-visible breaking change requiring explicit intent +
+  // a version bump; this guard catches the silent drift.
+  assert.equal(
+    TUNER_GROUPS[TUNER_GROUPS.length - 1].name,
+    'Radar',
+    `Radar group must stay at the END of TUNER_GROUPS; actual last=${TUNER_GROUPS[TUNER_GROUPS.length - 1].name}`,
+  );
+});
+
+test('v0.62.0: radarBubbleMultiplier format pin -- 3 renders as "3.0×" with the × unit suffix', () => {
+  // Pin the unit-suffix format. The canonical default (3.0) shows
+  // up in the value cell constantly — if the format ever drops the
+  // "0" or the "×", a v0.62.0 user will spot it immediately. Cheap
+  // insurance: locks the format function choice.
+  assert.equal(formatTunable('radarBubbleMultiplier', 3), '3.0×');
+  assert.equal(formatTunable('radarBubbleMultiplier', 0.5), '0.5×');
+  assert.equal(formatTunable('radarBubbleMultiplier', 8), '8.0×');
+});
+
 // ------------------------------------------------------------------
 // Settle: defaults match the production bag exactly
 // ------------------------------------------------------------------

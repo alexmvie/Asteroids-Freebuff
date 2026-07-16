@@ -62,6 +62,17 @@ export const AI_TUNABLE_DEFAULTS = Object.freeze({
   // ------- Ship feel (owned here for the tuner surface) -------
   /** Ship max flight speed (XZ, u/s). */
   shipMaxSpeed: 200,
+
+  // v0.62.0 — radar scope multiplier. The AI Debug Overlay's
+  // radar (and compass) draw entities within
+  // `radarBubbleMultiplier × (CHUNK_SIZE × BUBBLE_RADIUS_CHUNKS)`
+  // = the streaming bubble × this number. 3× gives the user a
+  // generous outer ring beyond the streamed chunks. Live-tunable
+  // so the user can dial down to a "tight zoom" view (0.5× — see
+  // only what's around the ship) or up to a "wide map" view
+  // (8× — see threats coming from far away). Consumed by the
+  // overlay's getWorldRadius() callback in main.js.
+  radarBubbleMultiplier: 3,
 });
 
 const LIVE_TUNABLES = { ...AI_TUNABLE_DEFAULTS };

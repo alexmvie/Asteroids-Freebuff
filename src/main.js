@@ -53,13 +53,23 @@ import { createParticleSystem } from './systems/particles.js';
 import { createCaptureMarkers } from './systems/capture-markers.js';
 import { createAiFlightDebug } from './systems/ai-flight-debug.js';
 
-// ---- Radar radius (v0.59.0) ----------------------------------------------
-// Multiplier on the streaming bubble radius (= CHUNK_SIZE × BUBBLE_RADIUS_CHUNKS)
-// used as the AI Debug Overlay's radar scope. Per the user's request
-// ("the radar should be ~3× the ship sight"), 3× gives a generous
-// outer ring beyond the streamed chunks. Hoisted to module scope so
-// the "3×" intent is named, not a magic literal.
-const RADAR_BUBBLE_MULTIPLIER = 3;
+// ---- Radar radius (v0.59.0 + v0.62.0) -----------------------------------
+// Multiplier on the streaming bubble radius (= CHUNK_SIZE ×
+// BUBBLE_RADIUS_CHUNKS) used as the AI Debug Overlay's radar scope.
+// Per the user's request ("the radar should be ~3× the ship sight"),
+// 3× gives a generous outer ring beyond the streamed chunks.
+//
+// **v0.62.0 — now live-tunable.** The "tunable" storage is
+// `AI_TUNABLES.radarBubbleMultiplier` (added in
+// src/entities/ai-tunables.js). The AI Live Tuners panel hosts the
+// slider; the radar's `getWorldRadius` closure re-reads the value
+// every frame so a slider drag is visible on the next render loop
+// tick. The literal here is kept as the FALLBACK only (used when
+// the tuners bag is missing or unreachable in tests). The named
+// constant stays useful for grep-discoverability —
+// RADAR_BUBBLE_MULTIPLIER_DEFAULT is a "what's the canonical
+// multiplier" SSOT, not a per-frame read.
+const RADAR_BUBBLE_MULTIPLIER_DEFAULT = 3;
 
 // ---- Pirate HP (v0.60.0 — pirate combat loop) ---------------------------
 // Pirates need HP to die. Tracked externally rather than as a ship
@@ -1004,11 +1014,23 @@ if (AI_TUNING_ENABLED) {
       max: ship.getMaxEnergy ? ship.getMaxEnergy() : 100,
     }),
     getState: () => stateMachine.getState(),
-    // v0.59.0: radar radius = 3 × ship sight (= 3 × bubble radius,
-    // i.e. 1800u at MVP defaults). "Ship sight" = streaming bubble
-    // radius (CHUNK_SIZE × BUBBLE_RADIUS_CHUNKS). Live getter so the
-    // radar tracks any future BUBBLE_RADIUS_CHUNKS change.
-    getWorldRadius: () => RADAR_BUBBLE_MULTIPLIER * CHUNK_SIZE * BUBBLE_RADIUS_CHUNKS,
+    // v0.59.0 + v0.62.0: radar radius = `radarBubbleMultiplier` ×
+    // ship sight (= bubble radius, i.e. 1800u at MVP defaults × 3.
+    // v0.62.0 makes the multiplier live-tunable via the AI Live
+    // Tuners panel (`AI_TUNABLES.radarBubbleMultiplier`). The live
+    // getter below re-reads the bag every frame so a slider drag
+    // is visible on the very next render loop tick. Falls back to
+    // `RADAR_BUBBLE_MULTIPLIER_DEFAULT` if the bag is missing the
+    // key OR has a non-finite value (defends against NaN/Infinity
+    // sneaking past via `typeof === 'number'` — NaN is also a
+    // number per the typeof test, so we use `Number.isFinite`
+    // instead).
+    getWorldRadius: () => {
+      const mult = (AI_TUNABLES && Number.isFinite(AI_TUNABLES.radarBubbleMultiplier))
+        ? AI_TUNABLES.radarBubbleMultiplier
+        : RADAR_BUBBLE_MULTIPLIER_DEFAULT;
+      return mult * CHUNK_SIZE * BUBBLE_RADIUS_CHUNKS;
+    },
   });
   {
     const root = document.querySelector('[data-ai-debug-root]');
