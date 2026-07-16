@@ -683,19 +683,30 @@ function processCollisions(dt) {
       bullets.despawn(bulletIndex);
       const target = shipTargets[shipIndex];
       if (target === ship) {
-        // Player hit. Apply damage + game-over transition identical
-        // to the asteroid-hit path. The shield buff (v0.61.0) will
-        // gate this with `ship.isShielded()` when it lands.
-        const dmg = 25 * ship.getDamageMultiplier();
-        const remaining = ship.takeDamage(dmg);
-        if (ship.isDead() || remaining <= 0) {
-          stateMachine.transition(State.GAME_OVER, { finalScore: score });
-          bus.emit('game:over', { finalScore: score });
-          ship.reset({ x: 0, y: 0, z: 0 });
+        // v0.61.0 — shield absorbs the hit. Bullet despawns (clean
+        // up) but no damage applied + no GAME_OVER + no ship.reset().
+        // The shield buff is for the PLAYER only (pirate attacks on
+        // the player are absorbed; pirate-vs-pirate damage is NOT
+        // affected — there's no `isShielded` check on the pirate
+        // branch below).
+        if (ship.isShielded()) {
+          // Skip damage; bullet already despawned above.
+        } else {
+          // Apply damage + game-over transition identical to the
+          // asteroid-hit path.
+          const dmg = 25 * ship.getDamageMultiplier();
+          const remaining = ship.takeDamage(dmg);
+          if (ship.isDead() || remaining <= 0) {
+            stateMachine.transition(State.GAME_OVER, { finalScore: score });
+            bus.emit('game:over', { finalScore: score });
+            ship.reset({ x: 0, y: 0, z: 0 });
+          }
         }
       } else if (pirateHps.has(target)) {
         // Pirate hit. pirateHps is the SSOT for "is this a pirate";
         // no need for 3 separate `target === pirateN.getShip()` checks.
+        // Pirates don't get the shield buff (intentional design — the
+        // shield is for the player's defense against pirates).
         const ai = pirate1.getShip() === target ? pirate1 : pirate2;
         damagePirate(ai);
       }
@@ -766,29 +777,39 @@ function processCollisions(dt) {
     // `ENERGY_DAMAGE` literal — defined inline here as the SINGLE
     // source of truth on the `refine-coded-ai` branch; no trainer
     // to lockstep with). The hull buff halves incoming damage
-    // via ship.getDamageMultiplier().
+    // via ship.getDamageMultiplier(). v0.61.0: shield absorbs the
+    // hit — asteroid is disposed (consumed by collision) but no
+    // damage + no GAME_OVER + no position reset.
   if (state !== State.PLAYING) return;
   const shipHitIdx = findShipHit({ ship, asteroids });
   if (shipHitIdx >= 0) {
     const a = asteroids[shipHitIdx];
     a.dispose();
     asteroids.splice(shipHitIdx, 1);
-    // Apply ship damage using the player's current damage multiplier
-    // (hull-buff active → 0.5x). The ship emits `energy:changed` on
-    // the bus itself; the HUD's energy bar updates from that event.
-    const dmg = 25 * ship.getDamageMultiplier();
-    const remaining = ship.takeDamage(dmg);
-    if (ship.isDead() || remaining <= 0) {
-      stateMachine.transition(State.GAME_OVER, { finalScore: score });
-      bus.emit('game:over', { finalScore: score });
-      // Reset the ship so the GAME_OVER overlay shows the player at
-      // a sensible position (the camera continues to follow the
-      // ship; a dead ship at the impact point would render free-fall).
-      ship.reset({ x: 0, y: 0, z: 0 });
+    // v0.61.0 — shield absorbs the asteroid hit. The asteroid is
+    // physically consumed (a.dispose + splice), but no energy damage
+    // is applied and the player is not reset. Matches the bullet-
+    // vs-player gating above (consistent shield contract).
+    if (ship.isShielded()) {
+      // Shield is active — no damage, no reset.
     } else {
-      // Survived with energy left — pulse the player back to spawn.
-      // (v0.10.x behavior preserved.)
-      ship.reset({ x: 0, y: 0, z: 0 });
+      // Apply ship damage using the player's current damage multiplier
+      // (hull-buff active → 0.5x). The ship emits `energy:changed` on
+      // the bus itself; the HUD's energy bar updates from that event.
+      const dmg = 25 * ship.getDamageMultiplier();
+      const remaining = ship.takeDamage(dmg);
+      if (ship.isDead() || remaining <= 0) {
+        stateMachine.transition(State.GAME_OVER, { finalScore: score });
+        bus.emit('game:over', { finalScore: score });
+        // Reset the ship so the GAME_OVER overlay shows the player at
+        // a sensible position (the camera continues to follow the
+        // ship; a dead ship at the impact point would render free-fall).
+        ship.reset({ x: 0, y: 0, z: 0 });
+      } else {
+        // Survived with energy left — pulse the player back to spawn.
+        // (v0.10.x behavior preserved.)
+        ship.reset({ x: 0, y: 0, z: 0 });
+      }
     }
   }
 }
@@ -1192,11 +1213,23 @@ function tick(dt) {
   // driven by the render loop's `hud.update({...})` call, not by
   // bus events (so the bar drains smoothly without event spam).
   // Score / lives / state-message continue to be event-driven.
+  //
+  // v0.61.0 — when activeType === 'shield', clip `remaining` to
+  // ship.getShieldRemaining() so the bar never fills with the 15s
+  // active-window time after the 10s shield buff has expired
+  // (visually misleading — the shield would be gone but the bar
+  // would still show ~5s of "shield active"). For all other types,
+  // fall through to the active-window time. Keeps the chip label
+  // + color (still says 'SHIELD') intact; only the bar fill changes.
+  const powerupType = powerupSystem.getActiveType();
+  const isShieldActive = powerupType === 'shield';
   hud.update({
     powerup: {
       active: powerupSystem.isLaserActive(),
-      type: powerupSystem.getActiveType(),
-      remaining: powerupSystem.getActiveRemaining(),
+      type: powerupType,
+      remaining: isShieldActive
+        ? ship.getShieldRemaining()
+        : powerupSystem.getActiveRemaining(),
       max: powerupSystem.getActiveMax(),
       hasPending: !!powerupSystem.getPendingSpawn(),
     },

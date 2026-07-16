@@ -155,6 +155,15 @@ function pickWeightedPowerupType(rng) {
 // 'shield' while the pickup is on the bar).
 const POWERUP_TYPE_SHIELD = 'shield';
 const POWERUP_ACTIVE_DURATION_S = 15; // countdown after pickup
+
+// v0.61.0 — shield grants this many seconds of invincibility.
+// Sole SSOT for the duration; the ship's buff timer reads it via
+// `ship.addBuff('shield', POWERUP_SHIELD_DURATION_S)`. The game
+// constant BUFF_DEFAULT_DURATIONS_S['shield'] mirrors this for
+// callers that go through `addBuff('shield')` without an argument;
+// the explicit arg here keeps the duration explicit + grep-able in
+// the buff-application code path.
+export const POWERUP_SHIELD_DURATION_S = 10;
 const POWERUP_RESPAWN_DELAY_S = 5; // seconds between (collection|expiry) and next spawn
 const SPAWN_MIN_DIST = 30; // min world units from the ship
 const SPAWN_MAX_DIST = 200; // max world units from the ship (inside the bubble)
@@ -383,7 +392,44 @@ export function createPowerUpSystem({
     // onto whatever was picked up; consumers distinguish types via
     // `getActiveType()` going forward.
     activeCollector = getCollector();
-    emit('powerup:activated', { type: activeType, duration: activeDurationS, collector: activeCollector });
+
+    // v0.61.0 — shield grants 10s invincibility to the PLAYER
+    // collector only. The AI demo ship has infinite lives and gets
+    // free pickups (no GAME_OVER transition), so shielding it would
+    // be invisible/inflation-deflation. Gate on identity (`===
+    // ship`, captured at factory-construction time) so the AI
+    // picking up its own shield pickup does not pad its HP.
+    //
+    // Lifetime note: POWERUP_SHIELD_DURATION_S (10s) is the buff
+    // duration — SHORTER than the 15s active window above. After
+    // 10s the shield is gone but the active window continues (the
+    // HUD chip still shows 'SHIELD' for 5s). Main.js clips the
+    // HUD's `remaining` value to ship.getShieldRemaining() so the
+    // bar never lies about the buff.
+    //
+    // Order: addBuff is called BEFORE emit so any bus listener
+    // that reads ship.isShielded() after the event sees the
+    // post-buff state (consistent with the documented contract on
+    // `powerup:activated`).
+    const shieldApplied = type === POWERUP_TYPE_SHIELD &&
+        activeCollector === ship &&
+        typeof activeCollector.addBuff === 'function';
+    if (shieldApplied) {
+      activeCollector.addBuff('shield', POWERUP_SHIELD_DURATION_S);
+    }
+
+    // Single emit carries `shieldApplied` boolean so listeners that
+    // want to discern "the type was shield AND the buff landed on
+    // the player" can do so with one event subscription. No new
+    // event name (per the project's "extract when 2+ consumers
+    // need it" rule — there are zero listeners for a dedicated
+    // shield:activated right now).
+    emit('powerup:activated', {
+      type: activeType,
+      duration: activeDurationS,
+      collector: activeCollector,
+      shieldApplied,
+    });
   }
 
   function deactivate(reason /* 'expired' | 'cancelled' */) {

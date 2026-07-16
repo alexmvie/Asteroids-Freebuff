@@ -270,6 +270,40 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
   }
 
   /**
+   * v0.61.0 — Returns true while the shield buff is active. While
+   * shielded, the player is invulnerable to all incoming damage
+   * (from asteroids AND from pirate bullets). The buff decays via
+   * the normal `update(dt)` tickbuffs path. Calling code in main.js
+   * gates `takeDamage` + GAME_OVER transitions on `!isShielded()`.
+   *
+   * Lives next to `isDead` because the two are dual-purpose health
+   * checks: isDead = energy fully depleted; isShielded = invulnerable
+   * to next damage. Both are read by render-loop branches that have
+   * to decide whether to apply a hit.
+   *
+   * @returns {boolean}
+   */
+  function isShielded() {
+    return state.buffs.has('shield');
+  }
+
+  /**
+   * v0.61.0 — Returns the shield buff's remaining duration in
+   * seconds, or 0 if no shield buff is active. Used by main.js
+   * to clip the HUD's `remaining` field when `activeType ===
+   * 'shield'` so the bar never fills with the 15s active window
+   * time after the 10s buff has expired (visually misleading).
+   * Returns 0 for non-shield pickups too — the getter is safe to
+   * call regardless of the active powerup type.
+   *
+   * @returns {number} seconds remaining (0 if no shield active)
+   */
+  function getShieldRemaining() {
+    const v = state.buffs.get('shield');
+    return typeof v === 'number' && v > 0 ? v : 0;
+  }
+
+  /**
    * Read the hull-buff damage multiplier (1.0 if no hull buff;
    * 0.5 if hull is active).
    * @returns {number}
@@ -517,6 +551,9 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
     removeBuff,
     getActiveBuffs,
     isDead,
+    // v0.61.0
+    isShielded,
+    getShieldRemaining,
     getDamageMultiplier,
     getThrustMultiplier,
     getScoreMultiplier,

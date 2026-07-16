@@ -93,4 +93,8 @@ export const BUFF_DEFAULT_DURATIONS_S = Object.freeze({
   credits: 5,
   hull: 12,
   weapon: 10,
+  // v0.61.0 — shield grants 10s of invincibility when picked up.
+  // Sole SSOT for the duration; the power-up system reads it on
+  // activate (see src/systems/powerup-system.js).
+  shield: 10,
 });

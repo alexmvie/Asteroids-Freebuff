@@ -181,3 +181,70 @@ test('v0.49.0: ship falls back to MAX_SPEED when AI_TUNABLES.shipMaxSpeed is inv
     AI_TUNABLES.shipMaxSpeed = ORIGINAL;
   }
 });
+
+// ===========================================================================
+// v0.61.0 — Shield buff test suite
+// ===========================================================================
+// The shield powerup adds a 'shield' buff to the player on pickup.
+// The buff makes `ship.isShielded()` return true, which the render-
+// loop collision paths in main.js gate on (no damage + no GAME_OVER
+// while shielded). The ship's existing buff timer ticks down the
+// duration via `update(dt)`. The contract under test:
+//
+//   1. isShielded() is false immediately after createShip()
+//   2. addBuff('shield', N) flips isShielded() to true
+//   3. update(dt) past the buff's duration flips isShielded() to false
+//   4. removeBuff('shield') flips isShielded() to false immediately
+//   5. The shield buff is INDEPENDENT of the hull buff (both can be
+//      active at the same time; their state is tracked in the same
+//      Map but the methods read distinct keys).
+
+test('v0.61.0: isShielded returns false on a fresh ship', () => {
+  const ship = newShip();
+  assert.equal(ship.isShielded(), false);
+});
+
+test('v0.61.0: addBuff("shield", N) flips isShielded() to true', () => {
+  const ship = newShip();
+  ship.addBuff('shield', 10);
+  assert.equal(ship.isShielded(), true);
+});
+
+test('v0.61.0: isShielded returns false after the buff duration elapses', () => {
+  const ship = newShip();
+  ship.addBuff('shield', 0.5);
+  assert.equal(ship.isShielded(), true);
+  // Tick past the duration — 0.6s > 0.5s triggers the tickBuffs cleanup.
+  ship.update(0.6);
+  assert.equal(ship.isShielded(), false,
+    'buff should have expired after the 0.5s duration');
+});
+
+test('v0.61.0: removeBuff("shield") instantly clears the shield', () => {
+  const ship = newShip();
+  ship.addBuff('shield', 10);
+  assert.equal(ship.isShielded(), true);
+  ship.removeBuff('shield');
+  assert.equal(ship.isShielded(), false);
+});
+
+test('v0.61.0: shield buff is independent of hull buff', () => {
+  const ship = newShip();
+  ship.addBuff('hull', 10);
+  assert.equal(ship.isShielded(), false, 'hull buff is not shield');
+  ship.addBuff('shield', 10);
+  assert.equal(ship.isShielded(), true, 'shield adds on top of hull');
+  ship.removeBuff('hull');
+  assert.equal(ship.isShielded(), true, 'shield unaffected by hull removal');
+  ship.removeBuff('shield');
+  assert.equal(ship.isShielded(), false);
+});
+
+test('v0.61.0: reset() clears the active shield buff', () => {
+  const ship = newShip();
+  ship.addBuff('shield', 10);
+  assert.equal(ship.isShielded(), true);
+  ship.reset({ x: 0, y: 0, z: 0 });
+  assert.equal(ship.isShielded(), false,
+    'reset() must wipe the shield (matches the existing buff wipe contract)');
+});

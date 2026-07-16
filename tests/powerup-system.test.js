@@ -48,8 +48,20 @@ function makeBus() {
 }
 
 function makeShip(pos = { x: 0, y: 0, z: 0 }) {
+  // v0.61.0 — added addBuff + isShielded + a call tracker so
+  // the v0.61.0 tests can pin the contract that a shield pickup
+  // adds a 'shield' buff to the player collector.
+  const addBuffCalls = [];
   return {
     position: { x: pos.x, y: pos.y, z: pos.z },
+    addBuffCalls,
+    buffs: new Map(),
+    addBuff(type, duration) {
+      addBuffCalls.push({ type, duration });
+      this.buffs.set(type, duration);
+    },
+    removeBuff(type) { this.buffs.delete(type); },
+    isShielded() { return this.buffs.has('shield'); },
   };
 }
 
@@ -765,5 +777,228 @@ test('pending power-up that expires triggers a respawn after the delay', () => {
   assert.equal(created.length, 1, 'no new spawn yet — respawn delay ticking');
   sys.update(0.6, []); // > delay
   assert.equal(created.length, 2, 'second power-up spawned after delay');
+  sys.dispose();
+});
+
+// ===========================================================================
+// v0.61.0 — Shield pickup applies a 'shield' buff to the player collector.
+// ===========================================================================
+// The shield powerup (mint-green icosahedron, 'SHIELD' label) grants
+// the player 10s of invincibility. The buff is added by
+// `activeCollector.addBuff('shield', POWERUP_SHIELD_DURATION_S)` in
+// the system's activate() function. The buff is gated on
+// `activeCollector === ship` — the AI collector must NOT receive the
+// shield buff (the AI has infinite lives; padding its HP would be
+// unfair / buggy). The 15s "active weapon window" still ticks for
+// everyone (HUD chip shows 'SHIELD' label) regardless of who
+// collected it.
+
+test('v0.61.0: shield pickup grants invincibility buff to the player collector', () => {
+  // rng=0 forces type='shield' (first entry in equal-weights
+  // POWERUP_SPAWN_WEIGHTS — see src/systems/powerup-system.js).
+  const { factory } = makePowerUpFactory();
+  const ship = makeShip();
+  const sys = createPowerUpSystem({
+    scene: new THREE.Scene(),
+    bus: makeBus(),
+    ship,
+    world: makeWorld(),
+    options: {
+      ...PICKUP_TEST_OPTIONS,
+      powerupFactory: factory,
+      rng: () => 0,
+    },
+  });
+  sys.update(0.1, []); // first spawn (no pickup — too far)
+  const pu = sys.getPendingSpawn();
+  assert.equal(pu.spec.type, 'shield', 'rng=0 forced type=shield');
+  // Move ship to overlap the power-up.
+  ship.position.x = pu.getPosition().x;
+  ship.position.z = pu.getPosition().z;
+  sys.update(0.1, []);
+  assert.equal(ship.addBuffCalls.length, 1, 'ship.addBuff called exactly once');
+  assert.deepEqual(ship.addBuffCalls[0], { type: 'shield', duration: 10 });
+  assert.equal(ship.isShielded(), true, 'player ship is now invulnerable');
+  sys.dispose();
+});
+
+test('v0.61.0: shield pickup does NOT add a buff to a non-player collector', () => {
+  // When the AI ship is the active collector (getCollector returns
+  // aiShip, not ship), the shield buff is intentionally NOT applied
+  // to anyone. Pin this contract: a buggy activate path that added
+  // the buff to the AI would let a pirate AI be invulnerable to
+  // player bullets, which would inflate pirates' effective HP.
+  const { factory } = makePowerUpFactory();
+  const ship = makeShip(); // player — must NOT receive shield buff
+  const aiShip = makeShip({ x: 0, y: 0, z: 0 });
+  const sys = createPowerUpSystem({
+    scene: new THREE.Scene(),
+    bus: makeBus(),
+    ship,
+    world: makeWorld(),
+    options: {
+      ...PICKUP_TEST_OPTIONS,
+      powerupFactory: factory,
+      rng: () => 0, // forces 'shield'
+      getCollector: () => aiShip,
+    },
+  });
+  sys.update(0.1, []);
+  const pu = sys.getPendingSpawn();
+  aiShip.position.x = pu.getPosition().x;
+  aiShip.position.z = pu.getPosition().z;
+  sys.update(0.1, []);
+  assert.equal(sys.isLaserActive(), true, 'power-up was activated');
+  assert.equal(sys.getActiveCollector(), aiShip, 'AI is the collector');
+  assert.equal(ship.addBuffCalls.length, 0, 'player ship received NO buff');
+  assert.equal(aiShip.addBuffCalls.length, 0,
+    'AI ship also received NO buff (gated on ===ship identity)');
+  sys.dispose();
+});
+
+test('v0.61.0: powerup:activated payload includes shieldApplied: true for player-collected shield', () => {
+  // v0.61.0 round-3 contract pin: the powerup:activated event's
+  // payload carries a shieldApplied boolean that tells listeners
+  // whether the shield buff actually landed on the player (vs.
+  // being a shield pickup by an AI collector, in which case the
+  // boolean is false). This is the contract surface that replaces
+  // the round-2 attempt at a dedicated shield:activated event.
+  const { events, bus } = makeEventCollector();
+  const { factory } = makePowerUpFactory();
+  const ship = makeShip();
+  const sys = createPowerUpSystem({
+    scene: new THREE.Scene(),
+    bus,
+    ship,
+    world: makeWorld(),
+    options: {
+      ...PICKUP_TEST_OPTIONS,
+      powerupFactory: factory,
+      rng: () => 0, // forces 'shield'
+    },
+  });
+  sys.update(0.1, []); // spawn
+  const pu = sys.getPendingSpawn();
+  ship.position.x = pu.getPosition().x;
+  ship.position.z = pu.getPosition().z;
+  sys.update(0.1, []); // pickup
+  const activated = events.find((e) => e.name === 'powerup:activated');
+  assert.ok(activated, 'powerup:activated was emitted');
+  assert.equal(activated.data.type, 'shield');
+  assert.equal(activated.data.shieldApplied, true,
+    'player-collected shield sets shieldApplied: true in the payload');
+  sys.dispose();
+});
+
+test('v0.61.0: powerup:activated payload includes shieldApplied: false for AI-collected shield', () => {
+  // The contract's negative half: an AI collector picking up the
+  // same 'shield' type still emits the event with type='shield'
+  // (correct type) but shieldApplied: false (no buff applied).
+  // Listeners that want to trigger effects ONLY for actual player
+  // shield pickups can filter on e.shieldApplied rather than
+  // checking the (separate) ship reference.
+  const { events, bus } = makeEventCollector();
+  const { factory } = makePowerUpFactory();
+  const ship = makeShip();
+  const aiShip = makeShip({ x: 0, y: 0, z: 0 });
+  const sys = createPowerUpSystem({
+    scene: new THREE.Scene(),
+    bus,
+    ship,
+    world: makeWorld(),
+    options: {
+      ...PICKUP_TEST_OPTIONS,
+      powerupFactory: factory,
+      rng: () => 0, // forces 'shield'
+      getCollector: () => aiShip,
+    },
+  });
+  sys.update(0.1, []);
+  const pu = sys.getPendingSpawn();
+  aiShip.position.x = pu.getPosition().x;
+  aiShip.position.z = pu.getPosition().z;
+  sys.update(0.1, []);
+  const activated = events.find((e) => e.name === 'powerup:activated');
+  assert.ok(activated, 'powerup:activated was emitted by AI collector');
+  assert.equal(activated.data.type, 'shield',
+    'event type is shield regardless of collector');
+  assert.equal(activated.data.shieldApplied, false,
+    'but shieldApplied is false when the AI was the collector (no buff applied)');
+  sys.dispose();
+});
+
+test('v0.61.0: non-shield pickup does NOT add a shield buff', () => {
+  // Pin the contract for the OTHER 5 powerup types. They activate
+  // the 15s "weapon window" countdown but NEVER add a 'shield'
+  // buff — only the shield type does.
+  //
+  // Note: we assert `pu.spec.type !== 'shield'` (not a specific non-
+  // shield type) because the exact rng→type mapping depends on the
+  // PER-TYPE WEIGHTS in POWERUP_SPAWN_WEIGHTS. Re-tuning those
+  // weights (e.g. bumping speed from 1.0 to 50.0) would silently
+  // flip which type rng=0.5 picks without breaking the test's
+  // INTENT (which is just "non-shield types don't grant a shield
+  // buff"). Asserting `!== 'shield'` is robust to that.
+  const { factory } = makePowerUpFactory();
+  const ship = makeShip();
+  // rng=0.5 with default equal weights (1.0 each, 6 types) selects
+  // 'energy' (3rd cumulative entry). With any other weight tuning,
+  // it could pick a different non-shield type — still valid for the
+  // contract.
+  const sys = createPowerUpSystem({
+    scene: new THREE.Scene(),
+    bus: makeBus(),
+    ship,
+    world: makeWorld(),
+    options: {
+      ...PICKUP_TEST_OPTIONS,
+      powerupFactory: factory,
+      rng: () => 0.5,
+    },
+  });
+  sys.update(0.1, []);
+  const pu = sys.getPendingSpawn();
+  assert.notEqual(pu.spec.type, 'shield',
+    'rng=0.5 must NOT force shield (would defeat the test purpose)');
+  ship.position.x = pu.getPosition().x;
+  ship.position.z = pu.getPosition().z;
+  sys.update(0.1, []);
+  assert.equal(ship.isShielded(), false, 'non-shield pickup did NOT grant a shield buff');
+  assert.equal(ship.addBuffCalls.length, 0, 'no addBuff call on non-shield pickup');
+  sys.dispose();
+});
+
+test('v0.61.0: non-shield pickup emits powerup:activated with shieldApplied: false', () => {
+  // Symmetric to the player-shield and AI-shield tests: type !==
+  // 'shield' should produce shieldApplied = false regardless of who
+  // collected it. Catches regressions where the const-expression
+  // accidentally uses a different type key or evaluates the
+  // collector field before the type field.
+  const { events, bus } = makeEventCollector();
+  const { factory } = makePowerUpFactory();
+  const ship = makeShip();
+  const sys = createPowerUpSystem({
+    scene: new THREE.Scene(),
+    bus,
+    ship,
+    world: makeWorld(),
+    options: {
+      ...PICKUP_TEST_OPTIONS,
+      powerupFactory: factory,
+      rng: () => 0.5, // forces 'energy' (3rd cumulative entry, not shield)
+    },
+  });
+  sys.update(0.1, []);
+  const pu = sys.getPendingSpawn();
+  assert.notEqual(pu.spec.type, 'shield');
+  ship.position.x = pu.getPosition().x;
+  ship.position.z = pu.getPosition().z;
+  sys.update(0.1, []);
+  const activated = events.find((e) => e.name === 'powerup:activated');
+  assert.ok(activated, 'powerup:activated was emitted');
+  assert.notEqual(activated.data.shieldApplied, true,
+    'non-shield type must NOT carry shieldApplied: true in the payload');
+  assert.equal(activated.data.shieldApplied, false,
+    'non-shield type sets shieldApplied: false (matches the type field)');
   sys.dispose();
 });
