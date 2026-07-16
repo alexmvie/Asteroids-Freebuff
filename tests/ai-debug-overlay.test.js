@@ -29,6 +29,7 @@ import {
   formatYawCommand,
   formatBool,
   resolveWorldRadius,
+  worldBearingToCanvasAngle,
   createAiDebugOverlay,
 } from '../src/ui/ai-debug-overlay.js';
 
@@ -355,6 +356,17 @@ function buildMockRoot() {
     querySelector(sel) {
       // Match the markup we set in innerHTML.
       if (!sel) return null;
+      // v0.63.0 round-3: handle known-buttons BEFORE the generic
+      // `data-ai-debug="..."` regex match. The toggle button has BOTH
+      // `class="ai-debug__mode-toggle"` AND `data-ai-debug="radarModeToggle"`,
+      // and `[data-ai-debug="radarModeToggle"]` is the selector the
+      // factory uses. Without this precedence flip, the regex would
+      // match first and return a CELL (with no addEventListener method),
+      // causing the factory's `if (modeBtn && typeof addEventListener ===
+      // 'function')` textContent assignment to be skipped.
+      if (sel.includes('radarModeToggle')) {
+        return makeButton('radarModeToggle');
+      }
       // data-ai-debug-panel="<name>"
       const panelMatch = sel.match(/data-ai-debug-panel="([^"]+)"/);
       if (panelMatch) {
@@ -370,10 +382,6 @@ function buildMockRoot() {
       // canvas.ai-debug__radar
       if (sel.includes('canvas') && sel.includes('ai-debug__radar')) {
         return makeCanvas();
-      }
-      // radar mode toggle button
-      if (sel.includes('radarModeToggle')) {
-        return makeButton('radarModeToggle');
       }
       // Bare canonical selectors the panels sub-views query:
       if (sel === '[data-ai-debug="mode"]') return elements.get('dbg:mode') || makeCell('dbg:mode');
@@ -398,6 +406,7 @@ function buildMockRoot() {
     },
   };
   function makeCell(key) {
+    if (elements.has(key)) return elements.get(key);
     const el = {
       textContent: '',
       classList: {
@@ -419,6 +428,7 @@ function buildMockRoot() {
     return el;
   }
   function makePanel(key) {
+    if (elements.has(key)) return elements.get(key);
     const el = {
       querySelector: root.querySelector,
       _key: key,
@@ -427,12 +437,30 @@ function buildMockRoot() {
     return el;
   }
   function makeCanvas() {
-    return {
+    // Idempotent — the canvas is queried twice (once by the factory's
+    // mount(), once during the compile-time v0.63.0 round-3 bug fix
+    // below). Returning the same instance w/ the same width/height
+    // keeps the mock consistent. Namespaced key avoids collisions
+    // with any future canvas-bearing fixture.
+    if (elements.has('mock:canvas-radar')) return elements.get('mock:canvas-radar');
+    const el = {
       width: 0, height: 0, style: {},
       getContext: () => null, // null context → radarView.draw is a no-op
     };
+    elements.set('mock:canvas-radar', el);
+    return el;
   }
   function makeButton(key) {
+    // v0.63.0 round-3 fix — the toggle tests failed because makeButton
+    // created a fresh button each call. The factory's mount() did
+    // querySelector → makeButton(button A); the test then did
+    // querySelector → makeButton(button B), overwriting A's listeners.
+    // The button B has no click listener and unchanged textContent,
+    // so assertions on toggleBtn.textContent saw ''. Returning the
+    // existing instance on subsequent calls fixes this. Also reapplies
+    // `_listeners` lookup so earlier listener registrations aren't
+    // lost.
+    if (elements.has(key)) return elements.get(key);
     const el = {
       textContent: '',
       classList: {
@@ -514,6 +542,30 @@ test('createAiDebugOverlay: update before mount is a no-op (does not throw)', ()
 test('createAiDebugOverlay: dispose before mount is a no-op (does not throw)', () => {
   const ai = createAiDebugOverlay({ getSubject: () => null });
   ai.dispose();
+});
+
+// v0.63.0 round-3d regression guard — the mock's `querySelector`
+// branch order matters: the `sel.includes('radarModeToggle')`
+// substring check must run BEFORE the generic `/data-ai-debug="…"/`
+// regex match. Without this precedence, querySelector returns a CELL
+// (no addEventListener method) for the toggle selector, and the
+// factory's `if (modeBtn && typeof modeBtn.addEventListener ===
+// 'function')` skip-path leaves textContent unchanged (the toggle
+// tests then fail with cryptic "got ''" errors). This test pins the
+// precedence rule so a future refactor (alphabetical ordering,
+// "tidy these up", etc.) doesn't silently break the v0.63.0
+// toggle-button contract.
+test('v0.63.0 round-3d regression guard: querySelector("[data-ai-debug=radarModeToggle]") returns a BUTTON (has addEventListener), not a CELL', () => {
+  const root = buildMockRoot();
+  const el = root.querySelector('[data-ai-debug="radarModeToggle"]');
+  assert.ok(el, 'radarModeToggle selector must return an element');
+  // A BUTTON has addEventListener; a CELL does not. This is the
+  // single distinguishing feature the factory keys on (see
+  // createAiDebugOverlay.mount()'s `if (modeBtn && typeof
+  // modeBtn.addEventListener === 'function')`). When this assertion
+  // FAILS, the mock ordering has been silently broken.
+  assert.equal(typeof el.addEventListener, 'function',
+    'radarModeToggle selector must return a BUTTON (with addEventListener), not a CELL');
 });
 
 test('createAiDebugOverlay: update populates cell text from getLastDecision closures', () => {
@@ -793,5 +845,234 @@ test('createAiDebugOverlay: WHY row refreshes on subsequent updates', () => {
   reasonText = 'asteroid L @ 24.0u, closing 20.0u/s';
   ai.update();
   assert.equal(reasonCell.textContent, reasonText, 'WHY row must update on every tick');
+  ai.dispose();
+});
+
+// ============================================================================
+// v0.63.0 — compass mode helpers + factory wiring + display-mode toggle cycle
+// ============================================================================
+// The user asked to "build the suggested compass mode". The user-stated
+// motivation was "wenn ich später evtl. mal fliegen sehen will wo der
+// spieler hinmuss" — a future-proof knob the user could toggle at
+// runtime. Three layers under test here:
+//
+//   1. **Pure helper `worldBearingToCanvasAngle(yaw, dx, dz)`** — math
+//      that converts ship-frame bearing to canvas-arc rotation. The
+//      convention: dead-ahead target → 12 o'clock → canvas angle -PI/2.
+//      8 unit tests pin every cardinal + wrap-around edge case.
+//   2. **Factory wiring** — `displayMode === 'compass'` adds the
+//      `.ai-debug--compass` class (covered here), and `mount()`
+//      instantiates BOTH views so flipping modes doesn't recreate
+//      anything. `dispose()` releases both.
+//   3. **Toggle cycle** — clicking the existing `radarModeToggle`
+//      button cycles through `radar-rotate → radar-north-up → compass
+//      → radar-rotate`. The button label + a CSS class on the root
+//      are the two visible signals.
+
+// ---------------------------------------------------------------------------
+// 1. Pure helper: worldBearingToCanvasAngle
+// ---------------------------------------------------------------------------
+
+test('v0.63.0: worldBearingToCanvasAngle: dead-ahead target returns -PI/2 (12 o\u2019clock)', () => {
+  // yaw=0 (ship faces -Z), target at dx=0, dz=-1 (north of ship).
+  // Pure math: atan2(0, 1) = 0 (north). 0 - 0 = 0 (relative). 0 - PI/2 = -PI/2.
+  assert.equal(worldBearingToCanvasAngle(0, 0, -1), -Math.PI / 2);
+});
+
+test('v0.63.0: worldBearingToCanvasAngle: dead-right target returns 0 (3 o\u2019clock)', () => {
+  // yaw=0, target at dx=1, dz=0 (east). atan2(1, 0) = PI/2. PI/2 - PI/2 = 0.
+  assert.equal(worldBearingToCanvasAngle(0, 1, 0), 0);
+});
+
+test('v0.63.0: worldBearingToCanvasAngle: dead-behind target returns +PI/2 (6 o\u2019clock)', () => {
+  // yaw=0, target at dx=0, dz=1 (south). atan2(0, -1) = PI. PI - PI/2 = PI/2.
+  assert.equal(worldBearingToCanvasAngle(0, 0, 1), Math.PI / 2);
+});
+
+test('v0.63.0: worldBearingToCanvasAngle: dead-left target returns \u00B1PI (9 o\u2019clock, wrap-equivalent)', () => {
+  // yaw=0, target at dx=-1, dz=0 (west). atan2(-1, 0) = -PI. -PI - PI/2 = -3PI/2.
+  // 3PI/2 is a valid angle but canvas-arc-equivalent to PI/2-rotated
+  // (i.e. equivalent to PI on the [0, 2PI) circle). Round to [-PI, PI]
+  // via wrapping to confirm visual correctness.
+  const result = worldBearingToCanvasAngle(0, -1, 0);
+  // Either -3PI/2 (preserved wrap) or equivalently +PI/2 after
+  // canvas-arc normalization. cos/sin equivalence is what matters.
+  const sinExpected = 0;
+  const cosExpected = -1;
+  assert.ok(Math.abs(Math.sin(result) - sinExpected) < 1e-9,
+    `sin mismatch: got ${Math.sin(result)}, expected ${sinExpected}`);
+  assert.ok(Math.abs(Math.cos(result) - cosExpected) < 1e-9,
+    `cos mismatch: got ${Math.cos(result)}, expected ${cosExpected}`);
+});
+
+test('v0.63.0: worldBearingToCanvasAngle: facing-east yaw with target east returns -PI/2 (dead ahead)', () => {
+  // The ship has turned 90\u00B0 left (yaw=PI/2 in our convention). Target is east.
+  // In ship-frame this is dead ahead. Pure math: atan2(1, 0) = PI/2 global
+  // bearing. PI/2 - PI/2 (yaw) = 0 relative. 0 - PI/2 = -PI/2 canvas angle.
+  assert.equal(worldBearingToCanvasAngle(Math.PI / 2, 1, 0), -Math.PI / 2);
+});
+
+test('v0.63.0: worldBearingToCanvasAngle: facing-south yaw with target north returns +PI/2 (dead-behind)', () => {
+  // yaw=PI (ship faces +Z = south). Target at dx=0, dz=-1 (world north).
+  // In ship-frame, target is dead-behind. Pure math: atan2(0, 1) = 0 global
+  // bearing. 0 - PI = -PI relative. -PI - PI/2 = -3PI/2 canvas angle. Both
+  // -3PI/2 AND +PI/2 are canvas-equivalent (same screen position).
+  const result = worldBearingToCanvasAngle(Math.PI, 0, -1);
+  // Equivalence check via sin/cos (since -3PI/2 == +PI/2 + 2*PI).
+  assert.ok(Math.abs(Math.sin(result) - Math.sin(Math.PI / 2)) < 1e-9);
+  assert.ok(Math.abs(Math.cos(result) - Math.cos(Math.PI / 2)) < 1e-9);
+});
+
+test('v0.63.0: worldBearingToCanvasAngle: facing-any-yaw with target-ahead returns -PI/2', () => {
+  // The "dead ahead" bearing should always map to 12 o\u2019clock
+  // regardless of yaw, as long as the target is in the forward direction.
+  //
+  // In ship.js's convention, forward at yaw=Y = (sin(Y), 0, -cos(Y))
+  // because yaw=0 means facing -Z (north). An earlier draft used
+  // (sin(yaw), cos(yaw)) which is SOUTH for yaw=0 \u2014 wrong direction.
+  // Pin the correct convention with -cos(yaw).
+  for (const yaw of [0, Math.PI / 4, Math.PI / 2, Math.PI, 3 * Math.PI / 2]) {
+    const dx = Math.sin(yaw);
+    const dz = -Math.cos(yaw); // forward = -cos(yaw) per ship.js convention
+    const result = worldBearingToCanvasAngle(yaw, dx, dz);
+    // Each iteration should map to -PI/2 (12 o\u2019clock). Wrap into the
+    // canonical [-PI, PI] form via sin/cos equivalence so we tolerate
+    // boundary cases (e.g. yaw=PI lands at PI/2-PI+PI = PI/2 after
+    // wrap, equivalent to -3PI/2 to -PI/2 \u2014 same screen position).
+    const expected = -Math.PI / 2;
+    const sinExpected = Math.sin(expected);
+    const cosExpected = Math.cos(expected);
+    assert.ok(Math.abs(Math.sin(result) - sinExpected) < 1e-9,
+      `sin mismatch at yaw=${yaw}: got ${Math.sin(result)}, expected ${sinExpected}`);
+    assert.ok(Math.abs(Math.cos(result) - cosExpected) < 1e-9,
+      `cos mismatch at yaw=${yaw}: got ${Math.cos(result)}, expected ${cosExpected}`);
+  }
+});
+
+test('v0.63.0: worldBearingToCanvasAngle: invalid inputs fall back to -PI/2 (12 o\u2019clock safe default)', () => {
+  // NaN, Infinity in any arg \u2014 return the safe default. The compass must
+  // never crash if a closure returns garbage.
+  assert.equal(worldBearingToCanvasAngle(NaN, 0, -1), -Math.PI / 2);
+  assert.equal(worldBearingToCanvasAngle(0, NaN, -1), -Math.PI / 2);
+  assert.equal(worldBearingToCanvasAngle(0, 0, NaN), -Math.PI / 2);
+  assert.equal(worldBearingToCanvasAngle(Infinity, 0, -1), -Math.PI / 2);
+  assert.equal(worldBearingToCanvasAngle(0, -Infinity, 0), -Math.PI / 2);
+  assert.equal(worldBearingToCanvasAngle(null, 0, -1), -Math.PI / 2);
+  assert.equal(worldBearingToCanvasAngle(0, undefined, 0), -Math.PI / 2);
+});
+
+// ---------------------------------------------------------------------------
+// 2. Factory wiring: displayMode === 'compass'
+// ---------------------------------------------------------------------------
+
+test('v0.63.0: createAiDebugOverlay with displayMode=compass adds ai-debug--compass class', () => {
+  const ai = createAiDebugOverlay({
+    getSubject: () => null,
+    displayMode: 'compass',
+  });
+  const root = buildMockRoot();
+  ai.mount(root);
+  assert.ok(
+    root.classList._set.has('ai-debug--compass'),
+    'displayMode=compass must add .ai-debug--compass to the root for CSS hooks',
+  );
+  ai.dispose();
+});
+
+test('v0.63.0: createAiDebugOverlay with displayMode=radar (default) does NOT add ai-debug--compass class', () => {
+  // Default behavior (pre-v0.63.0): radar mode, no compass class. This
+  // pins the back-compat invariant \u2014 existing callers that pass nothing
+  // (or displayMode=radar) get the radar-only treatment.
+  const ai = createAiDebugOverlay({ getSubject: () => null });
+  const root = buildMockRoot();
+  ai.mount(root);
+  assert.ok(!root.classList._set.has('ai-debug--compass'), 'default radar mode must NOT add compass class');
+  ai.dispose();
+});
+
+test('v0.63.0: createAiDebugOverlay with displayMode=compass does not throw on update (no-subject path)', () => {
+  // Add the class, instantiate the compass view, then run update with
+  // a null subject. The compass view's "NO SUBJECT" path mirrors the
+  // radar's; this pins that contract.
+  const ai = createAiDebugOverlay({
+    getSubject: () => null,
+    displayMode: 'compass',
+  });
+  const root = buildMockRoot();
+  ai.mount(root);
+  assert.doesNotThrow(() => ai.update(), 'compass update must not throw on null subject');
+  ai.dispose();
+});
+
+test('v0.63.0: createAiDebugOverlay dispose() in compass mode cleans up without throwing', () => {
+  const ai = createAiDebugOverlay({
+    getSubject: () => null,
+    displayMode: 'compass',
+  });
+  const root = buildMockRoot();
+  ai.mount(root);
+  assert.doesNotThrow(() => ai.dispose(), 'compass dispose must not throw');
+  // Update after dispose is the documented no-op contract.
+  assert.doesNotThrow(() => ai.update(), 'update after dispose must be a no-op');
+});
+
+// ---------------------------------------------------------------------------
+// 3. Toggle cycle: radar-rotate \u2192 radar-north-up \u2192 compass \u2192 radar-rotate
+// ---------------------------------------------------------------------------
+
+test('v0.63.0: toggle button cycles through radar-rotate \u2192 radar-north-up \u2192 compass \u2192 radar-rotate', () => {
+  // Mount with default radar mode; click the button 3 times; verify the
+  // cycle:
+  //   click 1: radar-rotate \u2192 radar-north-up, label "RADAR: NORTH-UP"
+  //   click 2: radar-north-up \u2192 compass, label "COMPASS"
+  //   click 3: compass \u2192 radar-rotate, label "RADAR: ROTATE"
+  // The button has data-ai-debug=radarModeToggle in the innerHTML.
+  const ai = createAiDebugOverlay({
+    getSubject: () => null,
+    displayMode: 'radar', // explicit
+  });
+  const root = buildMockRoot();
+  ai.mount(root);
+
+  // Find the toggle button (added to the elements registry in buildMockRoot).
+  const toggleBtn = root.querySelector('[data-ai-debug=\"radarModeToggle\"]');
+  assert.ok(toggleBtn, 'toggle button must exist in mounted root');
+  // Sanity: starts at "RADAR: ROTATE".
+  assert.equal(toggleBtn.textContent, 'RADAR: ROTATE');
+  assert.ok(!root.classList._set.has('ai-debug--compass'), 'initial state must not have compass class');
+
+  // Click 1: rotate \u2192 north-up.
+  toggleBtn._listeners.click[0]();
+  assert.equal(toggleBtn.textContent, 'RADAR: NORTH-UP');
+  assert.ok(!root.classList._set.has('ai-debug--compass'), 'radar-north-up must NOT add compass class');
+
+  // Click 2: north-up \u2192 compass.
+  toggleBtn._listeners.click[0]();
+  assert.equal(toggleBtn.textContent, 'COMPASS');
+  assert.ok(root.classList._set.has('ai-debug--compass'), 'compass must add compass class');
+
+  // Click 3: compass \u2192 rotate.
+  toggleBtn._listeners.click[0]();
+  assert.equal(toggleBtn.textContent, 'RADAR: ROTATE');
+  assert.ok(!root.classList._set.has('ai-debug--compass'), 'back to radar must REMOVE compass class');
+
+  // Click 4: rotate \u2192 north-up (cycle repeat).
+  toggleBtn._listeners.click[0]();
+  assert.equal(toggleBtn.textContent, 'RADAR: NORTH-UP');
+  ai.dispose();
+});
+
+test('v0.63.0: toggle cycle starting from compass displayMode adds class on mount', () => {
+  // If user starts in compass mode, the cycle should already show
+  // COMPASS label + compass class on mount (no click needed).
+  const ai = createAiDebugOverlay({
+    getSubject: () => null,
+    displayMode: 'compass',
+  });
+  const root = buildMockRoot();
+  ai.mount(root);
+  const toggleBtn = root.querySelector('[data-ai-debug=\"radarModeToggle\"]');
+  assert.equal(toggleBtn.textContent, 'COMPASS');
+  assert.ok(root.classList._set.has('ai-debug--compass'));
   ai.dispose();
 });

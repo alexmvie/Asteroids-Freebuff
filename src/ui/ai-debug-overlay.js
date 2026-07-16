@@ -249,6 +249,55 @@ export function colorForThreatDistance(dist, maxDist) {
 }
 
 /**
+ * Map a world-bearing (relative to a subject's heading) to a
+ * canvas-space rotation angle for the v0.63.0 compass dial.
+ *
+ * Convention:
+ *   - yaw = 0  → subject faces world -Z (north). The radar's "north"
+ *                marker is at canvas-top, matching ship.js / the world.
+ *   - The COMPASS is ship-frame centered: 12 o'clock = "dead ahead of
+ *                the subject's nose", regardless of the subject's
+ *                absolute heading. So the bearing is RELATIVE to yaw.
+ *   - Canvas arc 0 (the math baseline `ctx.rotate(0)`) points to
+ *                "3 o'clock" (east). To make "dead ahead" map to
+ *                canvas-top (-PI/2), we subtract PI/2 from the
+ *                relative bearing.
+ *
+ *   Math:
+ *     1. Global bearing of (dx, dz) = atan2(dx, -dz)
+ *        (atan2(y, x) on the (X, -Z) plane: 0=N, +PI/2=E, ±PI=S)
+ *     2. Relative bearing = global - yaw
+ *     3. Canvas angle  = relative - PI/2
+ *
+ *   Edge case note (dead-left): Math.atan2(-1, +0) = -PI/2 in V8 /
+ *   SpiderMonkey / JavaScriptCore (per ECMAScript spec; the value
+ *   could be -PI on engines treating sign-of-zero differently). The
+ *   offset subtracts -PI/2 → result is canvas-arc ±PI (9 o'clock).
+ *   sin/cos-equivalence assertions in the tests handle both ±PI
+ *   indifferently. See tests/ai-debug-overlay.test.js for the
+ *   actual assertion values.
+ *
+ *   Boundary semantics: NaN / non-finite inputs return -PI/2 (the
+ *   safe 12-o'clock default). The compass renders the safe default
+ *   before any math throws.
+ *
+ * **Pure, exported for tests.** Does NOT touch DOM/Three.js.
+ *
+ * @param {number} yaw  subject heading in radians (0 = facing -Z)
+ * @param {number} dx   world X offset of the target from the subject
+ * @param {number} dz   world Z offset of the target from the subject
+ * @returns {number}    canvas rotation angle in radians
+ */
+export function worldBearingToCanvasAngle(yaw, dx, dz) {
+  if (!Number.isFinite(yaw) || !Number.isFinite(dx) || !Number.isFinite(dz)) {
+    return -Math.PI / 2; // safe default = 12 o'clock (straight ahead)
+  }
+  const globalBearing = Math.atan2(dx, -dz);     // 0 = North, +PI/2 = East
+  const relativeBearing = globalBearing - yaw;   // ship-frame bearing
+  return relativeBearing - Math.PI / 2;          // canvas arc 0 is east → shift -PI/2 so 0 is north
+}
+
+/**
  * Map a brain mode (`'dodge'|'asteroid'|'powerup'|'idle'|other`) to a
  * CSS BEM modifier class. The chips + the radar target bracket use
  * these classes to color themselves. Unknown modes fall back to
@@ -636,6 +685,400 @@ function createRadarView(deps) {
 }
 
 // ===========================================================================
+// Sub-view: Compass (Canvas2D dial) — v0.63.0
+// ===========================================================================
+
+/**
+ * v0.63.0 — Compass mode. Ship-frame bearing dial replacing the radar
+ * canvas when `displayMode === 'compass'`. Same canvas, same DOM
+ * hook (`.ai-debug__radar`), but the drawing pipeline is different:
+ *
+ *   1. Fit canvas (DPR-scaled) — mirrors radar.
+ *   2. Clear (radar's `clear()` works for both: full-canvas clear).
+ *   3. **Base dial** — full circle + 4 cardinal tick marks (N/E/S/W).
+ *      A faint E-W cross-hair establishes the "horizon". The N tick
+ *      is positioned UP at 12 o'clock.
+ *   4. **Ship heading arrow** — fixed triangle pointing UP at the
+ *      dial's center. Reinforces the SHIP-FRAME local-frame mental
+ *      model (the arrow is always forward; the world rotates around
+ *      it via the per-tick bearing math, NOT via a `ctx.rotate` of
+ *      the canvas itself).
+ *   5. **Fire-cone overlay** — pie-slice radiating from center, fixed
+ *      UP. Brightens when the chase target is currently inside the
+ *      cone (visual cue: "the brain would fire right now").
+ *   6. **Threat rim ticks** — iterate asteroids within `evadeDist`
+ *      and draw small OUT-bound ticks at the bearing angles, colored
+ *      with `colorForThreatDistance` re-mapped to [0, evadeDist]
+ *      (instead of [0, worldRadius]). Tips point outward so they
+ *      don't overlap with target pointers (drawn inward).
+ *   7. **Chase target pointer** — large IN-bound triangle on the
+ *      inner rim at the target's bearing. Cyan for asteroid, purple
+ *      for powerup. Distinct visual layer from the threat ticks.
+ *   8. **Powerup tick** — gold tick on the outer rim at the
+ *      pending-spawn position (skipped if the chase target IS the
+ *      powerup — single visual surface, no double-marking).
+ *
+ * Edge cases (all handled):
+ *   - No subject → "NO SUBJECT" text in the center, dial still draws.
+ *   - Empty asteroid list → "CLEAR" text near the bottom (after the
+ *     horizon line); the dial, ship arrow, and target pointer still
+ *     render so the panel never looks broken.
+ *   - Identical bearings (threat = target) → threats stick OUT,
+ *     target sticks IN. They never overlap visually.
+ *   - Dead-behind target → natural atan2 wrap; renders at 6 o'clock
+ *     without any special-case math.
+ *
+ * The view is purely an output surface — no game state, no event
+ * listeners of its own. Composing factory decides whether `draw()`
+ * is called each frame. The compass+yaw loop runs every tick.
+ *
+ * @param {{
+ *   canvas: HTMLCanvasElement,
+ *   getSubject: () => any,
+ *   getAsteroids?: () => Array<any>,
+ *   getPowerupPos?: () => any,
+ *   getLastDecision?: () => any,
+ *   getActiveWeapon?: () => string,
+ *   evadeDist?: number,                              // static fallback
+ *   getEvadeDist?: () => number | undefined | null,  // live-tunable
+ * }} deps
+ */
+function createCompassView(deps) {
+  const {
+    canvas, getSubject, getAsteroids, getPowerupPos,
+    getLastDecision, getActiveWeapon,
+    evadeDist = 10,           // static fallback (matches default AI_TUNABLES.evadeDist)
+    getEvadeDist = null,
+  } = deps;
+  const ctx = canvas && typeof canvas.getContext === 'function'
+    ? canvas.getContext('2d')
+    : null;
+  const cssSize = OVERLAY_CONFIG.canvasCssSize;
+  const halfSize = cssSize / 2;
+
+  /**
+   * Resolve the live evade-distance each frame. Order: live getter
+   * (valid positive finite) > static `evadeDist` > 10u default.
+   * Mirrors `resolveWorldRadius` for the radar.
+   */
+  function currentEvadeDist() {
+    if (typeof getEvadeDist === 'function') {
+      try {
+        const v = getEvadeDist();
+        if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+      } catch { /* swallow */ }
+    }
+    return Number.isFinite(evadeDist) && evadeDist > 0 ? evadeDist : 10;
+  }
+
+  /* ---- canvas setup ---- */
+  function fitCanvas() {
+    if (!canvas) return;
+    const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+    canvas.width = Math.round(cssSize * dpr);
+    canvas.height = Math.round(cssSize * dpr);
+    canvas.style.width = `${cssSize}px`;
+    canvas.style.height = `${cssSize}px`;
+    if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fitCanvas();
+
+  function clear() {
+    if (!ctx) return;
+    ctx.clearRect(0, 0, cssSize, cssSize);
+  }
+
+  /* ---- frame ---- */
+  /**
+   * Full-circle dial + 4 cardinal tick marks. The N tick is at the top
+   * (12 o'clock) and labeled "FRONT" (ship-forward = compass-north
+   * because the compass is ship-frame-centered).
+   */
+  function drawFrame() {
+    if (!ctx) return;
+    ctx.save();
+    // Outer circle.
+    ctx.strokeStyle = 'rgba(72,219,251,0.30)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(halfSize, halfSize, halfSize - 1, 0, Math.PI * 2);
+    ctx.stroke();
+    // Inner dashed ring = fire-distance ring (matches `fireMaxDist`).
+    ctx.strokeStyle = 'rgba(72,219,251,0.15)';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.arc(halfSize, halfSize, halfSize * 0.45, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Cardinal ticks (N/E/S/W) on the inner edge of the outer ring.
+    const tickInner = halfSize - 6;
+    const tickOuter = halfSize - 2;
+    for (let i = 0; i < 4; i++) {
+      const angle = -Math.PI / 2 + i * (Math.PI / 2);
+      ctx.strokeStyle = 'rgba(72,219,251,0.65)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(halfSize + Math.cos(angle) * tickInner, halfSize + Math.sin(angle) * tickInner);
+      ctx.lineTo(halfSize + Math.cos(angle) * tickOuter, halfSize + Math.sin(angle) * tickOuter);
+      ctx.stroke();
+    }
+    // Faint horizontal cross-hair (the "horizon line" the user
+    // asked for in the future-compass note: a faint dashed centerline
+    // so left-right asymmetry is visually obvious).
+    ctx.strokeStyle = 'rgba(72,219,251,0.10)';
+    ctx.beginPath();
+    ctx.moveTo(4, halfSize);
+    ctx.lineTo(cssSize - 4, halfSize);
+    ctx.stroke();
+    // FRONT label at top (12 o'clock). The compass is ship-frame-
+    // centered so "FRONT" reinforces the convention that the top tick
+    // = the ship's nose direction.
+    ctx.fillStyle = 'rgba(72,219,251,0.50)';
+    ctx.font = '9px Courier New, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText('FRONT', halfSize, 1);
+    ctx.restore();
+  }
+
+  /* ---- ship arrow (center, fixed pointing UP) ---- */
+  function drawShipArrow() {
+    if (!ctx) return;
+    ctx.save();
+    ctx.translate(halfSize, halfSize);
+    // Triangle pointing UP (canonical nose-forward).
+    ctx.fillStyle = '#48dbfb';
+    ctx.beginPath();
+    ctx.moveTo(0, -8);
+    ctx.lineTo(5, 5);
+    ctx.lineTo(-5, 5);
+    ctx.closePath();
+    ctx.fill();
+    // Center dot.
+    ctx.fillStyle = '#48dbfb';
+    ctx.beginPath();
+    ctx.arc(0, 0, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /* ---- fire cone (pie slice, fixed UP) ---- */
+  function drawFireCone(weapon, inCone, activeWeaponName) {
+    if (!ctx) return;
+    const halfAngle = weapon === 'laser' ? 0.05 : 0.20;
+    const coneLength = halfSize - 8;
+    ctx.save();
+    ctx.translate(halfSize, halfSize);
+    // The pie slice is drawn with no rotation (always UP = -PI/2 in
+    // canvas arc space). We use moveTo/lineTo/closePath so the shape
+    // is a wedge with apex at center, base at the cone radius.
+    ctx.fillStyle = inCone
+      ? (activeWeaponName === 'laser'
+          ? 'rgba(255,136,68,0.35)'   // bright orange — laser actively on-target
+          : 'rgba(72,219,251,0.30)')   // bright cyan — bullet actively on-target
+      : (activeWeaponName === 'laser'
+          ? 'rgba(255,136,68,0.10)'   // faint orange
+          : 'rgba(72,219,251,0.08)'); // faint cyan
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    const t = Math.tan(halfAngle);
+    ctx.lineTo(Math.sin(halfAngle) * coneLength, -Math.cos(halfAngle) * coneLength);
+    ctx.arc(0, 0, coneLength, -Math.PI / 2 - halfAngle, -Math.PI / 2 + halfAngle);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /* ---- threat tick (outer rim, points outward) ---- */
+  function drawThreatTick(angle, color) {
+    if (!ctx) return;
+    if (!Number.isFinite(angle)) return;
+    const innerR = halfSize - 12;
+    const outerR = halfSize - 2;
+    const cx = Math.cos(angle);
+    const cy = Math.sin(angle);
+    // Triangle base sits on `innerR`, point at `outerR`.
+    ctx.save();
+    ctx.translate(halfSize, halfSize);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    // Base left/right of the radial line at innerR.
+    ctx.moveTo(cx * innerR + (-cy) * 2, cy * innerR + (cx) * 2);
+    ctx.lineTo(cx * innerR - (-cy) * 2, cy * innerR - (cx) * 2);
+    ctx.lineTo(cx * outerR, cy * outerR);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /* ---- target pointer (inner rim, points inward) ---- */
+  function drawTargetPointer(angle, color) {
+    if (!ctx) return;
+    if (!Number.isFinite(angle)) return;
+    const outerR = halfSize - 14;
+    const innerR = halfSize - 32;
+    const cx = Math.cos(angle);
+    const cy = Math.sin(angle);
+    ctx.save();
+    ctx.translate(halfSize, halfSize);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    // Tip at `outerR` (close to outer ring), base at `innerR` (closer
+    // to ship arrow). Up-vector is (-cy, cx). Triangle base sides are
+    // +/- 3px offset perpendicular to the radial line.
+    ctx.moveTo(cx * outerR, cy * outerR);
+    ctx.lineTo(cx * innerR + (-cy) * 4, cy * innerR + (cx) * 4);
+    ctx.lineTo(cx * innerR - (-cy) * 4, cy * innerR - (cx) * 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /* ---- powerup tick (outer rim, far-side; visible as a gold cross-hair) ---- */
+  function drawPowerupTick(angle) {
+    if (!ctx) return;
+    if (!Number.isFinite(angle)) return;
+    const r = halfSize - 4;
+    const cx = Math.cos(angle);
+    const cy = Math.sin(angle);
+    const x = halfSize + cx * r;
+    const y = halfSize + cy * r;
+    ctx.save();
+    ctx.strokeStyle = '#facc15';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x - cy * 4, y + cx * 4);
+    ctx.lineTo(x + cy * 4, y - cx * 4);
+    ctx.moveTo(x + cx * 4, y + cy * 4);
+    ctx.lineTo(x - cx * 4, y - cy * 4);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ---- main draw ---- */
+  function draw() {
+    const evadeDistLive = currentEvadeDist();
+    if (!ctx) return;
+    clear();
+    drawFrame();
+
+    const subject = safeCall(getSubject);
+    if (!subject || !subject.position) {
+      ctx.fillStyle = 'rgba(151,163,196,0.5)';
+      ctx.font = '10px Courier New, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('NO SUBJECT', halfSize, halfSize);
+      return;
+    }
+    const subjectYaw = (subject.rotation && typeof subject.rotation.yaw === 'number')
+      ? subject.rotation.yaw
+      : 0;
+    const sx = subject.position.x;
+    const sz = subject.position.z;
+    const weapon = safeCall(getActiveWeapon) || 'bullet';
+    const halfAngle = weapon === 'laser' ? 0.05 : 0.20;
+    const coneHitsTarget = isTargetInFireCone(getLastDecision, sx, sz, halfAngle, subjectYaw);
+
+    // ---- 1. Cone overlay under everything else ----
+    drawShipArrow();
+    drawFireCone(weapon, coneHitsTarget, weapon);
+
+    // ---- 2. Threats: iterate asteroids within evadeDist ----
+    // Only the closest threats make the dial visible; with ~50
+    // asteroids within evadeDist at MVP scales the rim could
+    // become a solid ring. Cap at the 12 closest to keep the
+    // dial legible; the brain's dodge logic uses ALL of them.
+    const asteroids = safeCall(getAsteroids) || [];
+    const threats = [];
+    for (const a of asteroids) {
+      if (!a || typeof a.getPosition !== 'function') continue;
+      const p = a.getPosition();
+      if (!p) continue;
+      const dx = p.x - sx;
+      const dz = p.z - sz;
+      const dist = Math.hypot(dx, dz);
+      if (dist > evadeDistLive || dist < 0.01) continue; // skip center (the ship itself)
+      threats.push({ dx, dz, dist, color: colorForThreatDistance(dist, evadeDistLive) });
+    }
+    threats.sort((a, b) => a.dist - b.dist);
+    const MAX_THREATS_DRAWN = 12;
+    for (let i = 0; i < Math.min(threats.length, MAX_THREATS_DRAWN); i++) {
+      const t = threats[i];
+      const angle = worldBearingToCanvasAngle(subjectYaw, t.dx, t.dz);
+      drawThreatTick(angle, t.color);
+    }
+
+    // ---- 3. Chase target: triangular pointer on inner rim ----
+    const dec = safeCall(getLastDecision);
+    let targetIsPowerup = false;
+    if (dec && dec.target && dec.target.pos) {
+      const tp = dec.target.pos;
+      const dx = tp.x - sx;
+      const dz = tp.z - sz;
+      const dist = Math.hypot(dx, dz);
+      const angle = worldBearingToCanvasAngle(subjectYaw, dx, dz);
+      const color = dec.target.mode === 'powerup' ? '#c084fc' : '#48dbfb';
+      drawTargetPointer(angle, color);
+      targetIsPowerup = dec.target.mode === 'powerup';
+    }
+
+    // ---- 4. Powerup tick: gold cross-hair (skip if it's the chase target) ----
+    const pup = safeCall(getPowerupPos);
+    if (pup && !targetIsPowerup && typeof pup.x === 'number' && typeof pup.z === 'number') {
+      const dx = pup.x - sx;
+      const dz = pup.z - sz;
+      const angle = worldBearingToCanvasAngle(subjectYaw, dx, dz);
+      drawPowerupTick(angle);
+    }
+
+    // ---- 5. Empty-field hint (after the iconography so it doesn't hide threats) ----
+    if (threats.length === 0 && !dec?.target) {
+      ctx.fillStyle = 'rgba(151,163,196,0.45)';
+      ctx.font = '10px Courier New, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('CLEAR', halfSize, cssSize - 14);
+    }
+  }
+
+  /**
+   * Helper: is the chase target currently inside the fire cone?
+   * Pure projection math — does not touch the canvas. Used by the
+   * cone's "active" coloring.
+   *
+   * Forward direction at yaw=Y in ship.js's convention:
+   *   - yaw=0 → ship faces world -Z (north). Forward = (0, 0, -1).
+   *   - Yaw rotates the ship around +Y (right-hand rule). At yaw=Y:
+   *     forward in world = (sin(Y), 0, -cos(Y)).
+   * The dot product of forward with the target's direction (dx, dz)
+   * gives the cosine of the angle between them. cosA close to +1
+   * means dead-ahead (in cone); cosA close to -1 means dead-behind.
+   */
+  function isTargetInFireCone(getTarget, sx, sz, halfAngle, subjectYaw) {
+    const dec = safeCall(getTarget);
+    if (!dec || !dec.target || !dec.target.pos) return false;
+    const dx = dec.target.pos.x - sx;
+    const dz = dec.target.pos.z - sz;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 0.01) return true; // target on top of ship
+    // Forward at yaw is (sin(yaw), 0, -cos(yaw)); the -cos component
+    // comes from ship.js's yaw=0=facing-Z convention (forward = -Z).
+    const cosA = (Math.sin(subjectYaw) * dx + (-Math.cos(subjectYaw)) * dz) / dist;
+    const clamped = Math.max(-1, Math.min(1, cosA));
+    return Math.acos(clamped) <= halfAngle;
+  }
+
+  function resize() { fitCanvas(); }
+
+  function dispose() {
+    // No listeners of our own to remove.
+  }
+
+  return { draw, resize, dispose };
+}
+
+// ===========================================================================
 // Sub-view: Mode chip (DOM badge)
 // ===========================================================================
 
@@ -892,8 +1335,43 @@ export function createAiDebugOverlay(deps = {}) {
   let radarCanvas = null;
   let rafHandle = null;
   let radarView = null;
+  let compassView = null;
   let chipView = null;
   let panelsView = null;
+
+  /**
+   * v0.63.0 — current top-level display mode. Tracked in the factory
+   * closure so the radar's `setRadarMode` is independent from the
+   * top-level cycle. The toggle button cycles through three states:
+   *   1. `radar-rotate`    → label "RADAR: ROTATE"     (default)
+   *   2. `radar-north-up`  → label "RADAR: NORTH-UP"
+   *   3. `compass`         → label "COMPASS"
+   * Back to (1) on the fourth click. The radar view is instantiated
+   * for ALL three states so switching back to a radar mode is a
+   * single method call (`radarView.setRadarMode('rotate')`) — no
+   * view re-creation.
+   */
+  let currentMode = displayMode === 'compass' ? 'compass' : 'radar-rotate';
+
+  /** Cyclic label for the toggle button. */
+  function labelForMode(mode) {
+    switch (mode) {
+      case 'compass':        return 'COMPASS';
+      case 'radar-north-up': return 'RADAR: NORTH-UP';
+      case 'radar-rotate':
+      default:               return 'RADAR: ROTATE';
+    }
+  }
+
+  /** What the next click of the toggle button does. */
+  function nextMode(mode) {
+    switch (mode) {
+      case 'compass':        return 'radar-rotate';
+      case 'radar-north-up': return 'compass';
+      case 'radar-rotate':
+      default:               return 'radar-north-up';
+    }
+  }
 
   function buildDom(rootElArg) {
     rootElArg.innerHTML = `
@@ -938,19 +1416,44 @@ export function createAiDebugOverlay(deps = {}) {
     rootEl = rootElArg;
     buildDom(rootEl);
     radarCanvas = rootEl.querySelector('canvas.ai-debug__radar');
+    // v0.63.0: instantiate BOTH views. The unused one's `draw()` is
+    // never called by `update()` (which dispatches on `currentMode`).
+    // Memory cost: ~1KB for the unused view. Avoids the cost of
+    // re-instantiating on every toggle click.
     radarView = createRadarView({
       canvas: radarCanvas,
       getSubject, getAiShip, getAsteroids, getPowerupPos,
       getLastDecision, getActiveWeapon, worldRadius, getWorldRadius,
     });
+    compassView = createCompassView({
+      canvas: radarCanvas,
+      getSubject, getAsteroids, getPowerupPos,
+      getLastDecision, getActiveWeapon,
+    });
     const modeBtn = rootEl.querySelector('[data-ai-debug="radarModeToggle"]');
     if (modeBtn && typeof modeBtn.addEventListener === 'function') {
+      // v0.63.0 — set initial button text from currentMode so the
+      // label is correct IMMEDIATELY after mount (no flicker between
+      // mount and first update call).
+      modeBtn.textContent = labelForMode(currentMode);
       modeBtn.addEventListener('click', () => {
-        const next = radarView && radarView.getRadarMode
-          ? (radarView.getRadarMode() === 'rotate' ? 'north-up' : 'rotate')
-          : 'rotate';
-        if (radarView) radarView.setRadarMode(next);
-        modeBtn.textContent = `RADAR: ${next === 'north-up' ? 'NORTH-UP' : 'ROTATE'}`;
+        const m = nextMode(currentMode);
+        currentMode = m;
+        // When entering the compass branch, reset the radar mode so
+        // when the user cycles back, the radar re-appears in its
+        // canonical 'rotate' state (matches v0.23.x default).
+        if (m === 'compass') {
+          if (radarView && radarView.setRadarMode) radarView.setRadarMode('rotate');
+        } else if (radarView && radarView.setRadarMode) {
+          radarView.setRadarMode(m === 'radar-north-up' ? 'north-up' : 'rotate');
+        }
+        modeBtn.textContent = labelForMode(m);
+        // Sync the label AND the CSS class so the CSS can adapt the
+        // toggle-button styling for compass vs radar states if it
+        // wants to.
+        if (rootEl && rootEl.classList && typeof rootEl.classList.toggle === 'function') {
+          rootEl.classList.toggle('ai-debug--compass', m === 'compass');
+        }
       });
     }
     chipView = createChipView({ rootEl: () => rootEl, getLastDecision });
@@ -964,15 +1467,20 @@ export function createAiDebugOverlay(deps = {}) {
    *  once per `panelUpdateIntervalMs`. */
   function update() {
     if (!rootEl) return;
-    // Radar: cheap Canvas2D redraw. Per frame is fine (<0.3ms at
-    // ~300 asteroids on a 200x200 canvas).
-    if (radarView) radarView.draw();
-    // Sync the radar mode button label (in case the mode was changed
+    // v0.63.0: dispatch the canvas draw to the right subview based
+    // on the top-level `currentMode`. Both views are alive; only
+    // the active one draws. Cost is the same as v0.23.x (one Canvas2D
+    // clear + draw per frame).
+    if (currentMode === 'compass' && compassView) {
+      compassView.draw();
+    } else if (radarView) {
+      radarView.draw();
+    }
+    // Sync the toggle button label (in case the mode was changed
     // programmatically or on first mount).
     const modeBtn = rootEl.querySelector('[data-ai-debug="radarModeToggle"]');
-    if (modeBtn && radarView && radarView.getRadarMode) {
-      const mode = radarView.getRadarMode();
-      modeBtn.textContent = `RADAR: ${mode === 'north-up' ? 'NORTH-UP' : 'ROTATE'}`;
+    if (modeBtn) {
+      modeBtn.textContent = labelForMode(currentMode);
     }
     // Panels: write on every tick. setText() does per-cell skip-if-
     // unchanged internally (one string-compare per cell) so
@@ -993,11 +1501,13 @@ export function createAiDebugOverlay(deps = {}) {
       rafHandle = null;
     }
     if (radarView) radarView.dispose();
+    if (compassView) compassView.dispose();
     if (chipView) chipView.dispose();
     if (panelsView) panelsView.dispose();
     rootEl = null;
     radarCanvas = null;
     radarView = null;
+    compassView = null;
     chipView = null;
     panelsView = null;
   }
