@@ -786,3 +786,15 @@ Drei Scripts für automatisierte Game-Analyse ohne manuelles Eingreifen:
 
 **Shipped:** commit pending. ~14 commits ahead of remote per the standing push-as-rule (the sandbox push keeps timing out on network -- run `git push origin refine-coded-ai` from your local terminal whenever convenient and the queue lands in one shot).
 
+
+## v0.60.0 (pirate combat loop)
+
+**Why:** v0.56.0 added the pirate foundation (pirates exist, aggroDist behavior, fire loop scans ships), but the pirates only saw the player in their `getShips` array -- they didn't attack each other. AND there was no bullet-vs-ship collision, so pirate shots passed through every ship. The user explicitly asked for the AI behavior; we also added the hit-registration + destruction layer to close the kill cycle.
+
+**Shipped:** commit pending. ~14 commits ahead of remote per the standing push-as-rule.
+
+**Open decisions**:
+- Pirate respawn: NONE for now (user can ask for a respawn timer later if they want).
+- Demo AI friendly fire: incidental hits count (no source-based filtering). Acceptable for MVP.
+- Cross-targeting: pirate1's `getShips` = `[ship, pirate2.getShip()]`; pirate2's = `[ship, pirate1.getShip()]`. Both brain calls in this loop can race (in different ticks), so the bullet-pool despawn safety is the only invariant that matters.
+

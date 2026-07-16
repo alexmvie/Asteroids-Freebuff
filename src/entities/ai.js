@@ -553,6 +553,7 @@ export function createDemoAi({
 
   let time = 0;
   let enabled = true;
+  let disposed = false;
   let lastMode = 'idle';
   let lastDecision = {
     mode: 'idle',
@@ -658,6 +659,7 @@ export function createDemoAi({
   }
 
   function dispose() {
+    disposed = true;
     if (typeof ship.dispose === 'function') {
       ship.dispose();
     } else if (ship.mesh && scene.children.includes(ship.mesh)) {
@@ -665,10 +667,23 @@ export function createDemoAi({
     }
   }
 
+  /**
+   * v0.60.0: has this AI been disposed? Cross-targeting pirates
+   * (pirate1's `getShips` includes pirate2) need to filter out
+   * dead pirates so their bullets keep firing at the survivors.
+   * Without this guard a disposed pirate's stale ship object would
+   * still pass the `position` null-check (it's still a valid
+   * `{x,y,z}` reference, just no longer in the scene).
+   */
+  function isAlive() {
+    return !disposed;
+  }
+
   return {
     update,
     dispose,
     getShip: () => ship,
+    isAlive,
     setEnabled: (v) => { enabled = !!v; },
     isEnabled: () => enabled,
     getMode: () => aiBrainTick(brainArgsFromShip()).mode,

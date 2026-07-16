@@ -352,3 +352,73 @@ export function findShipHit({ ship, asteroids, shipRadius = SHIP_RADIUS } = {}) 
 export function scoreForSize(size) {
   return SCORE_BY_SIZE[size] || 0;
 }
+
+// ---- Bullet ↔ ship (v0.60.0 — pirate combat loop) ----------------------
+
+/**
+ * Find all bullet↔ship collisions in the current frame. Sister to
+ * `findBulletHits` (asteroids) but the ship targets use a live
+ * `.position` object instead of an asteroid-style `getPosition()`
+ * method. Same swept-sphere fast-bullet defense as `findBulletHits`.
+ *
+ * The returned `shipIndex` indexes into the `ships` array the caller
+ * passed. One bullet can hit at most one ship per frame (we break on
+ * the first hit), but the same ship can be hit by multiple bullets.
+ *
+ * Ships with a `null` / missing / non-finite `position` are skipped
+ * (the AI factory uses this to filter dead pirates out of the
+ * target list).
+ *
+ * @param {{
+ *   bullets: { forEachActive: (fn: (b: any, i: number) => void) => void },
+ *   ships: Array<{ position: {x:number,y:number,z:number} }>,
+ *   bulletRadius?: number,
+ *   shipRadius?: number,
+ *   dt?: number,
+ * }} opts
+ * @returns {Array<{ bulletIndex: number, shipIndex: number }>}
+ */
+export function findBulletShipHits({
+  bullets,
+  ships,
+  bulletRadius = BULLET_RADIUS,
+  shipRadius = SHIP_RADIUS,
+  dt = 0,
+} = {}) {
+  if (!bullets || !ships) return [];
+  const hits = [];
+  bullets.forEachActive((b, bulletIndex) => {
+    const bp = b.position;
+    const useSwept = dt > 0 && b.velocity;
+    const prevX = useSwept ? bp.x - b.velocity.x * dt : bp.x;
+    const prevZ = useSwept ? bp.z - b.velocity.z * dt : bp.z;
+    for (let i = 0; i < ships.length; i++) {
+      const s = ships[i];
+      if (!s || !s.position) continue;
+      const sp = s.position;
+      if (typeof sp.x !== 'number' || typeof sp.z !== 'number') continue;
+      // Discrete check first (handles slow/stationary bullets).
+      if (spheresOverlap(
+        { x: bp.x, y: bp.y, z: bp.z, r: bulletRadius },
+        { x: sp.x, y: sp.y, z: sp.z, r: shipRadius },
+      )) {
+        hits.push({ bulletIndex, shipIndex: i });
+        break;
+      }
+      // Swept-sphere check in XZ plane (2DOF play plane).
+      if (useSwept) {
+        const distSq = distSqToSegment2D(
+          { x: sp.x, z: sp.z },
+          { x: prevX, z: prevZ },
+          { x: bp.x, z: bp.z },
+        );
+        const combinedR = bulletRadius + shipRadius;
+        if (distSq < combinedR * combinedR) {
+          hits.push({ bulletIndex, shipIndex: i });
+          break;
+        }
+      }
+    }
+  });
+  return hits;
+}

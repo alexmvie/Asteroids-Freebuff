@@ -620,6 +620,30 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
   - Standing rule honored: no `--no-verify` on commit so the auto-push hook fires.
 
 
+
+- [x] **v0.60.0 -- Pirate Combat Loop (cross-targeting + bullet-vs-ship collision + destructible pirates)** -- `src/entities/ai.js` (added `isAlive()` + `disposed` flag; the factory's public surface gains one method), `src/systems/collision.js` (new exported `findBulletShipHits()` sister to `findBulletHits`, same swept-sphere fast-bullet defense + duck typing for live-property ship positions), `src/main.js` (pirate1.getShips now includes `[ship, pirate2.getShip()]` and vice versa; new module-scope `PIRATE_MAX_HP = 3` + `pirateHps: Map<ship, hp>` + `damagePirate(ai)` / `killPirate(ai)` helpers; new bullet-vs-ship collision block in `processCollisions` runs against BOTH bullet pools -- player bullets damage player + pirates, AI bullets damage player + pirates), `tests/collision.test.js` (8 new tests for findBulletShipHits + swept-sphere + null-position defense), `tests/ai.test.js` (3 new tests for cross-targeting + isAlive), `src/version-constants.js`, `LOG.md`, `AGENTS.md`. The user asked: "the pirate ships do not attack the player or other pirates. add this behaviour to their ai".
+
+  **Design rationale** (the choices behind the implementation):
+  - **Cross-targeting**: each pirate's `getShips` closure returns `[ship, otherPirate.getShip()]` filtered for liveness. The brain's `findNearest` helper already walks the entire ship array, so no brain changes are needed -- just a wiring update at the factory call site. The forward reference works because the closure is INVOKED at `update()` time (after pirate2 is assigned), not at `createDemoAi()` time. The `pirate2 && pirate2.isAlive()` guard handles both TDZ (initial undefined) and disposed pirates.
+  - **HP system**: external `Map<ship, hp>` in main.js rather than a property on `ship.js`. The player ship has its own energy/HP system; pirate HP is a separate concern. Tracked per-ship via live object reference; dead pirates have their entry removed on the same frame as `dispose()`.
+  - **Bullet-vs-ship collision**: new `findBulletShipHits({bullets, ships, dt})` in collision.js. Sister function to `findBulletHits` (asteroids). The duck typing differs -- ships use live `.position` property instead of `.getPosition()` method -- but the swept-sphere fast-bullet defense is identical (matches the asteroid path's correctness).
+  - **Pirate destruction**: 3 HP (`PIRATE_MAX_HP = 3`). On HP=0: `killPirate(ai)` calls `ai.dispose()` (removes mesh from scene) + emits `pirate:died` on the bus. NO respawn. The user said "kill us" -- a permanent threat is more honest than respawning pirates. Future iteration can add a respawn timer if the user asks.
+  - **Both bullet pools damage both targets**: player bullets damage player + pirates; AI bullets damage player + pirates. This means the demo AI's bullets (which go into `aiBullets`) can incidentally hit pirates if they happen to be in the line of fire. Acceptable for MVP -- the demo AI's `aggroDist=0` means it doesn't AIM at ships, but incidental hits count. Reduces code complexity (no source-based filtering).
+  - **Bullet despawn safety**: the bullet-vs-ship loop runs for BOTH pools in the same frame. Once a bullet is despawned (via `bullets.despawn(idx)`), it's gone from the pool; subsequent `forEachActive` calls won't see it. The two pools are independent (no cross-pool bullet sharing).
+  - **`isAlive()` guard**: `createDemoAi` gains a new `isAlive()` method returning `!disposed`. Cross-targeting `getShips` uses this to filter out dead pirates -- without it, a disposed pirate's stale ship object would still pass the `position` null-check (the ship object still has a valid `{x,y,z}` reference even after dispose()).
+
+  **Tests added (11 new)**:
+  - `findBulletShipHits`: empty lists / bullet inside ship / bullet far from ship / one bullet hits first ship only / multiple bullets → multiple ship hits / null position skipped (dead pirate) / non-finite position skipped / missing args no throw / swept-sphere catches fast bullet (8 tests).
+  - `aiBrainTick`: pirate cross-targeting picks nearest ship of [player, other pirate] (pirate2 closer) / picks player when player closer (2 tests).
+  - `createDemoAi`: isAlive() returns true after construction, false after dispose() (1 test).
+
+  **Validation**:
+  - `npm test`: full suite passes; +11 new tests on top of v0.59.0 (expected: 489 + 11 = 500).
+  - `npm run build`: clean.
+  - Code-reviewer-minimax-m3: ship-able (validation parallel).
+  - Standing rule honored: no `--no-verify` on commit so the auto-push hook fires.
+
+
 ### ⏳ Next Steps (priority order)
 
 1. **Spatial hash** — `src/systems/collision.js` (broad-phase): uniform grid keyed by world position. The narrow-phase step is already in place; this is the O(1) candidate-selection layer above it.

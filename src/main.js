@@ -24,6 +24,9 @@ import {
   resolveAsteroidCollision,
   findAsteroidPowerupIndex,
   resolveAsteroidPowerupCollision,
+  findBulletShipHits,
+  SHIP_RADIUS,
+  BULLET_RADIUS,
 } from './systems/collision.js';
 import { createEventBus } from './systems/events.js';
 import { createStateMachine, State } from './systems/state.js';
@@ -57,6 +60,45 @@ import { createAiFlightDebug } from './systems/ai-flight-debug.js';
 // outer ring beyond the streamed chunks. Hoisted to module scope so
 // the "3×" intent is named, not a magic literal.
 const RADAR_BUBBLE_MULTIPLIER = 3;
+
+// ---- Pirate HP (v0.60.0 — pirate combat loop) ---------------------------
+// Pirates need HP to die. Tracked externally rather than as a ship
+// property because (a) the player ship has its own energy system and
+// (b) the AI brain is generic — pirate-specific combat state would
+// pollute the universal ship.js API. The map is keyed by ship
+// object (live reference); dead pirates have their entry removed
+// on the same frame as their dispose() call.
+const PIRATE_MAX_HP = 3; // bullets to kill a pirate
+const pirateHps = new Map(); // ship -> hp remaining (1..PIRATE_MAX_HP)
+
+function killPirate(ai) {
+  const s = ai.getShip();
+  pirateHps.delete(s);
+  // Spawn an explosion at the kill site so the death feels like
+  // asteroid destruction (consistent particle effect for any
+  // entity kill in the game). SHIP_RADIUS scales the puff size.
+  const pos = s.position;
+  particles.emitExplosion({ x: pos.x, y: pos.y, z: pos.z }, SHIP_RADIUS);
+  // Hide the engine glow BEFORE dispose — ship.dispose() preserves
+  // glows (so GLB-swapped ships keep their thrust glow), but a
+  // destroyed pirate would otherwise leave a small floating glow.
+  s.mesh.traverse((obj) => {
+    if (obj.userData && obj.userData.isEngineGlow) obj.visible = false;
+  });
+  ai.dispose();
+  bus.emit('pirate:died', { ship: s });
+}
+
+function damagePirate(ai) {
+  const s = ai.getShip();
+  const hp = (pirateHps.get(s) ?? PIRATE_MAX_HP) - 1;
+  if (hp <= 0) {
+    killPirate(ai);
+  } else {
+    pirateHps.set(s, hp);
+    bus.emit('pirate:hit', { ship: s, hp });
+  }
+}
 
 // ---- Power-up drop frequency -------------------------------------------
 // Probability (0.0–1.0) that an asteroid destroy spawns a laser
@@ -332,11 +374,23 @@ function tintShipAs(ship, colorHex) {
 }
 
 // Pirate 1 — spawns at (+100, +80) facing toward origin.
+// v0.60.0: getShips now includes BOTH the player AND pirate2 so the
+// pirate attacks other pirates too (the foundation for pirate-mode
+// combat).
+//
+// **Forward-reference pattern (TIMING NOTE):** the closure body
+// references `pirate2`, which is declared AFTER pirate1 in source
+// order. At `createDemoAi()` time, `pirate2` is in the TDZ — the
+// closure is CREATED but NOT INVOKED. By the time the closure runs
+// (in `update()`), pirate2 has been assigned. The
+// `pirate2 && pirate2.isAlive()` guard handles both TDZ and
+// disposed-pirate cases. Don't move this closure to a synchronous
+// context without first reordering the declarations.
 const pirate1 = createDemoAi({
   scene,
   asteroids: field.getEntities(),
   weapon: aiWeapon,
-  getShips: () => [ship], // pirate targets the player ship
+  getShips: () => [ship, pirate2 && pirate2.isAlive() ? pirate2.getShip() : null].filter(Boolean),
   options: {
     aggroDist: 300,
     spawnRadius: 0,
@@ -346,6 +400,7 @@ const pirate1 = createDemoAi({
 });
 tintShipAs(pirate1.getShip(), PIRATE_RED);
 pirate1.getShip().reset({ x: 100, y: 0, z: 80 });
+pirateHps.set(pirate1.getShip(), PIRATE_MAX_HP);
 
 // v0.57.0: apply the procedural pirate texture (hazard stripes +
 // warning triangles) so the pirates look visibly distinct from the
@@ -359,7 +414,7 @@ const pirate2 = createDemoAi({
   scene,
   asteroids: field.getEntities(),
   weapon: aiWeapon,
-  getShips: () => [ship],
+  getShips: () => [ship, pirate1 && pirate1.isAlive() ? pirate1.getShip() : null].filter(Boolean),
   options: {
     aggroDist: 300,
     spawnRadius: 0,
@@ -369,6 +424,7 @@ const pirate2 = createDemoAi({
 });
 tintShipAs(pirate2.getShip(), PIRATE_RED);
 pirate2.getShip().reset({ x: -100, y: 0, z: -80 });
+pirateHps.set(pirate2.getShip(), PIRATE_MAX_HP);
 applyPirateTexture(pirate2.getShip(), pirateTexture);
 
 // Same GLB swap for the AI demo ship, so the player and the NPC match.
@@ -586,6 +642,9 @@ function processCollisions(dt) {
   // DEMO:   only the AI shoots (its bullets go to aiBullets).
   // PLAYING: only the player shoots (their bullets go to playerBullets).
   // Each pool is independent — no cooldown sharing, no score bleed.
+  // v0.60.0: BOTH pools run ship-target collision against the live
+  // ship roster (player + alive pirates) so bullets from any source
+  // can damage any ship target.
   const activePool = state === State.DEMO ? aiBullets : playerBullets;
   const bulletHits = findBulletHits({ asteroids, bullets: activePool, dt });
   const asteroidsToRemove = new Set();
@@ -595,6 +654,55 @@ function processCollisions(dt) {
     asteroidsToRemove.add(hit.asteroidIndex);
     const asteroidScore = scoreForSize(asteroids[hit.asteroidIndex].spec.size);
     score += asteroidScore * ship.getScoreMultiplier();
+  }
+
+  // ---- Bullet ↔ ship (v0.60.0 — pirate combat) ------------------------
+  // v0.60.0: pirate combat. Bullets from BOTH pools (player +
+  // AI/pirates) can hit ANY ship target — player, pirate1,
+  // pirate2. The dead-pirate filter (aliveShip below) ensures we
+  // don't hit a disposed pirate's stale ship object. Each pirate
+  // starts with PIRATE_MAX_HP; on HP=0 the pirate is disposed.
+  function aliveShip(ai) {
+    return ai && ai.isAlive && ai.isAlive() ? ai.getShip() : null;
+  }
+  const shipTargets = [
+    ship,
+    aliveShip(pirate1),
+    aliveShip(pirate2),
+  ].filter((s) => s && s.position && typeof s.position.x === 'number');
+
+  for (const bullets of [playerBullets, aiBullets]) {
+    const shipHits = findBulletShipHits({
+      bullets,
+      ships: shipTargets,
+      bulletRadius: BULLET_RADIUS,
+      shipRadius: SHIP_RADIUS,
+      dt,
+    });
+    for (const { bulletIndex, shipIndex } of shipHits) {
+      bullets.despawn(bulletIndex);
+      const target = shipTargets[shipIndex];
+      if (target === ship) {
+        // Player hit. Apply damage + game-over transition identical
+        // to the asteroid-hit path. The shield buff (v0.61.0) will
+        // gate this with `ship.isShielded()` when it lands.
+        const dmg = 25 * ship.getDamageMultiplier();
+        const remaining = ship.takeDamage(dmg);
+        if (ship.isDead() || remaining <= 0) {
+          stateMachine.transition(State.GAME_OVER, { finalScore: score });
+          bus.emit('game:over', { finalScore: score });
+          ship.reset({ x: 0, y: 0, z: 0 });
+        }
+      } else if (pirateHps.has(target)) {
+        // Pirate hit. pirateHps is the SSOT for "is this a pirate";
+        // no need for 3 separate `target === pirateN.getShip()` checks.
+        const ai = pirate1.getShip() === target ? pirate1 : pirate2;
+        damagePirate(ai);
+      }
+      // Bullets despawned in this loop are gone for the rest of
+      // the frame. The next `findBulletShipHits` pass for the
+      // OTHER pool won't see them (different pool).
+    }
   }
 
   // ---- Laser ↔ asteroid (piercing hits, run in DEMO + PLAYING) -------

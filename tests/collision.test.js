@@ -23,6 +23,7 @@ import {
   resolveAsteroidCollision,
   findAsteroidPowerupIndex,
   resolveAsteroidPowerupCollision,
+  findBulletShipHits,
 } from '../src/systems/collision.js';
 
 // ---- Helpers ------------------------------------------------------------
@@ -519,4 +520,103 @@ test('BULLET_RADIUS and SHIP_RADIUS are positive scalars', () => {
 
 test('SHIP_RADIUS is 3.0 (v0.42.x matches 3x-scaled visual mesh)', () => {
   assert.equal(SHIP_RADIUS, 3.0);
+});
+
+// ---- findBulletShipHits (v0.60.0 — pirate combat loop) -----------------
+
+/**
+ * Build a fake ship with the live-property duck typing the AI ships
+ * use (`.position` is an object ref, not a `getPosition()` method).
+ */
+function fakeShip(x, z) {
+  return { position: { x, y: 0, z } };
+}
+
+test('findBulletShipHits: empty lists → no hits', () => {
+  assert.deepEqual(findBulletShipHits({ bullets: fakeBulletPool([]), ships: [] }), []);
+});
+
+test('findBulletShipHits: bullet inside ship → hit', () => {
+  const bullets = fakeBulletPool([fakeBullet(0, 0, 0)]);
+  const ships = [fakeShip(0, 0)];
+  const hits = findBulletShipHits({ bullets, ships });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].bulletIndex, 0);
+  assert.equal(hits[0].shipIndex, 0);
+});
+
+test('findBulletShipHits: bullet far from ship → no hit', () => {
+  const bullets = fakeBulletPool([fakeBullet(0, 0, 0)]);
+  const ships = [fakeShip(100, 0)];
+  assert.deepEqual(findBulletShipHits({ bullets, ships }), []);
+});
+
+test('findBulletShipHits: one bullet hits first matching ship only', () => {
+  // Bullet at origin; ship 0 at (1,0,0) (hit) + ship 1 at (-1,0,0) (also hit).
+  // Bullet should report ship 0 (first in iteration order).
+  const bullets = fakeBulletPool([fakeBullet(0, 0, 0)]);
+  const ships = [fakeShip(1, 0), fakeShip(-1, 0)];
+  const hits = findBulletShipHits({ bullets, ships });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].shipIndex, 0);
+});
+
+test('findBulletShipHits: multiple bullets → multiple ship hits', () => {
+  const bullets = fakeBulletPool([
+    fakeBullet(0, 0, 0),
+    fakeBullet(50, 0, 0),
+  ]);
+  const ships = [fakeShip(0, 0), fakeShip(50, 0)];
+  const hits = findBulletShipHits({ bullets, ships });
+  assert.equal(hits.length, 2);
+});
+
+test('findBulletShipHits: ships with null position are skipped (dead pirates)', () => {
+  const bullets = fakeBulletPool([fakeBullet(0, 0, 0)]);
+  const ships = [
+    { position: null }, // dead pirate (disposed but still in array)
+    fakeShip(0, 0),     // live player
+  ];
+  const hits = findBulletShipHits({ bullets, ships });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].shipIndex, 1);
+});
+
+test('findBulletShipHits: ships with non-finite position are skipped', () => {
+  const bullets = fakeBulletPool([fakeBullet(0, 0, 0)]);
+  const ships = [
+    { position: { x: NaN, z: 0 } },
+    fakeShip(0, 0),
+  ];
+  const hits = findBulletShipHits({ bullets, ships });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].shipIndex, 1);
+});
+
+test('findBulletShipHits: missing args → empty list, no throw', () => {
+  assert.deepEqual(findBulletShipHits({}), []);
+  assert.deepEqual(findBulletShipHits({ bullets: fakeBulletPool([]) }), []);
+  assert.deepEqual(findBulletShipHits({ ships: [] }), []);
+});
+
+test('findBulletShipHits: swept-sphere catches fast bullet passing through ship', () => {
+  // Bullet at (-2,0,0) with velocity (-500,0,0); ship at origin.
+  // Default SHIP_RADIUS=3.0 (v0.42.x bumped from 1.4 to match the 3x
+  // scaled visual mesh), so the discrete check at (-2,0,0) would
+  // HIT (sum=3.15 > 2). Use shipRadius=0.5 override to isolate the
+  // swept-sphere logic from the radius-based discrete match.
+  // Without dt: bullet at (-2,0,0), ship r=0.5, sum=0.65 → miss.
+  const ships = [fakeShip(0, 0)];
+  const b = {
+    position: { x: -2, y: 0, z: 0 },
+    velocity: { x: -500, y: 0, z: 0 },
+  };
+  const bullets = { forEachActive(fn) { fn(b, 0); } };
+  assert.deepEqual(findBulletShipHits({ bullets, ships, shipRadius: 0.5 }), []);
+  // With dt=0.02: previous pos = (8,0,0). Path passes through origin.
+  // Distance from origin to segment = 0 < 0.5 + 0.15 = 0.65 → hit.
+  const hits = findBulletShipHits({ bullets, ships, shipRadius: 0.5, dt: 0.02 });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].bulletIndex, 0);
+  assert.equal(hits[0].shipIndex, 0);
 });

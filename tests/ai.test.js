@@ -775,3 +775,83 @@ test('createDemoAi: factory option aggroDist overrides the live bag', () => {
     resetAITunables();
   }
 });
+
+// =============================================================================
+// v0.60.0 — Pirate cross-targeting (pirate1 sees pirate2 + player)
+// =============================================================================
+// When two pirates exist, each one's `getShips` includes the OTHER pirate
+// + the player. The PIRATE behavior picks the NEAREST ship. This test
+// pins the wiring: a single AI brain call must consider all ships in
+// its `args.ships` array, not just the first one. The brain's
+// `findNearest` walks the entire array via the live-property getter.
+
+test('aiBrainTick: pirate cross-targeting — picks nearest of [player, other pirate]', () => {
+  const player = { position: { x: 100, y: 0, z: 0 } }; // 100u away on +X
+  const pirate2 = { position: { x: 40, y: 0, z: 0 } }; // 40u away (closer)
+  // Reset tunables so default aggroDist (300) applies.
+  resetAITunables();
+  try {
+    const aiPos = { x: 0, y: 0, z: 0 };
+    const aiYaw = 0;
+    // No asteroids → COLLECT/ENGAGE/IDLE skip; PIRATE only fires if
+    // nearest ship in aggroDist. Note: AI_TUNABLES.aggroDist defaults
+    // to 0 (pacifist) — main.js pirates override to 300 via
+    // options.aggroDist. This test passes 300 explicitly so the brain
+    // sees the same value a real pirate ship sees.
+    const decision = aiBrainTick({
+      aiPos,
+      aiYaw,
+      asteroids: [],
+      ships: [player, pirate2], // both in range, pirate2 closer
+      aggroDist: 300,
+    });
+    // pirate2 at 40u < aggroDist 300 → fires
+    assert.equal(decision.mode, 'pirate');
+    assert.match(decision.reason, /pirate target 40\.0u/);
+  } finally {
+    resetAITunables();
+  }
+});
+
+test('aiBrainTick: pirate cross-targeting — picks player when player closer', () => {
+  const player = { position: { x: 30, y: 0, z: 0 } }; // 30u away
+  const pirate2 = { position: { x: 200, y: 0, z: 0 } }; // 200u away (farther)
+  resetAITunables();
+  try {
+    const aiPos = { x: 0, y: 0, z: 0 };
+    const aiYaw = 0;
+    const decision = aiBrainTick({
+      aiPos,
+      aiYaw,
+      asteroids: [],
+      ships: [player, pirate2],
+      aggroDist: 300,
+    });
+    assert.equal(decision.mode, 'pirate');
+    assert.match(decision.reason, /pirate target 30\.0u/);
+  } finally {
+    resetAITunables();
+  }
+});
+
+test('createDemoAi: isAlive() returns true after construction, false after dispose()', () => {
+  resetAITunables();
+  const mockShip = {
+    position: { x: 0, y: 0, z: 0 },
+    velocity: { x: 0, z: 0 },
+    rotation: { yaw: 0 },
+    setYaw() {},
+    setThrust() {},
+    update() {},
+    dispose() {},
+  };
+  const shipFactory = () => mockShip;
+  const ai = createDemoAi({
+    scene: { children: [], add() {}, remove() {} },
+    asteroids: [],
+    options: { shipFactory, spawnRadius: 0, rng: () => 0 },
+  });
+  assert.equal(ai.isAlive(), true, 'fresh AI is alive');
+  ai.dispose();
+  assert.equal(ai.isAlive(), false, 'disposed AI is dead');
+});
