@@ -25,6 +25,7 @@ import {
   resolveAsteroidPowerupCollision,
   findBulletShipHits,
 } from '../src/systems/collision.js';
+import { createSpatialHash } from '../src/systems/spatial-hash.js';
 
 // ---- Helpers ------------------------------------------------------------
 
@@ -520,6 +521,202 @@ test('BULLET_RADIUS and SHIP_RADIUS are positive scalars', () => {
 
 test('SHIP_RADIUS is 3.0 (v0.42.x matches 3x-scaled visual mesh)', () => {
   assert.equal(SHIP_RADIUS, 3.0);
+});
+
+// ---- Spatial-hash parity (v0.64.x broad-phase) ------------------------
+
+test('hash path: findBulletHits with spatialHash matches O(N²) result', () => {
+  // Build a 30-asteroid field with realistic positions + radii. For
+  // each find* function below, we run BOTH paths (with and without
+  // the spatialHash arg) and assert identical output. The narrow-phase
+  // contract must not change just because we have a different
+  // candidate-selection strategy.
+  const entities = [];
+  for (let i = 0; i < 30; i++) {
+    entities.push({
+      position: { x: (i % 6) * 30, y: 0, z: Math.floor(i / 6) * 30 },
+      radius: 2,
+      spec: { size: 0, radius: 2 },
+      getPosition() { return this.position; },
+      getRadius() { return this.radius; },
+    });
+  }
+
+  // Inject a small cluster that crosses cell boundaries so the hash
+  // has to span multiple cells for the same query point. Plain-object
+  // positions need direct field assignment (no `.set` method on a
+  // raw `{x,y,z}` object).
+  entities[0].position.x = -1;
+  entities[0].position.y = 0;
+  entities[0].position.z = -1;
+  entities[1].position.x = 15;
+  entities[1].position.y = 0;
+  entities[1].position.z = 15; // crosses cell boundary at x=16
+  entities[2].position.x = 16;
+  entities[2].position.y = 0;
+  entities[2].position.z = 0;  // right at the boundary
+
+  const bullets = [
+    { position: { x: 0, y: 0, z: 0 }, index: 0 },             // inside 0
+    { position: { x: -1000, y: 0, z: -1000 }, index: 1 },     // far away
+    { position: { x: 30, y: 0, z: 30 }, index: 2 },            // hits an asteroid at 30,30
+    { position: { x: 17, y: 0, z: 17 }, index: 3 },           // near 1 + 2
+  ];
+
+  const BULLET_RADIUS = 2; // wide enough to bite the boundaries
+  const noHash = findBulletHits({ asteroids: entities, bullets: { forEachActive(fn) { for (let i = 0; i < bullets.length; i++) fn(bullets[i], i); } }, bulletRadius: BULLET_RADIUS });
+
+  const hash = createSpatialHash({ cellSize: 16 });
+  hash.rebuild(entities);
+  const withHash = findBulletHits({
+    asteroids: entities,
+    bullets: { forEachActive(fn) { for (let i = 0; i < bullets.length; i++) fn(bullets[i], i); } },
+    bulletRadius: BULLET_RADIUS,
+    spatialHash: hash,
+  });
+
+  // Sort both for stable comparison (set semantics: at most one hit per bullet).
+  const sortFn = (a, b) => a.bulletIndex - b.bulletIndex || a.asteroidIndex - b.asteroidIndex;
+  assert.deepEqual([...noHash].sort(sortFn), [...withHash].sort(sortFn));
+});
+
+test('hash path: findAsteroidPairs with spatialHash matches O(N²) result', () => {
+  // Compact cluster of overlapping asteroids — the hash path must
+  // produce the same `i<j` pair list as the legacy sweep.
+  const entities = [];
+  for (let i = 0; i < 10; i++) {
+    entities.push({
+      position: { x: i * 3, y: 0, z: 0 },
+      radius: 5, // r=5 + r=5 = 10 — every neighbor within 6u overlaps
+      getPosition() { return this.position; },
+      getRadius() { return this.radius; },
+    });
+  }
+  // Add two far-away entities to force long-range miss pairs.
+  entities.push({
+    position: { x: 1000, y: 0, z: 0 },
+    radius: 5,
+    getPosition() { return this.position; },
+    getRadius() { return this.radius; },
+  });
+  entities.push({
+    position: { x: -1000, y: 0, z: 0 },
+    radius: 5,
+    getPosition() { return this.position; },
+    getRadius() { return this.radius; },
+  });
+
+  const noHash = findAsteroidPairs(entities);
+  const hash = createSpatialHash({ cellSize: 16 });
+  hash.rebuild(entities);
+  const withHash = findAsteroidPairs(entities, { spatialHash: hash });
+
+  const sortFn = (a, b) => a.i - b.i || a.j - b.j;
+  assert.deepEqual([...noHash].sort(sortFn), [...withHash].sort(sortFn));
+});
+
+test('hash path: findShipHit with spatialHash matches O(N²) result', () => {
+  const ship = { position: { x: 50, y: 0, z: 25 } };
+  const asteroids = [];
+  for (let i = 0; i < 20; i++) {
+    asteroids.push({
+      position: { x: i * 7, y: 0, z: 0 },
+      radius: 2,
+      getPosition() { return this.position; },
+      getRadius() { return this.radius; },
+    });
+  }
+  // Place an asteroid inside the ship's collision sphere.
+  asteroids.push({
+    position: { x: 52, y: 0, z: 24 },
+    radius: 2,
+    getPosition() { return this.position; },
+    getRadius() { return this.radius; },
+  });
+
+  assert.equal(findShipHit({ ship, asteroids }), findShipHit({ ship, asteroids: asteroids.slice() }));
+  const hash = createSpatialHash({ cellSize: 16 });
+  hash.rebuild(asteroids);
+  assert.equal(findShipHit({ ship, asteroids }), findShipHit({ ship, asteroids, spatialHash: hash }));
+});
+
+test('hash path: findBulletShipHits with spatialHash matches O(N²) result', () => {
+  const ships = [
+    { position: { x: 10, y: 0, z: 0 } },
+    { position: { x: 100, y: 0, z: 0 } },
+    { position: { x: -50, y: 0, z: -50 } },
+  ];
+  const bullets = [
+    { position: { x: 10, y: 0, z: 0 } },     // hits ship 0
+    { position: { x: 100, y: 0, z: 0 } },   // hits ship 1
+    { position: { x: -50, y: 0, z: -50 } }, // hits ship 2
+    { position: { x: 1000, y: 0, z: 1000 } }, // misses all
+  ];
+  const bulletsObj = {
+    forEachActive(fn) { for (let i = 0; i < bullets.length; i++) fn(bullets[i], i); },
+  };
+
+  const noHash = findBulletShipHits({ bullets: bulletsObj, ships, bulletRadius: 0.15, shipRadius: 3.0 });
+  const hash = createSpatialHash({ cellSize: 8 });
+  hash.rebuild(ships);
+  const withHash = findBulletShipHits({
+    bullets: bulletsObj,
+    ships,
+    bulletRadius: 0.15,
+    shipRadius: 3.0,
+    spatialHash: hash,
+  });
+  const sortFn = (a, b) => a.bulletIndex - b.bulletIndex || a.shipIndex - b.shipIndex;
+  assert.deepEqual([...noHash].sort(sortFn), [...withHash].sort(sortFn));
+});
+
+test('hash path: findAsteroidPowerupIndex with spatialHash matches O(N²) result', () => {
+  const pu = { getPosition: () => ({ x: 0, y: 0, z: 0 }), getRadius: () => 1.5 };
+  const asteroids = [];
+  for (let i = 0; i < 20; i++) {
+    asteroids.push({
+      position: { x: i * 5, y: 0, z: 0 },
+      radius: 2,
+      getPosition() { return this.position; },
+      getRadius() { return this.radius; },
+    });
+  }
+  // Inject an asteroid that overlaps the powerup (at origin).
+  asteroids[3] = {
+    position: { x: 0.5, y: 0, z: 0.5 },
+    radius: 2,
+    getPosition() { return this.position; },
+    getRadius() { return this.radius; },
+  };
+  const noHash = findAsteroidPowerupIndex({ asteroids, powerup: pu });
+  const hash = createSpatialHash({ cellSize: 16 });
+  hash.rebuild(asteroids);
+  const withHash = findAsteroidPowerupIndex({ asteroids, powerup: pu, spatialHash: hash });
+  assert.equal(noHash, withHash);
+});
+
+test('hash path: null/missing spatialHash falls back to O(N²) (back-compat)', () => {
+  // Regression: passing `null`, `undefined`, or omitting the param all
+  // must invoke the existing O(N²) sweep unchanged. This is the
+  // back-compat contract for every pre-v0.64.x call site.
+  const asteroids = [{
+    position: { x: 0, y: 0, z: 0 },
+    radius: 2,
+    getPosition() { return this.position; },
+    getRadius() { return this.radius; },
+  }];
+  const bulletPool = {
+    forEachActive(fn) { fn({ position: { x: 0, y: 0, z: 0 } }, 0); },
+  };
+  // Omit param
+  assert.equal(findBulletHits({ asteroids, bullets: bulletPool }).length, 1);
+  // Explicit undefined
+  assert.equal(findBulletHits({ asteroids, bullets: bulletPool, spatialHash: undefined }).length, 1);
+  // Explicit null
+  assert.equal(findBulletHits({ asteroids, bullets: bulletPool, spatialHash: null }).length, 1);
+  // Empty hash (no candidates)
+  const emptyHash = createSpatialHash({ cellSize: 16 });
+  assert.equal(findBulletHits({ asteroids, bullets: bulletPool, spatialHash: emptyHash }).length, 0);
 });
 
 // ---- findBulletShipHits (v0.60.0 — pirate combat loop) -----------------

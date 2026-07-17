@@ -28,6 +28,7 @@ import {
   SHIP_RADIUS,
   BULLET_RADIUS,
 } from './systems/collision.js';
+import { createSpatialHash } from './systems/spatial-hash.js';
 import { createEventBus } from './systems/events.js';
 import { createStateMachine, State } from './systems/state.js';
 import { createHud } from './ui/hud.js';
@@ -624,11 +625,35 @@ function processCollisions(dt) {
   // Cache the entity array reference — used many times below.
   const asteroids = field.getEntities();
 
+  // ---- Ship roster + shipHash (v0.64.x spatial-hash broad-phase) ----
+  // Built ONCE per frame because ship positions don't change within
+  // processCollisions (the AI ships update once per tick, before
+  // collisions; pirates don't spawn mid-frame). The roster is the
+  // player + both pirates filtered for liveness + finite position.
+  // cellSize=8 covers all 3x3 candidate scans for the relatively
+  // small ship set (max combined radius 3u ship + 0.15u bullet).
+  function aliveShip(ai) {
+    return ai && ai.isAlive && ai.isAlive() ? ai.getShip() : null;
+  }
+  const shipTargets = [
+    ship,
+    aliveShip(pirate1),
+    aliveShip(pirate2),
+  ].filter((s) => s && s.position && typeof s.position.x === 'number');
+  const shipHash = createSpatialHash({ cellSize: 8 });
+  shipHash.rebuild(shipTargets);
+
   // ---- Asteroid ↔ asteroid (push apart + elastic bounce) ------------
   // O(n²) but cheap for ~300 asteroids (~45K checks, <0.1ms). Runs in
   // EVERY non-GAME_OVER state so the AI's demo field looks dynamic.
   // Resolved BEFORE bullet/laser checks so the new positions are
   // settled before the destruction pass.
+  //
+  // v0.64.x: still O(n²) for this initial pass because the
+  // resolveAsteroidCollision mutates positions, so any hash built
+  // before this loop would have stale buckets. The post-resolve
+  // asteroidHash below is the broad-phase used by the subsequent
+  // bullet + ship queries.
   {
     const pairs = findAsteroidPairs(asteroids);
     for (const { i, j } of pairs) {
@@ -636,12 +661,19 @@ function processCollisions(dt) {
     }
   }
 
+  // Post-bounce asteroidHash. ~0.05ms rebuild at MVP scale
+  // (300 inserts ≈ 0.05ms in V8). cellSize=16 covers the
+  // max-combined-radius worst case (5+5=10u asteroid↔asteroid) with
+  // comfortable safety margin — sqrt(2)*16 ≈ 22.6u diagonal reach.
+  const asteroidHash = createSpatialHash({ cellSize: 16 });
+  asteroidHash.rebuild(asteroids);
+
   // ---- Asteroid ↔ powerup (push powerup out of overlapping asteroid) --
   // Keeps the pending power-up from being buried inside an asteroid.
   {
     const pending = powerupSystem.getPendingSpawn();
     if (pending) {
-      const pidx = findAsteroidPowerupIndex({ asteroids, powerup: pending });
+      const pidx = findAsteroidPowerupIndex({ asteroids, powerup: pending, spatialHash: asteroidHash });
       if (pidx >= 0) {
         resolveAsteroidPowerupCollision(asteroids[pidx], pending);
       }
@@ -655,8 +687,10 @@ function processCollisions(dt) {
   // v0.60.0: BOTH pools run ship-target collision against the live
   // ship roster (player + alive pirates) so bullets from any source
   // can damage any ship target.
+  // v0.64.x: spatialHash broad-phase. ~30 candidates per bullet vs
+  // 300, regardless of bullet count.
   const activePool = state === State.DEMO ? aiBullets : playerBullets;
-  const bulletHits = findBulletHits({ asteroids, bullets: activePool, dt });
+  const bulletHits = findBulletHits({ asteroids, bullets: activePool, dt, spatialHash: asteroidHash });
   const asteroidsToRemove = new Set();
   for (const hit of bulletHits) {
     activePool.despawn(hit.bulletIndex);
@@ -669,18 +703,11 @@ function processCollisions(dt) {
   // ---- Bullet ↔ ship (v0.60.0 — pirate combat) ------------------------
   // v0.60.0: pirate combat. Bullets from BOTH pools (player +
   // AI/pirates) can hit ANY ship target — player, pirate1,
-  // pirate2. The dead-pirate filter (aliveShip below) ensures we
+  // pirate2. The dead-pirate filter (aliveShip above) ensures we
   // don't hit a disposed pirate's stale ship object. Each pirate
   // starts with PIRATE_MAX_HP; on HP=0 the pirate is disposed.
-  function aliveShip(ai) {
-    return ai && ai.isAlive && ai.isAlive() ? ai.getShip() : null;
-  }
-  const shipTargets = [
-    ship,
-    aliveShip(pirate1),
-    aliveShip(pirate2),
-  ].filter((s) => s && s.position && typeof s.position.x === 'number');
-
+  // v0.64.x: spatialHash (over ship positions). The hull-mounted set
+  // is tiny (3-4 ships), so speedup is marginal but consistent.
   for (const bullets of [playerBullets, aiBullets]) {
     const shipHits = findBulletShipHits({
       bullets,
@@ -688,6 +715,7 @@ function processCollisions(dt) {
       bulletRadius: BULLET_RADIUS,
       shipRadius: SHIP_RADIUS,
       dt,
+      spatialHash: shipHash,
     });
     for (const { bulletIndex, shipIndex } of shipHits) {
       bullets.despawn(bulletIndex);
@@ -791,7 +819,12 @@ function processCollisions(dt) {
     // hit — asteroid is disposed (consumed by collision) but no
     // damage + no GAME_OVER + no position reset.
   if (state !== State.PLAYING) return;
-  const shipHitIdx = findShipHit({ ship, asteroids });
+  // Re-key the asteroidHash AFTER the splice. The asteroid array is
+  // now shorter (destroyed entries removed), so any cached hash
+  // indices from before the splice would map to shifted entries.
+  // The rebuild is cheap (~0.05ms) and corrects the indices.
+  asteroidHash.rebuild(asteroids);
+  const shipHitIdx = findShipHit({ ship, asteroids, spatialHash: asteroidHash });
   if (shipHitIdx >= 0) {
     const a = asteroids[shipHitIdx];
     a.dispose();

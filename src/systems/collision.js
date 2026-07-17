@@ -97,15 +97,32 @@ function distSqToSegment2D(p, a, b) {
  * segment from the bullet's previous position to its current position
  * against each asteroid's sphere in the XZ plane (the game is 2DOF on XZ).
  *
+ * v0.64.x: optional `spatialHash` (from `src/systems/spatial-hash.js`).
+ * When provided, the asteroid list is queried via the hash's 3x3 cell
+ * neighborhood scan instead of the O(N²) sweep. The hash's
+ * `queryCandidates(x, z)` returns `{ entity, index }` pairs that map
+ * directly to the asteroids array. When absent, the original
+ * iteration-order scan runs unchanged (every existing test still
+ * passes). The hash path is picked at integration time by main.js when
+ * the asteroid set is large enough (~50+ asteroids) to make the
+ * broad-phase worthwhile.
+ *
  * @param {{
  *   asteroids: Array<{ getPosition: () => {x:number,y:number,z:number}, getRadius: () => number }>,
  *   bullets: { forEachActive: (fn: (b: any, i: number) => void) => void },
  *   bulletRadius?: number,
  *   dt?: number,
+ *   spatialHash?: { queryCandidates: (x:number, z:number) => Array<{ entity: any, index: number }> } | null,
  * }} opts
  * @returns {Array<{ bulletIndex: number, asteroidIndex: number }>}
  */
-export function findBulletHits({ asteroids, bullets, bulletRadius = BULLET_RADIUS, dt = 0 } = {}) {
+export function findBulletHits({
+  asteroids,
+  bullets,
+  bulletRadius = BULLET_RADIUS,
+  dt = 0,
+  spatialHash = null,
+} = {}) {
   if (!asteroids || !bullets) return [];
   const hits = [];
   bullets.forEachActive((b, bulletIndex) => {
@@ -116,6 +133,38 @@ export function findBulletHits({ asteroids, bullets, bulletRadius = BULLET_RADIU
     const prevX = useSwept ? bp.x - b.velocity.x * dt : bp.x;
     const prevZ = useSwept ? bp.z - b.velocity.z * dt : bp.z;
     const prevY = useSwept ? bp.y - b.velocity.y * dt : bp.y;
+    if (spatialHash) {
+      // Broad-phase via spatial hash. Skip the O(N²) scan entirely;
+      // iterate only the 3x3 cell neighborhood around the bullet.
+      const candidates = spatialHash.queryCandidates(bp.x, bp.z);
+      for (let c = 0; c < candidates.length; c++) {
+        const cand = candidates[c];
+        const a = cand.entity;
+        const ap = a.getPosition();
+        const ar = a.getRadius();
+        if (spheresOverlap(
+          { x: bp.x, y: bp.y, z: bp.z, r: bulletRadius },
+          { x: ap.x, y: ap.y, z: ap.z, r: ar },
+        )) {
+          hits.push({ bulletIndex, asteroidIndex: cand.index });
+          break; // one bullet → one asteroid
+        }
+        if (useSwept) {
+          const distSq = distSqToSegment2D(
+            { x: ap.x, z: ap.z },
+            { x: prevX, z: prevZ },
+            { x: bp.x, z: bp.z },
+          );
+          const combinedR = bulletRadius + ar;
+          if (distSq < combinedR * combinedR) {
+            hits.push({ bulletIndex, asteroidIndex: cand.index });
+            break;
+          }
+        }
+      }
+      return;
+    }
+    // Original O(N²) sweep — preserved for the no-hash call path.
     for (let i = 0; i < asteroids.length; i++) {
       const a = asteroids[i];
       const ap = a.getPosition();
@@ -149,16 +198,53 @@ export function findBulletHits({ asteroids, bullets, bulletRadius = BULLET_RADIU
 // ---- Asteroid ↔ asteroid (push apart + elastic bounce) -----------------
 
 /**
- * Find all overlapping asteroid-asteroid pairs. O(n²) in the number of
- * asteroids — acceptable for ~300 asteroids (~45K checks at <0.1ms).
- * Each pair is reported once (i < j).
+ * Find all overlapping asteroid-asteroid pairs.
+ *
+ * When called with the no-options shape `(asteroids)` runs the original
+ * O(n²) sweep — every existing test still passes through this path.
+ * When called with `(asteroids, { spatialHash })` the function uses
+ * the hash as a broad-phase: each asteroid queries its 3x3 cell
+ * neighborhood and deduplicates by `j > i` so the same pair is never
+ * reported twice.
  *
  * @param {Array<{getPosition: () => {x:number,y:number,z:number}, getRadius: () => number}>} asteroids
+ * @param {{ spatialHash?: { queryCandidates: (x:number, z:number) => Array<{ entity: any, index: number }> } | null }} [opts]
  * @returns {Array<{i:number, j:number}>}
  */
-export function findAsteroidPairs(asteroids) {
+export function findAsteroidPairs(asteroids, opts = {}) {
   if (!asteroids || asteroids.length < 2) return [];
+  const spatialHash = opts.spatialHash || null;
   const pairs = [];
+  if (spatialHash) {
+    for (let i = 0; i < asteroids.length; i++) {
+      const a = asteroids[i];
+      const ap = a.getPosition();
+      const ar = a.getRadius();
+      const candidates = spatialHash.queryCandidates(ap.x, ap.z);
+      for (let c = 0; c < candidates.length; c++) {
+        const cand = candidates[c];
+        // Skip self (cand.index === i) AND already-reported pairs
+        // (cand.index < i, which means we processed B→A when we
+        // reached B in the outer loop). Requires `i < j` invariant.
+        if (cand.index <= i) continue;
+        const b = cand.entity;
+        const bp = b.getPosition();
+        const br = b.getRadius();
+        if (spheresOverlap(
+          { x: ap.x, y: ap.y, z: ap.z, r: ar },
+          { x: bp.x, y: bp.y, z: bp.z, r: br },
+        )) {
+          pairs.push({ i, j: cand.index });
+        }
+      }
+    }
+    return pairs;
+  }
+  // Original O(n²) sweep — preserved for the no-options call path. The
+  // broad-phase (hash) path above is preferred for >50 asteroids; this
+  // path is the opt-out default for tests and any caller that hasn't
+  // built a hash yet. Documented cost: ~45K Pythagorean checks for the
+  // ~300-asteroid MVP field, ~0.3ms in V8.
   for (let i = 0; i < asteroids.length; i++) {
     const a = asteroids[i];
     const ap = a.getPosition();
@@ -251,13 +337,30 @@ export function resolveAsteroidCollision(a, b) {
  * @param {{
  *   asteroids: Array<{getPosition: () => {x:number,y:number,z:number}, getRadius: () => number}>,
  *   powerup: { getPosition: () => {x:number,y:number,z:number}, getRadius: () => number },
+ *   spatialHash?: { queryCandidates: (x:number, z:number) => Array<{ entity: any, index: number }> } | null,
  * }} opts
  * @returns {number} asteroid index, or -1
  */
-export function findAsteroidPowerupIndex({ asteroids, powerup } = {}) {
+export function findAsteroidPowerupIndex({ asteroids, powerup, spatialHash = null } = {}) {
   if (!asteroids || !powerup) return -1;
   const pp = powerup.getPosition();
   const pr = powerup.getRadius();
+  if (spatialHash) {
+    const candidates = spatialHash.queryCandidates(pp.x, pp.z);
+    for (let c = 0; c < candidates.length; c++) {
+      const cand = candidates[c];
+      const a = cand.entity;
+      const ap = a.getPosition();
+      if (spheresOverlap(
+        { x: ap.x, y: ap.y, z: ap.z, r: a.getRadius() },
+        { x: pp.x, y: pp.y, z: pp.z, r: pr },
+      )) {
+        return cand.index;
+      }
+    }
+    return -1;
+  }
+  // Original O(n²) sweep — preserved for the no-hash call path.
   for (let i = 0; i < asteroids.length; i++) {
     const a = asteroids[i];
     const ap = a.getPosition();
@@ -320,16 +423,39 @@ export function resolveAsteroidPowerupCollision(asteroid, powerup) {
  * returned because the ship dies and is reset on any hit — there is no
  * "damage threshold" in the MVP.)
  *
+ * v0.64.x: optional `spatialHash` for the broad-phase. Cost goes
+ * from O(asteroids) to O(asteroids in 3x3 cells) — for a single ship
+ * query this isn't a big win in node count, but gathers the asteroid
+ * array sort + comparison cost into a single Map.get × 9 sweep (~9
+ * Map lookups vs ~300 array index reads).
+ *
  * @param {{
  *   ship: { position: {x:number,y:number,z:number} },
  *   asteroids: Array<{ getPosition: () => {x:number,y:number,z:number}, getRadius: () => number }>,
  *   shipRadius?: number,
+ *   spatialHash?: { queryCandidates: (x:number, z:number) => Array<{ entity: any, index: number }> } | null,
  * }} opts
  * @returns {number} asteroid index, or -1
  */
-export function findShipHit({ ship, asteroids, shipRadius = SHIP_RADIUS } = {}) {
+export function findShipHit({ ship, asteroids, shipRadius = SHIP_RADIUS, spatialHash = null } = {}) {
   if (!ship || !asteroids) return -1;
   const sp = ship.position;
+  if (spatialHash) {
+    const candidates = spatialHash.queryCandidates(sp.x, sp.z);
+    for (let c = 0; c < candidates.length; c++) {
+      const cand = candidates[c];
+      const a = cand.entity;
+      const ap = a.getPosition();
+      if (spheresOverlap(
+        { x: sp.x, y: sp.y, z: sp.z, r: shipRadius },
+        { x: ap.x, y: ap.y, z: ap.z, r: a.getRadius() },
+      )) {
+        return cand.index;
+      }
+    }
+    return -1;
+  }
+  // Original O(n²) sweep — preserved for the no-hash call path.
   for (let i = 0; i < asteroids.length; i++) {
     const a = asteroids[i];
     const ap = a.getPosition();
@@ -369,12 +495,18 @@ export function scoreForSize(size) {
  * (the AI factory uses this to filter dead pirates out of the
  * target list).
  *
+ * v0.64.x: optional `spatialHash` for the broad-phase. The hash is
+ * built from the `ships` array the caller passes; each bullet
+ * queries the 3x3 cell neighborhood at its position and runs
+ * narrow-phase on the (typically tiny) candidate set.
+ *
  * @param {{
  *   bullets: { forEachActive: (fn: (b: any, i: number) => void) => void },
  *   ships: Array<{ position: {x:number,y:number,z:number} }>,
  *   bulletRadius?: number,
  *   shipRadius?: number,
  *   dt?: number,
+ *   spatialHash?: { queryCandidates: (x:number, z:number) => Array<{ entity: any, index: number }> } | null,
  * }} opts
  * @returns {Array<{ bulletIndex: number, shipIndex: number }>}
  */
@@ -384,6 +516,7 @@ export function findBulletShipHits({
   bulletRadius = BULLET_RADIUS,
   shipRadius = SHIP_RADIUS,
   dt = 0,
+  spatialHash = null,
 } = {}) {
   if (!bullets || !ships) return [];
   const hits = [];
@@ -392,6 +525,38 @@ export function findBulletShipHits({
     const useSwept = dt > 0 && b.velocity;
     const prevX = useSwept ? bp.x - b.velocity.x * dt : bp.x;
     const prevZ = useSwept ? bp.z - b.velocity.z * dt : bp.z;
+    if (spatialHash) {
+      // Broad-phase via spatial hash over the ship set.
+      const candidates = spatialHash.queryCandidates(bp.x, bp.z);
+      for (let c = 0; c < candidates.length; c++) {
+        const cand = candidates[c];
+        const s = cand.entity;
+        if (!s || !s.position) continue;
+        const sp = s.position;
+        if (typeof sp.x !== 'number' || typeof sp.z !== 'number') continue;
+        if (spheresOverlap(
+          { x: bp.x, y: bp.y, z: bp.z, r: bulletRadius },
+          { x: sp.x, y: sp.y, z: sp.z, r: shipRadius },
+        )) {
+          hits.push({ bulletIndex, shipIndex: cand.index });
+          break;
+        }
+        if (useSwept) {
+          const distSq = distSqToSegment2D(
+            { x: sp.x, z: sp.z },
+            { x: prevX, z: prevZ },
+            { x: bp.x, z: bp.z },
+          );
+          const combinedR = bulletRadius + shipRadius;
+          if (distSq < combinedR * combinedR) {
+            hits.push({ bulletIndex, shipIndex: cand.index });
+            break;
+          }
+        }
+      }
+      return;
+    }
+    // Original O(n²) sweep — preserved for the no-hash call path.
     for (let i = 0; i < ships.length; i++) {
       const s = ships[i];
       if (!s || !s.position) continue;
