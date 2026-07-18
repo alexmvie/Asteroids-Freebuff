@@ -254,15 +254,17 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
   - **v0.63.0 (Compass mode)**: 3-state toggle added to AI Debug Overlay for future Elite UI.
   - **v0.63.1 (round-3d polish nits)**: mock key rename, regression guard, docstring trim.
   - **v0.64.0 (Spatial hash collision)**: broad-phase O(1) grid (`src/systems/spatial-hash.js`) wired into main collision loop; 568 tests green; build clean.
+- [x] **v0.65.0 — Realistic Asteroid Component & PBR Textures** — Added a new self-contained component `src/entities/realistic-asteroid.js` featuring 5 photorealistic PBR texture sets (C-type, S-type, M-type, V-type, and Icy/Cometary) generated via Gemini and cropped into 1024x1024 maps. Implemented 5 distinct shape types supporting 3-level LOD (Crystalline Shard, Cratered Potato, Contact Binary, Torus Donut, and Craggy Rock) with deterministic noise displacement. Added 45 tests in `tests/realistic-asteroid.test.js` verifying the geometries, LOD, splitting, and textures. All 613 tests pass; build clean.
 
 ### ⏳ Next Steps (priority order)
 
-1. **Documentation-drift cleanup** — sweep AGENTS.md uncompressed entries; tighten the historical narrative so the project memory is honest + scannable at scale (the v0.20.x–v0.27.x block was the last major fold; make sure older entries match this style).
-2. **Occlusion culling** — skip asteroids hidden behind other geometry. Three.js's built-in `frustumCulled` does the frustum half; this is the "hidden by another object" half (BVH or depth-prepass). Worth it once the streaming field hits hundreds of asteroids.
-3. **Hyperspace stub** — `src/systems/hyperspace.js`: `requestJump(systemId)` no-op seam for Elite expansion.
-4. **Particles + visual polish** — explosions, thrust glow, screen shake, hit effects.
-5. **Powerup audio** — Web Audio API ping when collecting a powerup.
-6. **Final polish** — edge cases, manual smoke test, README clean-up.
+1. **Integrate Realistic Asteroids** — Wire the new `realistic-asteroid.js` component into `src/world/chunks.js` and `src/main.js` so it streams in place of or alongside the standard standard/capsule types once the active codebase modifications are complete.
+2. **Documentation-drift cleanup** — sweep AGENTS.md uncompressed entries; tighten the historical narrative so the project memory is honest + scannable at scale (the v0.20.x–v0.27.x block was the last major fold; make sure older entries match this style).
+3. **Occlusion culling** — skip asteroids hidden behind other geometry. Three.js's built-in `frustumCulled` does the frustum half; this is the "hidden by another object" half (BVH or depth-prepass). Worth it once the streaming field hits hundreds of asteroids.
+4. **Hyperspace stub** — `src/systems/hyperspace.js`: `requestJump(systemId)` no-op seam for Elite expansion.
+5. **Particles + visual polish** — explosions, thrust glow, screen shake, hit effects.
+6. **Powerup audio** — Web Audio API ping when collecting a powerup.
+7. **Final polish** — edge cases, manual smoke test, README clean-up.
 
 ### ✅ Tools available
 
