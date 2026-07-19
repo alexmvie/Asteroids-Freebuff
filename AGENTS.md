@@ -349,6 +349,16 @@ The orchestrator exposes the public API as thin one-liner forwards to factory me
 - One commit per logical change (data-model spec, data-model impl, scaffold, ship, etc.).
 - Imperative-mood subject lines ("Add ship entity", not "Added ship entity").
 
+### Test-fixture binary rule (added v0.66.0)
+
+Binary test fixtures (videos, images, 3D models, archives, audio) live under the `tests/` subtree and are **NEVER committed to git**. They are auto-blocked by extension in `.gitignore`. Test CODE (`tests/*.test.js`) is **ALWAYS committed** -- the project relies on `npm test` against this convention.
+
+- **Scope is narrow by design.** These patterns only auto-ignore binaries under `tests/**`. A `.mp4` / `.glb` / `.wav` placed in any other location (e.g., `src/`, `public/`, repo root) WILL still be tracked unless explicitly gitignored. When introducing a new asset folder outside `tests/`, add its exclusion to `.gitignore` at the same time the folder is created -- do not rely on this rule alone.
+- **Where fixtures go:** inside any `tests/` subtree (e.g., `tests/fixtures/video.mp4`). They will be auto-ignored by the `.gitignore` patterns.
+- **One-off downloads:** transient folders (e.g., `mark13/downloads/`) are auto-ignored too. The *scripts* that write into them ARE committed; the *data* is not.
+- **Force-committing a fixture is rare.** Use `git add -f <path>` and document WHY in the commit message. Common case: a versioned reference 3D model whose content is the test's whole point.
+- **Background:** this rule was added in v0.66.0 after a 2 GB `.mp4` was accidentally committed to `mark13/downloads/` and bloated the local pack + broke every auto-push. Future accidents of this kind are now blocked at `git add` time.
+
 ## How to Validate
 
 | Command | Purpose |

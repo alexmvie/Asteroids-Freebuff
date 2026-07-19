@@ -8,3 +8,71 @@ artifacts/
 tmp/
 __pycache__/
 *.pyc
+
+# === Test fixture binary rule (project convention, added v0.66.0) ===
+# Binary test fixtures (videos, images, 3D models, archives, audio, HDR
+# textures) live under the tests/ subtree and are NEVER committed to git.
+# They are auto-ignored by extension so a stray fixture can never
+# accidentally pollute history.
+# Test CODE (tests/*.test.js) is ALWAYS committed -- the project relies on
+# `npm test` against this convention. To force-commit a binary fixture
+# (rare; e.g., a versioned reference model), use `git add -f <path>` and
+# document WHY in the commit message.
+#
+# SCOPE IS NARROW BY DESIGN: patterns below only auto-ignore binaries under
+# tests/**. A .mp4 / .glb / .wav / .hdr placed in any other location
+# (src/, public/, repo root) WILL be tracked unless explicitly gitignored.
+# When introducing a new asset folder outside tests/, add its exclusion
+# to .gitignore at the same time the folder is created -- do not rely on
+# this rule alone. See AGENTS.md "Conventions -> Test-fixture binary rule"
+# for the full project rule.
+tests/**/*.mp4
+tests/**/*.mov
+tests/**/*.webm
+tests/**/*.avi
+tests/**/*.mkv
+tests/**/*.mpg
+tests/**/*.mpeg
+tests/**/*.wmv
+tests/**/*.flv
+tests/**/*.m4v
+tests/**/*.png
+tests/**/*.jpg
+tests/**/*.jpeg
+tests/**/*.gif
+tests/**/*.bmp
+tests/**/*.tiff
+tests/**/*.webp
+tests/**/*.glb
+tests/**/*.gltf
+tests/**/*.fbx
+tests/**/*.obj
+tests/**/*.blend
+tests/**/*.dae
+tests/**/*.zip
+tests/**/*.tar
+tests/**/*.tar.gz
+tests/**/*.tgz
+tests/**/*.7z
+tests/**/*.rar
+# Audio (Web Audio API in tech-stack; test fixtures for future audio layer)
+tests/**/*.wav
+tests/**/*.mp3
+tests/**/*.flac
+tests/**/*.ogg
+tests/**/*.aac
+tests/**/*.m4a
+# Modern image + Apple 3D (future-proof)
+tests/**/*.heic
+tests/**/*.avif
+tests/**/*.usdz
+# HDR textures (project ships nebula skydome; IBL test fixtures are a
+# plausible near-future need)
+tests/**/*.hdr
+tests/**/*.exr
+
+# === One-off downloads convention (fixes the v0.66.0 git-bloat issue) ===
+# Recursive download folders for transient / one-off content. The scripts
+# that WRITE INTO these folders ARE committed (e.g. mark13/download_video.py);
+# the downloaded data itself is NEVER committed.
+mark13/downloads/
