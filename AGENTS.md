@@ -44,6 +44,22 @@ These rules are set by the project owner and are **standing** — they apply to 
 - On the `refine-coded-ai` branch, **unattended `git push` IS SANCTIONED** -- `.githooks/post-commit` runs `git push` after every commit, so you never have to type `git push` manually. Other commands (commit, `npm install`, `pip install --user`, `./scripts/install-hooks.sh`) are also fine without explicit approval. (Standing rule updated 2026-07-04 at the user's explicit request: push is auto on `refine-coded-ai`.)
 - If you need to make a significant change beyond the user's clear ask, **ask first**.
 
+### Rule 7: Commit always means commit + push
+
+When the user says **commit** — even just the word on its own, no mention of push — they mean **commit AND push as one action**. Both halves are non-optional. The agent must:
+
+1. Stage + `git commit` the changes.
+2. Verify the push actually succeeded (post-commit hook OR explicit push).
+3. Confirm via `git log origin/<branch>..HEAD` that **zero commits are ahead** before declaring the work done.
+
+**On `refine-coded-ai`** — the `.githooks/post-commit` hook already runs `git push` automatically. The agent must still verify the push landed (the hook can fail silently when upstream tracking is broken: after `git-filter-repo`, after a fresh clone, after the `--set-upstream` was lost in a remote wipe, etc.). Never trust "hook ran, push succeeded" without checking `origin/<branch>..HEAD` is empty.
+
+**On other branches / machines without the hook** — the agent must run an explicit `git push` (with appropriate flags per the divergence situation: `--force-with-lease` for `+1/-1`, `--force-with-lease --set-upstream` after upstream-tracking was lost, `--no-thin` for sandboxes known to corrupt thin-pack uploads, etc.).
+
+**If the push fails** — do NOT silently retry, do NOT modify the commit, do NOT widen the rule scope. Report the failure explicitly (network error, divergent history, hook missing, missing remote, etc.) and ask the user before retrying. The only exception is if the user explicitly prefaced the task with "commit and push, don't bother me about failures".
+
+This rule exists because the post-commit hook can fail silently when upstream tracking is broken — an uncaught push failure leaves the agent thinking work was shipped when it was actually only committed locally. The user has been bitten by this several times.
+
 ---
 
 ## Project Overview
