@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { NoisyIcosphere } from '../geometry/noisy-icosphere.js';
 import { Capsule } from '../geometry/capsule.js';
 import { mulberry32 } from '../world/rng.js';
+import { createRealisticAsteroidFromSpec } from './realistic-asteroid.js';
 
 /**
  * Returns the body type for an asteroid spec: 'icosphere' (seed
@@ -431,9 +432,22 @@ function addDebugGround(group, spec, groundY) {
  * }} opts
  */
 export function createAsteroidFromSpec({ spec, scene } = {}) {
+  // v0.67.x — dispatcher for the standard↔realistic visual mix.
+  // `spec.type` is derived deterministically from spec.seed at chunk
+  // generation time in src/world/chunks.js; the realistic branch
+  // delegates to createRealisticAsteroidFromSpec for the textured PBR
+  // + 5-shape variants. Both branches return the SAME entity surface
+  // (mesh, spec, update, split, dispose, getRadius, getSize,
+  // getPosition, getVelocity, setVelocity), so callers (the asteroid
+  // field streaming layer + main.js processCollisions split-loop +
+  // any future consumer) stay agnostic to which factory fired.
   if (!scene) throw new Error('createAsteroidFromSpec: `scene` is required');
   if (!spec) throw new Error('createAsteroidFromSpec: `spec` is required');
+  if (spec.type === 'realistic') {
+    return createRealisticAsteroidFromSpec({ spec, scene });
+  }
 
+  // ---- Standard factory body (unchanged below this comment) -----------
   const mesh = buildAsteroidMesh(spec);
   scene.add(mesh);
 
@@ -502,6 +516,12 @@ export function createAsteroidFromSpec({ spec, scene } = {}) {
         spin: 0.5 + rng() * 1.5,
         velocity: { x: vx, y: 0, z: vz },
         seed: (rng() * 1e9) | 0,
+        // v0.67.x — propagate type so multi-generation splits stay
+        // visually consistent (a realistic parent whose split() here
+        // would have lost type — defensive for untyped legacy specs;
+        // realistic parents route through src/entities/realistic-asteroid.js
+        // split() with hardcoded type='realistic' instead).
+        type: spec.type || 'standard',
       });
     }
     return children;

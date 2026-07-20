@@ -134,6 +134,30 @@ test('RealisticAsteroid: split() behavior', () => {
   asteroid2.dispose();
 });
 
+test('RealisticAsteroid: split() children carry type="realistic" (v0.67.x dispatch)', () => {
+  // Without type propagation, realistic splits would render as standard
+  // children on the next frame. This was the silent bug in the previous
+  // architecture -- the createAsteroidFromSpec dispatcher in
+  // src/entities/asteroid.js would route children with undefined `type`
+  // to the standard factory, silently breaking visual continuity.
+  const scene = new THREE.Scene();
+  const asteroid = createRealisticAsteroidFromSpec({ spec: createMockSpec(0, 0), scene });
+  const children = asteroid.split();
+  assert.equal(children.length, 2);
+  for (const child of children) {
+    assert.equal(typeof child.type, 'string', 'child.type must be set so the dispatcher can route correctly');
+    assert.equal(
+      child.type,
+      'realistic',
+      `realistic split child should carry type="realistic", got "${child.type}"`,
+    );
+    // All other spec invariants still hold -- only the new field was added.
+    assert.ok(typeof child.id === 'string', 'child.id should still be a string');
+    assert.ok(child.id.endsWith('-r0') || child.id.endsWith('-r1'), 'child.id should keep the realistic-prefix suffix');
+  }
+  asteroid.dispose();
+});
+
 test('RealisticAsteroid: dispose() removes mesh from scene and disposes all geometries/materials', () => {
   const scene = new THREE.Scene();
   const spec = createMockSpec(2); // contact binary has the most sub-objects

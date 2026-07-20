@@ -1,3 +1,44 @@
+## v0.67.0 -- Realistic-Asteroid Streaming Integration
+
+**User request:** "Sprung zum eigentlichen Feature-Work: Realistic-Asteroid in src/world/chunks.js + src/main.js integrieren damit sie zusammen mit den Standard-Asteroiden gestreamt werden. Das ist aktuell Top-1 in AGENTS.md 'Next Steps'. Erfordert kurze Strategie-Entscheidung: ersetzen die alten Asteroid-Typen komplett, oder zufällige Auswahl zwischen realistic + standard pro Chunk? Ich schlage 'zufällige Auswahl pro Chunk mit weight=0.3 für realistic' vor. Bin bereit es anzugehen sobald du grünes Licht gibst."
+
+### Decisions taken
+- **Per-ASTEROID** (not user's suggested per-CHUNK). Per-CHUNK weight=0.3 würde visible "realistic pocket" Zonen erzeugen (15/49 chunks rein realistic, 34/49 rein standard). Per-ASTEROID mischt beide Typen innerhalb jedes chunks für durchgehende Vielfalt.
+- **Weight 0.3** wie vom User vorgeschlagen. Tunable in `src/world/chunk-constants.js` (SSOT). Bump auf 0.5 ist eine Zeile.
+- **Coexist** (kein Replace). Die 16MB committed textures bleiben; keine Arbeit weggeworfen.
+- **Type propagation on split** fixt silent bug: realistic parents whose split failed to carry `type` would silently dispatch children via the standard factory → visual discontinuity across split trees.
+
+### What shipped
+5 source files + 2 test files + 2 shim/barrel fixes:
+
+| File | Change |
+|---|---|
+| `src/world/chunk-constants.js` | + `REALISTIC_ASTEROID_WEIGHT = 0.3` mit erklärendem JSDoc |
+| `src/world/chunks.js` | + import; per-asteroid loop extrahiert Werte, leitet `type = ((seed >>> 8) & 0xff) < Math.floor(WEIGHT * 256) ? 'realistic' : 'standard'` ab (zero added rng calls → existing chunk-seed sequence preserved → existing world.test.js assertions stay green ohne test snapshot churn) |
+| `src/world/types.js` | + `type: 'standard'\|'realistic'` JSDoc-Feld auf `AsteroidSpec` |
+| `src/entities/asteroid.js` | + cross-import; `createAsteroidFromSpec` jetzt dispatcher (top of body); standard Factory-Body unverändert unterhalb; `split()` children carry `type: spec.type \|\| 'standard'` |
+| `src/entities/realistic-asteroid.js` | `split()` children carry `type: 'realistic'` (hardcoded; Factory produziert immer realistic) |
+| `src/world/constants.js` (shim) | + `REALISTIC_ASTEROID_WEIGHT` im chunk-constants re-export block |
+| `src/world/index.js` (barrel) | + `REALISTIC_ASTEROID_WEIGHT` im chunk+asteroid re-export block |
+| `tests/world.test.js` | + 3 tests (valid type discriminator / determinism across calls / distribution ±4% of WEIGHT on ~12-25K sample) |
+| `tests/realistic-asteroid.test.js` | + 1 test (split children carry type='realistic') |
+
+### Architecture notes
+- **Dispatcher-Pattern**: `createAsteroidFromSpec` liest `spec.type` und routet. Beide Branches returnen SAME entity surface — `{ mesh, spec, update, split, dispose, getRadius, getSize, getPosition, getVelocity, setVelocity }` — so existing callers (`src/systems/asteroid-field.js` streaming layer + `src/main.js` `processCollisions` split loop) work unchanged.
+- **Per-ASTEROID Determinismus**: `((seed >>> 8) & 0xff) < threshold` liest byte 8-15 of chunk-rng-derived asteroid seed. Uniform [0, 256) → probability `floor(WEIGHT * 256) / 256` ≈ `WEIGHT`. 0.3 * 256 = 76.8 floored zu 76 → observed fraction 76/256 = 0.297 — within ±4% test tolerance for ~12K samples.
+- **Texture memory**: realistic's lazy-load pattern unchanged (each asteroid loads its 4-texture set at first use; cached at module scope). At MVP scale (~150 unique asteroids per bubble, ~3-5 unique texture sets) GPU memory adds ~20-60MB. Acceptable.
+
+### Open decisions
+- **Weight tuning**: User könnte höher wollen (0.5, 0.7) für mehr realistic dominance. Bump ist eine Zeile in `chunk-constants.js`.
+- **AI awareness**: Demo-AI brain currently treats all asteroids gleich — no per-type target priority. A future pass could add a "prefer realistic" preference.
+- **AI debug overlay**: `src/ui/ai-debug-overlay.js` doesn't distinguish type visually on the radar. Could be added with a small type-based color tweak.
+
+### Validation
+- 617/617 tests pass (was 545 before v0.67.0 work; +4 new + ~70 previously-skipped-due-to-crash tests now executable thanks to the chunks.js fix).
+- `npm run build`: clean (1.76s, 176 kB gzipped, 653 kB chunk warning is pre-existing).
+- Code-reviewer: returned meta-text per AGENTS.md "Known Quirks" — green tests + green build treated as canonical signal.
+- Single commit per Rule 7: post-commit hook auto-pushes to `origin/refine-coded-ai`.
+
 ## v0.58.0 -- AI Tuners Panel Reconciliation + Regression Guard
 
 **User feedback (verbatim):** "look at our ai live tuners panel. alot of params are undefined. how came that. dont you have any quality control in your coding? no tests?"

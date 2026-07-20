@@ -16,6 +16,7 @@ import {
   INITIAL_SYSTEM_SEED,
   MIN_ASTEROIDS_PER_CHUNK,
   MAX_ASTEROIDS_PER_CHUNK,
+  REALISTIC_ASTEROID_WEIGHT,
   mulberry32,
   makeSimplex2,
   hashChunk,
@@ -255,6 +256,80 @@ test('generateChunk: drift velocities are within MAX_ASTEROID_DRIFT', () => {
     assert.ok(mag <= 0.5 + 1e-6, `drift too fast: ${mag} for ${a.id}`);
     assert.equal(a.velocity.y, 0);
   }
+});
+
+// ---------------------------------------------------------------------------
+// v0.67.x -- per-asteroid realistic-variant mix
+// ---------------------------------------------------------------------------
+
+test('generateChunk: every asteroid spec has a valid type discriminator', () => {
+  // Walk a moderate grid + skip empty chunks; assert each remaining
+  // asteroid has type ∈ { 'standard', 'realistic' }. Catches typos in
+  // the dispatcher chain (chunks.js, asteroid.js, realistic.js).
+  for (let cx = -10; cx <= 10; cx++) {
+    for (let cz = -10; cz <= 10; cz++) {
+      const chunk = generateChunk({ cx, cz, systemSeed: INITIAL_SYSTEM_SEED });
+      for (const a of chunk.asteroids) {
+        assert.ok(
+          a.type === 'standard' || a.type === 'realistic',
+          `bad type at (${cx},${cz}) idx=${a.id}: ${a.type}`,
+        );
+      }
+    }
+  }
+});
+
+test('generateChunk: spec.type is deterministic across calls', () => {
+  // The dispatch decision MUST be a pure function of the chunk id --
+  // otherwise chunk re-generation (re-streaming after eviction) would
+  // flip asteroids between standard and realistic mid-game, breaking
+  // the user's peripheral perception of the field.
+  for (let cx = -10; cx <= 10; cx++) {
+    for (let cz = -10; cz <= 10; cz++) {
+      const id = { cx, cz, systemSeed: INITIAL_SYSTEM_SEED };
+      const a = generateChunk(id);
+      const b = generateChunk(id);
+      assert.equal(a.asteroids.length, b.asteroids.length);
+      for (let i = 0; i < a.asteroids.length; i++) {
+        assert.equal(
+          a.asteroids[i].type,
+          b.asteroids[i].type,
+          `type mismatch at (${cx},${cz}) idx=${i}: a=${a.asteroids[i].type} b=${b.asteroids[i].type}`,
+        );
+      }
+    }
+  }
+});
+
+test('generateChunk: realistic distribution roughly matches REALISTIC_ASTEROID_WEIGHT', () => {
+  // Statistical sanity check on the bit-twiddling threshold. Sample a
+  // 51x51 chunk grid (~2601 chunks yielding ~12-25K asteroids depending
+  // on density), count realistic fraction, expect to land within ±4% of
+  // the configured REALISTIC_ASTEROID_WEIGHT. ±4% is generous for a
+  // ~12K-element uniform sample under 256-bin bit dispersion, and
+  // catches catastrophic regressions (e.g. threshold computed against
+  // the wrong bit, or off-by-one in the comparison).
+  let total = 0;
+  let realisticCount = 0;
+  for (let cx = -25; cx <= 25; cx++) {
+    for (let cz = -25; cz <= 25; cz++) {
+      const d = densityAt(cx, cz, INITIAL_SYSTEM_SEED);
+      if (d < DENSITY_FLOOR) continue;
+      const chunk = generateChunk({ cx, cz, systemSeed: INITIAL_SYSTEM_SEED });
+      for (const a of chunk.asteroids) {
+        total++;
+        if (a.type === 'realistic') realisticCount++;
+      }
+    }
+  }
+  assert.ok(total > 1000, `need a meaningful sample (>1000 asteroids), got ${total}`);
+  const observed = realisticCount / total;
+  const tolerance = 0.04;
+  assert.ok(
+    Math.abs(observed - REALISTIC_ASTEROID_WEIGHT) < tolerance,
+    `observed realistic fraction ${observed.toFixed(4)} differs from ` +
+    `expected ${REALISTIC_ASTEROID_WEIGHT.toFixed(4)} by more than ${tolerance}`,
+  );
 });
 
 // ---------------------------------------------------------------------------

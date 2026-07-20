@@ -396,6 +396,12 @@ export function createRealisticAsteroidFromSpec({ spec, scene } = {}) {
         spin: 0.5 + rng() * 1.5,
         velocity: { x: vx, y: 0, z: vz },
         seed: (rng() * 1e9) | 0,
+        // v0.67.x — propagate type='realistic' so multi-generation
+        // splits stay visually consistent. Sibling standard split() in
+        // src/entities/asteroid.js propagates type='standard'; both
+        // factories share the same `createAsteroidFromSpec` dispatcher
+        // entry-point which reads the field.
+        type: 'realistic',
       });
     }
     return children;
