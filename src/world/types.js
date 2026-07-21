@@ -48,14 +48,6 @@
  * @property {number}   spin        // rad/s, around `axis`
  * @property {Vec3}     velocity    // ambient drift
  * @property {number}   seed        // for procedural mesh variation
- * @property {'standard'|'realistic'} type  // v0.67.x visual-variant discriminator.
- *   The entity factory `createAsteroidFromSpec` in src/entities/asteroid.js
- *   reads this field and dispatches to either the standard (noisy icosphere
- *   / jittered capsule) or the realistic (textured PBR + 5 shape types)
- *   builder. Derived deterministically from `seed` (no rng consumption)
- *   at chunk-gen time in src/world/chunks.js, so chunk re-generation
- *   reproduces the same mix. See REALISTIC_ASTEROID_WEIGHT in
- *   src/world/chunk-constants.js for the per-asteroid proportion.
  */
 
 /**

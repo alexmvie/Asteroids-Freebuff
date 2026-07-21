@@ -839,3 +839,5 @@ Drei Scripts für automatisierte Game-Analyse ohne manuelles Eingreifen:
 - Demo AI friendly fire: incidental hits count (no source-based filtering). Acceptable for MVP.
 - Cross-targeting: pirate1's `getShips` = `[ship, pirate2.getShip()]`; pirate2's = `[ship, pirate1.getShip()]`. Both brain calls in this loop can race (in different ticks), so the bullet-pool despawn safety is the only invariant that matters.
 
+
+**v0.68.0 (arbeitet wie die älteren Einträge — pure Reference-Notiz):** alte-Asteroiden-Cleanup + Sonnen-Beleuchtung mit Schatten. Siehe ausführliche Erklärung in `/Users/alexandermastny/Documents/Development/asteroids-freebuff/AGENTS.md` → Done-Liste ("v0.68.0 — alte Asteroiden raus + Sonnen-Beleuchtung mit Schatten"). Validation: 614/614 Tests, Build clean.

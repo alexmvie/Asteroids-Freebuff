@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, statSync, readFileSync } from 'node:fs';
 import * as THREE from 'three';
-import { createRealisticAsteroidFromSpec } from '../src/entities/realistic-asteroid.js';
+import { createAsteroidFromSpec } from '../src/entities/asteroid.js';
 
 // Helper to construct a mock spec
 function createMockSpec(seed, size = 0, radius = 10) {
@@ -19,7 +19,8 @@ function createMockSpec(seed, size = 0, radius = 10) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Textures Validation (similar to asteroid-textures.test.js)
+// 1. Textures Validation: 5 texture sets × 4 maps = 20 PNG files must exist
+// (sized exactly 1024×1024, valid PNG signature).
 // ---------------------------------------------------------------------------
 const TEXTURE_DIR = 'public/textures';
 const MAP_TYPES = ['albedo', 'normal', 'roughness', 'bump'];
@@ -28,12 +29,12 @@ const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 for (let idx = 1; idx <= 5; idx++) {
   for (const map of MAP_TYPES) {
     const path = `${TEXTURE_DIR}/realistic-${idx}-${map}.png`;
-    
+
     test(`Realistic texture ${idx} ${map}: file exists and is a valid PNG`, () => {
       assert.ok(existsSync(path), `expected texture file at ${path}`);
       const size = statSync(path).size;
       assert.ok(size > 50_000, `texture is suspiciously small (${size} bytes)`);
-      
+
       // PNG Signature check
       const head = readFileSync(path).subarray(0, 8);
       for (let i = 0; i < PNG_SIGNATURE.length; i++) {
@@ -52,12 +53,12 @@ for (let idx = 1; idx <= 5; idx++) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Component Interface and Geometries Validation
+// 2. Component interface + 5-shape geometry coverage
 // ---------------------------------------------------------------------------
-test('RealisticAsteroid: creates a valid entity with correct interface', () => {
+test('Asteroid: creates a valid entity with correct interface', () => {
   const scene = new THREE.Scene();
   const spec = createMockSpec(0); // shapeType = 0
-  const asteroid = createRealisticAsteroidFromSpec({ spec, scene });
+  const asteroid = createAsteroidFromSpec({ spec, scene });
 
   assert.equal(typeof asteroid.update, 'function');
   assert.equal(typeof asteroid.split, 'function');
@@ -67,22 +68,21 @@ test('RealisticAsteroid: creates a valid entity with correct interface', () => {
   assert.ok(asteroid.getPosition() instanceof THREE.Vector3);
   assert.deepEqual(asteroid.getVelocity(), { x: 2, z: 4 });
 
-  // Clean up
   asteroid.dispose();
 });
 
-test('RealisticAsteroid: supports LOD and builds all 5 shape types', () => {
+test('Asteroid: supports LOD and builds all 5 shape types', () => {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera();
 
   for (let shapeType = 0; shapeType < 5; shapeType++) {
     // We pass seeds that map exactly to shapeType = seed % 5
     const spec = createMockSpec(shapeType);
-    const asteroid = createRealisticAsteroidFromSpec({ spec, scene });
-    
+    const asteroid = createAsteroidFromSpec({ spec, scene });
+
     const mesh = asteroid.mesh;
     assert.ok(mesh instanceof THREE.Group);
-    
+
     // Check LOD is attached
     const lod = mesh.userData.lod;
     assert.ok(lod instanceof THREE.LOD);
@@ -97,16 +97,16 @@ test('RealisticAsteroid: supports LOD and builds all 5 shape types', () => {
   }
 });
 
-test('RealisticAsteroid: Contact Binary (shapeType=2) LOD levels contain sub-groups with 2 meshes', () => {
+test('Asteroid: Contact Binary (shapeType=2) LOD levels contain sub-groups with 2 meshes', () => {
   const scene = new THREE.Scene();
   const spec = createMockSpec(2); // shapeType = 2 (Contact Binary)
-  const asteroid = createRealisticAsteroidFromSpec({ spec, scene });
-  
+  const asteroid = createAsteroidFromSpec({ spec, scene });
+
   const lod = asteroid.mesh.userData.lod;
   for (let levelIdx = 0; levelIdx < 3; levelIdx++) {
     const levelObj = lod.levels[levelIdx].object;
     assert.ok(levelObj instanceof THREE.Group, 'LOD level for Contact Binary should be a Group');
-    
+
     // The group should contain the 2 lobe meshes
     const lobeMeshes = levelObj.children.filter(c => c instanceof THREE.Mesh);
     assert.equal(lobeMeshes.length, 2, 'Contact binary LOD level should contain exactly 2 meshes');
@@ -115,11 +115,11 @@ test('RealisticAsteroid: Contact Binary (shapeType=2) LOD levels contain sub-gro
   asteroid.dispose();
 });
 
-test('RealisticAsteroid: split() behavior', () => {
+test('Asteroid: split() behavior', () => {
   const scene = new THREE.Scene();
 
   // Size 0 should split into 2 children
-  const asteroid0 = createRealisticAsteroidFromSpec({ spec: createMockSpec(0, 0), scene });
+  const asteroid0 = createAsteroidFromSpec({ spec: createMockSpec(0, 0), scene });
   const children0 = asteroid0.split();
   assert.equal(children0.length, 2);
   assert.equal(children0[0].size, 1);
@@ -128,42 +128,58 @@ test('RealisticAsteroid: split() behavior', () => {
   asteroid0.dispose();
 
   // Size 2 should not split (returns [])
-  const asteroid2 = createRealisticAsteroidFromSpec({ spec: createMockSpec(0, 2), scene });
+  const asteroid2 = createAsteroidFromSpec({ spec: createMockSpec(0, 2), scene });
   const children2 = asteroid2.split();
   assert.equal(children2.length, 0);
   asteroid2.dispose();
 });
 
-test('RealisticAsteroid: split() children carry type="realistic" (v0.67.x dispatch)', () => {
-  // Without type propagation, realistic splits would render as standard
-  // children on the next frame. This was the silent bug in the previous
-  // architecture -- the createAsteroidFromSpec dispatcher in
-  // src/entities/asteroid.js would route children with undefined `type`
-  // to the standard factory, silently breaking visual continuity.
-  const scene = new THREE.Scene();
-  const asteroid = createRealisticAsteroidFromSpec({ spec: createMockSpec(0, 0), scene });
-  const children = asteroid.split();
-  assert.equal(children.length, 2);
-  for (const child of children) {
-    assert.equal(typeof child.type, 'string', 'child.type must be set so the dispatcher can route correctly');
-    assert.equal(
-      child.type,
-      'realistic',
-      `realistic split child should carry type="realistic", got "${child.type}"`,
-    );
-    // All other spec invariants still hold -- only the new field was added.
-    assert.ok(typeof child.id === 'string', 'child.id should still be a string');
-    assert.ok(child.id.endsWith('-r0') || child.id.endsWith('-r1'), 'child.id should keep the realistic-prefix suffix');
-  }
-  asteroid.dispose();
-});
+// v0.68.0 -- the v0.67.x "split() children carry type='realistic'" test
+// was removed: there is no `type` discriminator anymore. The pure
+// factory contract is now: every asteroid goes through createAsteroidFromSpec;
+// split children are just smaller specs that re-enter the same factory,
+// which builds the textured-PBR mesh deterministically.
 
-test('RealisticAsteroid: dispose() removes mesh from scene and disposes all geometries/materials', () => {
+test('Asteroid: dispose() removes mesh from scene and disposes all geometries/materials', () => {
   const scene = new THREE.Scene();
   const spec = createMockSpec(2); // contact binary has the most sub-objects
-  const asteroid = createRealisticAsteroidFromSpec({ spec, scene });
-  
+  const asteroid = createAsteroidFromSpec({ spec, scene });
+
   assert.equal(scene.children.length, 1);
   asteroid.dispose();
   assert.equal(scene.children.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// 3. Shadow flags (v0.68.0) — body meshes must cast + receive so the
+// sun's DirectionalLight projects asteroid-on-asteroid shadows.
+// The ground footprint receives but does not cast (a flat plane
+// casting a shadow would be visually wrong — no shadow source above
+// it). Tripwire test for the sun-light wiring.
+// ---------------------------------------------------------------------------
+test('Asteroid: body meshes have castShadow + receiveShadow enabled (sun lighting)', () => {
+  const scene = new THREE.Scene();
+  const spec = createMockSpec(0); // shapeType 0 (single-mesh LOD)
+  const asteroid = createAsteroidFromSpec({ spec, scene });
+
+  // Walk the LOD levels, every Mesh should cast+receive shadows.
+  const lod = asteroid.mesh.userData.lod;
+  for (const level of lod.levels) {
+    const obj = level.object;
+    if (obj instanceof THREE.Mesh) {
+      assert.equal(obj.castShadow, true, `body mesh should cast shadow at lod distance ${level.distance}`);
+      assert.equal(obj.receiveShadow, true, `body mesh should receive shadow at lod distance ${level.distance}`);
+    }
+  }
+
+  // The ground plane (last child of the mesh group): should receive
+  // shadow but NOT cast it (covers the asteroid-shadowed ground).
+  const ground = asteroid.mesh.children.find(
+    (c) => c instanceof THREE.Mesh && c.geometry instanceof THREE.PlaneGeometry,
+  );
+  assert.ok(ground, 'expected a ground plane as a child of the asteroid group');
+  assert.equal(ground.castShadow, false, 'ground plane should not cast shadow');
+  assert.equal(ground.receiveShadow, true, 'ground plane should receive shadow');
+
+  asteroid.dispose();
 });

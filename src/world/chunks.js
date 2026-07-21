@@ -17,7 +17,6 @@ import {
   NEBULA_RENDER_THRESHOLD,
   MAX_ASTEROID_DRIFT,
   PLAY_PLANE_Y,
-  REALISTIC_ASTEROID_WEIGHT,
 } from './constants.js';
 
 // ---------------------------------------------------------------------------
@@ -173,20 +172,11 @@ export function generateChunk(id) {
     );
   }
 
-  // v0.67.x — per-asteroid realistic-variant mix. Threshold is derived
-  // deterministically from `spec.seed` (byte 8–15 vs
-  // `floor(WEIGHT * 256)`) — zero added rng calls, so the existing
-  // chunk-seed sequence AND therefore every existing assertion in
-  // tests/world.test.js (positions inside chunk, sizes, drift bounds,
-  // unit axis, ids unique, chunk-count formula, density match) stays
-  // green without test snapshot churn.
-  //
-  // Per-ASTEROID decision (NOT per-chunk) so every chunk contains a
-  // mix of both types at the configured proportion, instead of
-  // all-or-nothing zones that would produce visible "realistic
-  // pocket" artefacts as the ship traverses the streaming bubble.
-  const realisticThreshold = Math.floor(REALISTIC_ASTEROID_WEIGHT * 256);
-
+  // v0.68.0 — every asteroid is now the textured-PBR realistic
+  // variant. The v0.67.x per-asteroid realistic-vs-standard mix
+  // was removed by user request ("alte Asteroiden komplett raus").
+  // The pure chunk-seed sequence below is unchanged, so the
+  // deterministic invariants in tests/world.test.js still pass.
   const asteroids = [];
   for (let i = 0; i < count; i++) {
     const size = pickSize(rng);
@@ -196,9 +186,6 @@ export function generateChunk(id) {
     const spin = lerp(0.1, 0.8, rng());
     const velocity = randomDriftVec3(rng, MAX_ASTEROID_DRIFT);
     const seed = (rng() * 1e9) | 0;
-    const type = ((seed >>> 8) & 0xff) < realisticThreshold
-      ? 'realistic'
-      : 'standard';
     asteroids.push({
       id: `${id.cx}-${id.cz}-${i}`,
       position: { x: px, y: PLAY_PLANE_Y, z: pz },
@@ -208,7 +195,6 @@ export function generateChunk(id) {
       spin,
       velocity,
       seed,
-      type,
     });
   }
 

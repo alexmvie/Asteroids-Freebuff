@@ -90,6 +90,10 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
     flatShading: true,
   });
   const bodyMesh = new Mesh(bodyGeom, bodyMat);
+  // v0.68.0 -- body casts a shadow under the sun. also receives
+  // shadows so other asteroids/projectiles project onto the hull.
+  bodyMesh.castShadow = true;
+  bodyMesh.receiveShadow = true;
   body.add(bodyMesh);
 
   // Wings: two small angled boxes.
@@ -101,10 +105,15 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
   });
   const wingGeom = new BoxGeometry(0.4, 0.2, 1.4);
   const wingL = new Mesh(wingGeom, wingMat);
+  // v0.68.0 -- each wing casts + receives shadows.
+  wingL.castShadow = true;
+  wingL.receiveShadow = true;
   wingL.position.set(-0.95, -0.05, 0.15);
   wingL.rotation.z = Math.PI / 7;
   body.add(wingL);
   const wingR = new Mesh(wingGeom, wingMat);
+  wingR.castShadow = true;
+  wingR.receiveShadow = true;
   wingR.position.set(0.95, -0.05, 0.15);
   wingR.rotation.z = -Math.PI / 7;
   body.add(wingR);
@@ -671,7 +680,20 @@ export async function loadShipModel(ship, modelUrl, opts = {}) {
         }
       }
     }
-    ship.body.add(glbRoot);
+    // v0.68.0 -- walk the loaded GLB root and tag every Mesh
+  // with castShadow + receiveShadow so the sun's DirectionalLight
+  // also projects the GLB-ship onto nearby asteroids. Without
+  // this, only the procedural ship would cast; the GLB ship (what
+  // the player actually sees once the load completes) would float
+  // shadowlessly.
+  glbRoot.traverse((obj) => {
+    if (obj.isMesh) {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+    }
+  });
+
+  ship.body.add(glbRoot);
 
     return { success: true, glbRoot, scale, rotated: nosePointsPositiveZ };
   } catch (e) {

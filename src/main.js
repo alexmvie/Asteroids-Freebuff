@@ -157,6 +157,7 @@ const {
   nebulaDebug,
   setChaseTarget,
   updateCamera,
+  updateLighting,
 } = createScene();
 const clock = new Clock();
 
@@ -1233,6 +1234,11 @@ function tick(dt) {
   particles.update(dt);
 
   updateCamera(dt);
+  // v0.68.0 — sun + shadows follow the ship each frame. Reads the
+  // post-ship.update position so the shadow camera frustum centres
+  // on the NEW position (not the previous frame's). Defensive against
+  // missing/non-finite position (early-exits inside updateLighting).
+  updateLighting(dt, ship.position);
 
   // ---- NEBULA_RENDER_THRESHOLD wiring --------------------------------
   // The single global skydome's opacity reflects the ship's current

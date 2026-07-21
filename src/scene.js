@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { createStarfield } from './systems/starfield.js';
 import { createNebulaBackground } from './systems/nebula-background.js';
 import { createNebulaDebugOverlay } from './systems/nebula-debug-overlay.js';
+import { createSpaceLighting } from './systems/space-lighting.js';
 import { STARFIELD_COUNT, STARFIELD_RADIUS, STARFIELD_SIZE, NEBULA_DEBUG_DEFAULT } from './world/constants.js';
 import {
   CHASE_DAMP,
@@ -74,6 +75,14 @@ export function createScene({ canvas } = {}) {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setClearColor(0x05060c, 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
+  // v0.68.0 — enable shadow mapping. PCFSoft gives filtered edges so
+  // asteroid-on-asteroid shadows don't crawl. The DirectionalLight
+  // in src/systems/space-lighting.js projects the shadow map; the
+  // asteroid factory (src/entities/asteroid.js) tags every body
+  // mesh with castShadow/receiveShadow so the renderer knows what to
+  // render onto the shadow map.
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
   // Three.js does not auto-append the canvas to the DOM when none is
   // supplied to the constructor. The game expects a fullscreen canvas
@@ -294,23 +303,43 @@ export function createScene({ canvas } = {}) {
     nebula.update(camera, dt);
   }
 
+  /**
+   * v0.68.0 — per-frame sun-system update. Moves the sun + corona +
+   * lights to follow the ship, and pins the directional light's
+   * target at the ship's position so the shadow camera frustum
+   * always covers the visible asteroid field. Called by main.js
+   * once per render-loop tick with the current ship position.
+   *
+   * @param {number} dt
+   * @param {{x:number,y:number,z:number}} shipPos
+   */
+  function updateLighting(dt, shipPos) {
+    lighting.update(dt, shipPos);
+  }
+
   // Initial camera placement (before any chase target is set).
   camera.position.copy(currentPos);
   camera.lookAt(currentTarget);
 
-  // --- Lights ------------------------------------------------------------
-  // Ambient base + a warm key + a cool fill. The asteroids will pick this
-  // up via MeshStandardMaterial once they're added.
-  const ambient = new THREE.AmbientLight(0xffffff, 0.35);
-  scene.add(ambient);
-
-  const key = new THREE.DirectionalLight(0xfff0d6, 1.3);
-  key.position.set(200, 300, 150);
-  scene.add(key);
-
-  const fill = new THREE.DirectionalLight(0x6da4ff, 0.5);
-  fill.position.set(-200, 80, -150);
-  scene.add(fill);
+  // --- Sun + lighting + shadows (v0.68.0) --------------------------------
+  // The user explicitly asked for "eine Sonne wo in der Ferne +
+  // pointlight von dort + ein passendes environment light + shadows".
+  // The full system lives in src/systems/space-lighting.js; here we
+  // just wire it into the scene + expose the per-frame update hook.
+  //
+  // The visibility of the sun + corona depends on the viewer's POV + the
+  // scene fog. None of these should fog out (real stars don't), so the
+  // sun mesh + corona are `fog: false` (handled inside space-lighting.js).
+  const lighting = createSpaceLighting();
+  scene.add(lighting.sunGroup);
+  scene.add(lighting.directionalLight);
+  // `lighting.directionalLight.target` is added to the sunGroup inside
+  // `createSpaceLighting()` so the target moves with the sun — but the
+  // target's effective world position is overridden each frame in
+  // `updateLighting()` to sit at the ship (so the light always aims at
+  // the ship). Just-in-case the target wasn't already in the scene
+  // graph, add it explicitly here too.
+  scene.add(lighting.directionalLight.target);
 
   // --- Starfield ---------------------------------------------------------
   // Tunable from src/world/constants.js (STARFIELD_COUNT/RADIUS/SIZE/SEED).
@@ -368,18 +397,21 @@ export function createScene({ canvas } = {}) {
     starfield,
     nebula,
     nebulaDebug,
+    lighting,
     setChaseTarget,
     updateCamera,
+    updateLighting,
     /**
      * Release GPU resources held by the nebula (texture + geometry +
-     * material). The starfield is THREE.Points with no separately
-     * tracked geometry/material to dispose. The debug overlay
-     * releases its instanced quad geometry + material via
-     * `nebulaDebug.dispose()`.
+     * material), the nebula debug overlay (instanced quad + mat), and
+     * the sun + corona meshes (geometry + material). Lighting handles
+     * for the directional/point/hemi/ambient lights have no separately
+     * tracked GPU resources beyond the shadow map (which GC handles).
      */
     dispose() {
       nebula.dispose();
       nebulaDebug.dispose();
+      lighting.dispose();
     },
   };
 }

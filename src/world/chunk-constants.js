@@ -72,34 +72,3 @@ export const PLAY_PLANE_Y = 0;
  * skydome. The skydome fades independently of this threshold.)
  */
 export const NEBULA_RENDER_THRESHOLD = 0.1;
-
-/**
- * v0.67.x — Per-asteroid probability [0.0, 1.0] of opting into the
- * "realistic" visual variant (textured PBR + 5 procedural shape
- * types in src/entities/realistic-asteroid.js) instead of the
- * standard noise-displaced asteroid type (noisy icosphere or
- * jittered capsule in src/entities/asteroid.js).
- *
- * The decision is a per-ASTEROID deterministic derivation from
- * `spec.seed` (byte 8–15 compared against `floor(WEIGHT * 256)`)
- * — zero added rng calls in `generateChunk`, so the existing chunk
- * seed sequence stays identical and `tests/world.test.js` keeps
- * passing without test snapshot churn.
- *
- * Per-asteroid (NOT per-chunk) decision so every chunk contains a
- * mix of both types at the configured proportion, instead of
- * all-or-nothing zones that would produce visible "realistic
- * pocket" artefacts as the ship traverses the streaming bubble.
- *
- *   0.0 = all standard, 1.0 = all realistic.
- *   0.3 = the project's recommended mix (per user request,
- *         "realistic dominant enough to be visible, standard
- *         still common enough to feel familiar").
- *
- * The dispatcher in `src/entities/asteroid.js`
- * (`createAsteroidFromSpec`) reads `spec.type` and routes to
- * the matching factory; split children inherit the parent's
- * `spec.type` in both factories so multi-generation splits
- * stay visually consistent.
- */
-export const REALISTIC_ASTEROID_WEIGHT = 0.3;

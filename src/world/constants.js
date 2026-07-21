@@ -30,7 +30,6 @@ export {
   MAX_ASTEROID_DRIFT,
   PLAY_PLANE_Y,
   NEBULA_RENDER_THRESHOLD,
-  REALISTIC_ASTEROID_WEIGHT,
 } from './chunk-constants.js';
 
 export {
