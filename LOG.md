@@ -876,3 +876,17 @@ Side effects:
 - Lighting-follows-ship logic unchanged.
 
 No code-reviewer-minimax-m3 verification (routing issues\u2014fallback to npm test + browser smoke-test per AGENTS.md Known Quirks). Total tests unchanged at 621 (literal-value change, no logic).
+
+## v0.69.3
+
+Hard-space-shadow tuning per user feedback "schatten sollten aber eher hart sein im weltraum oder?".
+
+a) Three.js shadow type: PCFSoftShadowMap \u2192 PCFShadowMap.
+b) Per-light blur radius: 4 \u2192 1 (radius=0 would be BasicShadowMap-equivalent and pixel-flicker noisy; radius=1 is the minimum-anti-aliased PCFShadowMap option).
+
+bias=-0.0005 + normalBias=0.02 unchanged \u2014 they were tuned for self-shadow acne on flat surfaces and remain correct for PCFShadowMap.
+
+Visual: asteroid shadows now have hard 1-pixel anti-aliased edges (still looks crisp at 2048\u00b2 shadow map; effectively physically correct for vacuum).
+Performance: PCFShadowMap is ~4x cheaper than PCFSoftShadowMap (fewer sub-taps). Net: slight fps win.
+
+No code-reviewer-minimax-m3 verification (routing issues \u2014 fallback to npm test + browser smoke-test per AGENTS.md Known Quirks). Total tests unchanged at 621.

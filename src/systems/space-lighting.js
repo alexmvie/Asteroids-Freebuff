@@ -156,9 +156,15 @@ export function createSpaceLighting() {
   directionalLight.shadow.camera.right = SHADOW_FRUSTUM_HALF_SIZE;
   directionalLight.shadow.camera.top = SHADOW_FRUSTUM_HALF_SIZE;
   directionalLight.shadow.camera.bottom = -SHADOW_FRUSTUM_HALF_SIZE;
-  directionalLight.shadow.bias = -0.0005; // tiny bias to avoid acne on flat surfaces
+  // v0.69.3 — radius=1 matches PCFShadowMap (was 4 for PCFSoftShadowMap).
+  // radius=0 would technically be "no PCF" (≈ BasicShadowMap) which gives
+  // pixel-perfect hard edges but can flicker on noisy surfaces. radius=1
+  // is the minimum-anti-aliased option — edges are sharp but not aliased.
+  // bias + normalBias unchanged from v0.68.0: tuned for self-shadow acne
+  // on flat-on-light surfaces; works for both PCF and PCFSoft shadow maps.
+  directionalLight.shadow.bias = -0.0005; // tiny depth bias to avoid acne on flat surfaces
   directionalLight.shadow.normalBias = 0.02;
-  directionalLight.shadow.radius = 4; // soft edges (PCFSoftShadowMap)
+  directionalLight.shadow.radius = 1; // hard edges (PCFShadowMap, v0.69.3)
   // The DirectionalLight needs a `target` Object3D in the scene for
   // its direction to be computed correctly. We create one and add it
   // to the sunGroup (it moves with the sun, but our `update()` pins it

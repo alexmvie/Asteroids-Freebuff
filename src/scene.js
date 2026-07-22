@@ -75,14 +75,17 @@ export function createScene({ canvas } = {}) {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setClearColor(0x05060c, 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  // v0.68.0 — enable shadow mapping. PCFSoft gives filtered edges so
-  // asteroid-on-asteroid shadows don't crawl. The DirectionalLight
-  // in src/systems/space-lighting.js projects the shadow map; the
-  // asteroid factory (src/entities/asteroid.js) tags every body
-  // mesh with castShadow/receiveShadow so the renderer knows what to
-  // render onto the shadow map.
+  // v0.69.3 — PCFShadowMap (medium-hart) instead of PCFSoftShadowMap.
+  // Physically motivated: there’s no atmospheric scatter in space, so
+  // shadow penumbra approaches 0. The v0.68.0 PCFSoftShadowMap + radius=4
+  // (cinematic-soft) was a deliberate genre-typic compromise; the user
+  // correctly noted "schatten sollten aber eher hart sein im weltraum
+  // oder?". PCFShadowMap gives canonical anti-aliased hard edges
+  // (sub-sample filtering, no extra PCFSoft kernel); radius=1 in
+  // space-lighting.js tightens the per-Light blur kernel to minimum.
+  // Cost: ~4x cheaper shadow pass vs PCFSoftShadowMap.
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
 
   // Three.js does not auto-append the canvas to the DOM when none is
   // supplied to the constructor. The game expects a fullscreen canvas
