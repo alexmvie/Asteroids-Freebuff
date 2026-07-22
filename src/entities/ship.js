@@ -84,10 +84,21 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
   // is +Y; rotateX(-PI/2) maps +Y → -Z.
   const bodyGeom = new ConeGeometry(1.0, 2.5, 4, 1);
   bodyGeom.rotateX(-Math.PI / 2);
+  // v0.69.5 — brushed-metal body (was plastic-looking very-pale
+  // off-white with low metalness). Per user feedback "das ship sieht
+  // wie plastik aus": real spacecraft hulls are brushed-metal
+  // (aluminum alloy). The new values:
+  //   - color 0x9aa5b8 (slightly grayer, cooler than pale off-white)
+  //   - metalness 0.85 (high; reads as a metal baseline)
+  //   - roughness 0.45 (brushed surface finish, not mirror-polished)
+  // Combined with the high DirectionalLight intensity (5.2) + the
+  // lower HemisphereLight (0.20), the body's flat-shaded facets now
+  // have visible metal-side vs metal-shadow appearance — a hint of
+  // an industrial spaceship rather than ceramic plastic.
   const bodyMat = new MeshStandardMaterial({
-    color: 0xe6ecff,
-    metalness: 0.3,
-    roughness: 0.55,
+    color: 0x9aa5b8,
+    metalness: 0.85,
+    roughness: 0.45,
     flatShading: true,
   });
   const bodyMesh = new Mesh(bodyGeom, bodyMat);
@@ -98,10 +109,16 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
   body.add(bodyMesh);
 
   // Wings: two small angled boxes.
+  // v0.69.5 — wings more metallic (was metalness 0.4 + roughness 0.5).
+  // Per user feedback "das ship sieht wie plastik aus" — the cyan
+  // wings should also read as painted metal (cyan accent paint over
+  // brushed metal substrate). metalness 0.85 + roughness 0.4 gives
+  // the wings a slightly shinier surface than the body, which the
+  // cyan paint color amplifies.
   const wingMat = new MeshStandardMaterial({
     color: 0x48dbfb,
-    metalness: 0.4,
-    roughness: 0.5,
+    metalness: 0.85,
+    roughness: 0.4,
     flatShading: true,
   });
   const wingGeom = new BoxGeometry(0.4, 0.2, 1.4);

@@ -150,8 +150,19 @@ function buildTorusGeometry(radius, detail, ox, oy, oz) {
 }
 
 function buildCraggyRockGeometry(radius, detail, ox, oy, oz) {
+  // v0.69.5 — bigger craggy displacement. Per user feedback "das mesh
+  // ist wie eine kugel und die textur zeigt eindeutig krater und
+  // rockige oberfläche": the v0.68.0 / v0.69.4 craggy formula
+  // (Math.abs(n - 0.5) * 2.0 - 0.5) * amount had max deviation
+  // ±0.5 * amount, which at amount = 0.25*radius gave only ±12.5%
+  // radius surface variation — the silhouette read as a soft ball.
+  // Bumping amount to 0.40*radius and lowering noiseScale from 2.5/r
+  // to 2.0/r sharpens the craggy features (larger octave-1 features,
+  // smaller octave-2-fine features) for a more asteroid-like
+  // irregular silhouette that matches the craters in the albedo
+  // texture.
   const geom = new THREE.IcosahedronGeometry(radius, detail);
-  displaceGeometry(geom, radius * 0.25, 2.5 / radius, ox, oy, oz, 'craggy');
+  displaceGeometry(geom, radius * 0.40, 2.0 / radius, ox, oy, oz, 'craggy');
   return geom;
 }
 
@@ -210,16 +221,36 @@ function getRealisticBump(idx) {
 }
 
 function createAsteroidMaterial(idx) {
+  // v0.69.5 — matte regolith for vacuum-exposed asteroids. Per user
+  // feedback "die asteroiden sollten nicht glänzen" + "alle objekte
+  // glänzen viel zu viel":
+  //   - metalness = 0 everywhere (was 0.1 default or 0.65 for idx=3).
+  //     Real asteroids are dust/regolith exposed to vacuum; the
+  //     idx=3 nickel-iron variant's higher metalness was visually
+  //     wrong — there is no specular reflection in a vacuum without
+  //     atmosphere.
+  //   - roughness = 0.95 (was 0.9 / 0.75 / 0.45). Pushed above 0.9
+  //     so the lit surface of every asteroid reads as matte dust,
+  //     not polished stone. The roughnessMap still modulates per-
+  //     texel detail.
+  //   - bumpedScale + bumpMap REMOVED. The bumpMap was the cause of
+  //     "teils sind auch schwarze linien in den asteroiden": on
+  //     flat-shaded geometry, interpolated bumpMap values create
+  //     visible discontinuities at texture seams (UV unwrap lines).
+  //     The normalMap (which Three.js evaluates per-fragment AFTER
+  //     the flat-shading normal calculation) keeps the surface
+  //     detail without the seam artifact. Dropping the bumpMap also
+  //     removes 4 mapped textures per asteroid slot (4 sets ×
+  //     idx=1..5 = 20 cached textures, of which 4 (=1 per set) are
+  //     now freed).
   return new THREE.MeshStandardMaterial({
     color: 0xffffff,
-    metalness: idx === 3 ? 0.65 : 0.1, // nickel-iron is more metallic
-    roughness: idx === 3 ? 0.45 : (idx === 4 ? 0.75 : 0.9), // metallic and volcanic are smoother/shinier
-    bumpScale: 0.05,
+    metalness: 0,
+    roughness: 0.95,
     flatShading: true,
     map: getRealisticAlbedo(idx),
     normalMap: getRealisticNormal(idx),
     roughnessMap: getRealisticRoughness(idx),
-    bumpMap: getRealisticBump(idx),
   });
 }
 
@@ -301,7 +332,12 @@ function buildAsteroidMesh(spec) {
     const getGeom = (detail) => {
       if (shapeType === 0) return buildCrystallineShardGeometry(radius, detail, ox, oy, oz);
       if (shapeType === 1) return buildCrateredPotatoGeometry(radius, detail, ox, oy, oz);
-      if (shapeType === 3) return buildTorusGeometry(radius, detail, ox, oy, oz);
+      // v0.69.5 — shapeType=3 (was a TorusGeometry, the "donut")
+      // REMOVED per user feedback "ein donut als asteroid ist
+      // eigentlich auch idiotisch". Now falls through to the craggy
+      // rock builder. Net effect: the field's visual variety still
+      // has asymmetry (4 shape types instead of 5) but no donut-shaped
+      // asteroids.
       return buildCraggyRockGeometry(radius, detail, ox, oy, oz);
     };
 
@@ -367,8 +403,15 @@ export function createAsteroidFromSpec({ spec, scene } = {}) {
     mesh.position.z += spec.velocity.z * dt;
     mesh.position.y = PLAY_PLANE_Y;
 
+    // v0.69.5 — fuzziness=0.5 second argument enables smooth LOD
+    // transitions (per Three.js LOD API: 0 = crisp (snap at threshold),
+    // 1 = maximum blur (no visible switch)). Was 0 (default) so the
+    // user reported visible LOD popping when crossing the 30u
+    // (mid->high) or 100u (low->mid) thresholds. 0.5 is the standard
+    // crossfade value — both levels render during the transition
+    // window so the change is invisible.
     const lod = mesh.userData.lod;
-    if (lod && camera) lod.update(camera);
+    if (lod && camera) lod.update(camera, 0.5);
   }
 
   function split() {

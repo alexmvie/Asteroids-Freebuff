@@ -92,17 +92,25 @@ export function createSpaceLighting() {
   // unlit material but transparent + depth-write off so the sun mesh
   // punches through cleanly. Gives the sun a soft glow without true
   // bloom post-processing (we don't have it).
+  //
+  // v0.69.5: coronaMesh.visible = false per user "den halo der sonne
+  // removen. irgendwie sieht es momentan so aus als kommt die sonne von
+  // allen richtungen". The v0.68.0-v0.69.4 transparent sphere created
+  // an "ambient glow" feeling that read as light-from-all-directions
+  // even though only one DirectionalLight + one PointLight were
+  // contributing to scene illumination. The fix is to keep the corona
+  // mesh created (dispose path stays valid; coronaMesh reference in
+  // the API return stays intact for downstream consumers) but render
+  // it invisible. Visual result: a single bright disc on a black
+  // background, no halo bleed-through. Physical analog: viewing the
+  // sun through a real space helmet — direct sun is bright, no
+  // atmospheric halo around it.
   const coronaMesh = new THREE.Mesh(
     new THREE.SphereGeometry(SUN_CORONA_RADIUS, 24, 16),
     new THREE.MeshBasicMaterial({
       color: SUN_CORONA_COLOR,
       toneMapped: false,
       transparent: true,
-      // v0.69.4: bumped opacity 0.32 -> 0.55 per user "make sun twice
-      // bright". Makes the halo sphere visually punchier (more white
-      // bleed-through against the deep-space background) without
-      // increasing the sun's core mesh brightness (which is clamped
-      // to 1.0 in 8-bit framebuffers).
       opacity: 0.55,
       depthWrite: false,
       fog: false,
@@ -110,6 +118,7 @@ export function createSpaceLighting() {
   );
   coronaMesh.frustumCulled = false;
   coronaMesh.renderOrder = -3; // behind the sun mesh itself
+  coronaMesh.visible = false; // v0.69.5: halo removed (was the 'light from all directions' feel)
 
   // ---- PointLight (the user-requested "from there") ---------------------
   // distance:0 + decay:0 means the light acts like a far-away uniform

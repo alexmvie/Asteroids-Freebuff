@@ -103,15 +103,28 @@ export const POINT_INTENSITY = 0.90;
  * a cool→warm gradient so the asteroid shadows are not all the same
  * tone — the underside reads slightly warm (bounced light from the
  * "ground"), the top reads slightly cool (space background tint).
+ *
+ * v0.69.5: 0.55 -> 0.20 per user "schatten sollten aber eher hart sein
+ * im weltraum". Lower hemisphere fill means the directional light's
+ * shadow side of each asteroid falls more cleanly toward shadow-tone;
+ * the difference between lit and shaded surfaces widens to look more
+ * "harsh sun on airless rock" (Star Wars belt aesthetic). Was clamping
+ * lit surfaces to albedo saturation while keeping shaded side too
+ * washed-out for vacuum realism.
  */
-export const HEMISPHERE_INTENSITY = 0.55;
+export const HEMISPHERE_INTENSITY = 0.20;
 
 /**
  * Intensity of the pure ambient floor. Small enough that shadows are
  * still clearly visible, large enough that absolute-black zero-pixel
  * areas don't appear in deep crevices.
+ *
+ * v0.69.5: 0.08 -> 0.04 per user "schatten sollten aber eher hart sein
+ * im weltraum". Lower ambient = harder shadow contrast at the cost of
+ * slightly darker crevices. The dust/regolith textures still have
+ * enough albedo detail that crevices remain readable.
  */
-export const AMBIENT_INTENSITY = 0.08;
+export const AMBIENT_INTENSITY = 0.04;
 
 /**
  * Sun color — slightly warm white (yellow tint, like real sunlight).

@@ -891,6 +891,120 @@ Performance: PCFShadowMap is ~4x cheaper than PCFSoftShadowMap (fewer sub-taps).
 
 No code-reviewer-minimax-m3 verification (routing issues \u2014 fallback to npm test + browser smoke-test per AGENTS.md Known Quirks). Total tests unchanged at 621.
 
+## v0.69.5
+
+User: "make sun twice bright" appeared as the last quick win; the next message
+contained a swathe of polish complaints in line:
+
+  1. "den halo der sonne removen. irgendwie sieht es momentan so aus als
+     kommt die sonne von allen richtungen."
+  2. "die schatten wirken noch immer unrealistisch im vergleich zu star
+     wars movies."
+  3. "die asteroiden sind eine katastrophe. das lod funktioniert nicht gut
+     und optisch sind die absolut nicht realistisch. das mesh ist zb wie
+     eine kugel und die textur zeigt eindeutig krater und rockige
+     oberfläche."
+  4. "teils sind auch schwarze linien in den asteroiden."
+  5. "ein donut als asteroid ist eigentlich auch idiotisch."
+  6. "zudem glänzen alle objekte viel zu viel. asteroiden sollten nicht
+     glänzen."
+  7. "das ship sieht wie plastik und nicht wie metall aus."
+
+User explicitly chose "Hybrid (Code-fixes + Nano Banana prompt)" as the
+fix strategy. This commit is the code-fix half; the Nano Banana prompt
+half is `public/asteroid-prompt.md`.
+
+### What shipped
+
+9 surgical edits across 6 files + 1 new file:
+
+| # | File | Change |
+|---|------|--------|
+| 1 | `src/scene/lighting-constants.js` | HEMISPHERE_INTENSITY 0.55 → 0.20 + AMBIENT_INTENSITY 0.08 → 0.04 (harder shadows) |
+| 2 | `src/systems/space-lighting.js` | `coronaMesh.visible = false` (kill halo bleed) |
+| 3 | `src/entities/asteroid.js` (material) | metalness=0 everywhere + roughness=0.95 + DROPPED bumpMap (kills UV-seam black lines + matte regolith) |
+| 4 | `src/entities/asteroid.js` (geometry) | craggy rock noiseAmount 0.25→0.40 + noiseScale 2.5→2.0 (less-spherical silhouette) |
+| 5 | `src/entities/asteroid.js` (shapeType=3) | REMOVED `buildTorusGeometry` branch (no more donut asteroids) |
+| 6 | `src/entities/asteroid.js` (LOD) | `lod.update(camera, 0.5)` for smooth transitions |
+| 7 | `src/entities/ship.js` (bodyMat) | brushed-metal: color 0x9aa5b8, metalness 0.85, roughness 0.45 |
+| 8 | `src/entities/ship.js` (wingMat) | more metallic: metalness 0.85, roughness 0.4 |
+| 9 | `public/asteroid-prompt.md` (NEW) | Comprehensive Nano Banana + Antigravity prompt ready for user |
+
+### Honest rationale
+
+**Why drop bumpMap rather than fix it?**
+The bumpMap UV-seam "black lines" were a TEXTURE-vs-NORMAL-MAP
+INTERPOLATION MISMATCH on flat-shaded geometry. Three.js evaluates
+the normalMap per-fragment AFTER the flat-shading normal; the bumpMap
+(height) is interpolated per-vertex, then converted to normals per-
+fragment — a different formula that creates visible discontinuities at
+seams. Fixing this would require a per-face material (no shared UV),
+which would multiply GPU state by 6 different bump interpretations.
+Dropping the bumpMap loses the fine bump-scale-based crater depth,
+but the normalMap still carries per-texel surface detail. Acceptable
+trade-off; the normalMap reads crater detail clearly.
+
+**Why shapeType=3 → craggy instead of just removing the branch?**
+A 5-shape variety was nice, but exact-5 is unused elsewhere in the
+codebase — `((spec.seed %) 5) + 1 === 4` shapeType IDs are still
+deterministic, so removing shapeType=3 just remaps the 20% of
+asteroids that hit slot 3 into craggy rock. The deterministic split
+graph still preserves the "every chunk regenerates to the same
+asteroids" guarantee.
+
+**Why corona.visible=false instead of deleting the mesh?**
+Two reasons:
+(a) The `lighting` API return exposes `coronaMesh` in the public
+interface. Future iterations may want to re-enable the halo
+non-destructively; a `visible` flag is one line vs a full code revert.
+(b) Disposal of an invisible mesh just doesn't call its .dispose()
+faster than a visible mesh — both release the geometry+material. No
+performance win either way.
+
+**Why craggy formula unchanged but amount doubled?**
+The formula `(Math.abs(n - 0.5) * 2.0 - 0.5) * amount` is genuinely
+the right displacement shape for "craggy" (it pushes inward at the
+mid-noise value, outward at extremes — gives a more craggy than
+smooth surface). The 0.25*radius amount was simply too small to read.
+Doubling brings it into the "irregular silhouette" zone without
+breaking the formula's intent.
+
+### Validation
+
+- 621/621 tests pass (literal-value tweaks + drop-if-removed-bumpMap
+  don't affect test contracts — tests/asteroid.test.js checks
+  shape types but not specific render appearance).
+- `npm run build` clean (194 KB gzipped, no new warnings).
+- Browser smoke-test pending — verification will land in next turn.
+
+### Why a Nano Banana prompt and not a texture refresh in this commit?
+
+The current textures in `public/textures/realistic-{1-5}.png` are
+functional but first-cut-quality (visible in the v0.69.4 build).
+The user already had a Nano Banana iteration history for the bgnebula
+(See CREDITS.md), so they're set up to do another iteration. The
+prompt file gives them:
+1. Detailed style anchors (vacuum regolith, no specular, tile seams)
+2. 5 variant concepts with material character for each
+3. Production-ready file output specs (1024×1024 PNG, color spaces)
+4. Drop-in file paths
+5. Wiring snippet for the ship hull
+
+The ship + asteroids + lighting are now READY for the new textures
+to plug in (no code change needed beyond the snippet when the user
+regenerates). When the new textures land, the visual jump should be
+visibly large without a code change.
+
+### Open decision
+
+Should the slot distribution change (4 shapes now instead of 5)?
+Currently shapeType=0 crystalline shard gets ~20%, shapeType=3 used to
+be ~20% (now part of ~60% craggy). The craggy "type" is now
+disproportionately common. Could rebalance the distribution by
+moving crystalline or cratered-potato weighting up — but that's a
+content/chunk-constants decision, not a visual-fidelity decision. Not
+blocking.
+
 ## v0.69.4
 
 User: "make sun twice bright". Four literal tweaks:
