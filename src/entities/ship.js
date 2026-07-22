@@ -474,6 +474,12 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
     // (HUD/widgets) don't see buffs vanish silently; the buff
     // timers didn't tick down to 0 themselves, we cleared them.
     const clearedBuffs = Array.from(state.buffs.keys());
+    // v0.69.1: capture any in-progress shield BEFORE state.buffs.clear().
+    // v0.69.0 read AFTER clear(); Map was always empty so max(5, 0) = 5
+    // silently shortened any 30s pickup shield to 5s on every respawn.
+    const existingShield = state.buffs.get('shield');
+    const preservedShieldS =
+      Number.isFinite(existingShield) && existingShield > 0 ? existingShield : 0;
     state.energy = MAX_ENERGY;
     state.buffs.clear();
     if (events) {
@@ -482,26 +488,18 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
         events.emit('buff:expired', { type, reason: 'reset' });
       }
     }
-    // v0.69.0 -- spawn-shield on every respawn. Closes the
-    // "ich werde sofort wieder abgeschossen" gap: the player
-    // would otherwise respawn straight into pirates/asteroids
-    // and die again before input could react. Applies to ALL
-    // reset invocations (GAME_OVER, hit-survival, run-restart).
+    // v0.69.0 + v0.69.1 -- spawn-shield on every respawn. Closes the
+    // "ich werde sofort wieder abgeschossen" gap. Applies to ALL reset
+    // invocations (GAME_OVER, hit-survival, run-restart).
     //
-    // **Honors any in-progress pickup shield.** If the player
-    // currently holds a 'shield' buff (e.g. picked up 25s of a
-    // 30s pickup shield moments earlier and is now dying), we
-    // keep whichever value is LARGER so a respawn does NOT
-    // shorten their pickup protection. Without this guard,
-    // respawning while shielded would silently reduce 25s → 5s,
-    // which would be a regression of the user's "long pickup
-    // shield" intent (the whole reason the pickup bumped 10s
-    // → 30s in this iteration).
-    const existingShield = state.buffs.get('shield');
-    const spawnShieldDur =
-      Number.isFinite(existingShield) && existingShield > SPAWN_SHIELD_DURATION_S
-        ? existingShield
-        : SPAWN_SHIELD_DURATION_S;
+    // **Honors any in-progress pickup shield** (v0.69.1 fix):
+    // Math.max picks the larger of {SPAWN_SHIELD_DURATION_S=5, preservedShieldS}.
+    // `existingShield` was captured BEFORE state.buffs.clear() above; preservedShieldS
+    // is that captured value (or 0 if no shield was active). Net result:
+    //   - fresh respawn (no shield active) -> 5s spawn shield,
+    //   - mid-PLAYING respawn with 28s of 30s pickup still ticking -> still 28s,
+    //   - respawn with 1s-expiring pickup -> bumped up to 5s.
+    const spawnShieldDur = Math.max(SPAWN_SHIELD_DURATION_S, preservedShieldS);
     state.buffs.set('shield', spawnShieldDur);
     if (events) {
       events.emit('buff:added', {

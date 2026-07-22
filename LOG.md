@@ -851,3 +851,14 @@ Drei Scripts für automatisierte Game-Analyse ohne manuelles Eingreifen:
 - **Sun fix visibility** — SUN_DIRECTION.z flipped +0.7 → -0.7 in src/scene/lighting-constants.js. The previous +0.7 placed the sun BEHIND the follow camera for yaw=0 ships (camera sit at ship+(0,7,+22) looking toward -Z; sun at ship+(361,441,+561) is in the behind-camera hemisphere). The -0.7 flip puts the sun at ship+(361,441,-561), in front of the camera + visible at spawn. Shadows now cast toward the camera (backlit cinematic). The user can finally see the sun they asked for in v0.68.0.
 - **Test updates** — tests/powerup-system.test.js: shield-pickup assertion flipped `duration: 10 → 30`. tests/ship.test.js: v0.61.0 reset()-clears-shield test replaced with v0.69.0 contract (reset clears existing buffs then re-applies a fresh spawn shield with max-length preservation). tests/hud.test.js: new buff-card lifecycle tests (add/update/remove) + global `document` shim for Node so `document.createElement` works in tests.
 
+
+## v0.69.1
+
+Hot-fix for v0.69.0 ordering bug in `ship.reset()`. The `state.buffs.get('shield')?.remaining ?? 0` was called AFTER `state.buffs.clear()`, so the Map was always empty at read time, and `Math.max(SPAWN_SHIELD_DURATION_S, 0)` was always 5s. A pickup shield mid-PLAYING (e.g. 28s of a 30s pickup) silently got reduced to 5s on every respawn.
+
+Fix: capture `existingShield` BEFORE `state.buffs.clear()`. Use preserved value as the seed for the spawn-shield duration via `Math.max(SPAWN_SHIELD_DURATION_S, preservedShieldS)`. Net result:
+- Fresh respawn (no shield) -> 5s spawn shield (unchanged).
+- Mid-PLAYING respawn with active 28s pickup shield -> still 28s (preserved).
+- Respawn with 1s-expiring pickup shield -> bumped up to 5s.
+
+3 new regression tests in tests/ship.test.js pin the contract. Total 621 tests, build clean. Bug originally caught by code-reviewer-minimax-m3 on the v0.69.0 commit (16c0b66); this is the follow-up hotfix commit per project precedent.

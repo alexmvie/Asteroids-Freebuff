@@ -240,24 +240,39 @@ test('v0.61.0: shield buff is independent of hull buff', () => {
   assert.equal(ship.isShielded(), false);
 });
 
-test('v0.69.0: reset() clears previously-active buff then re-applies a 5s spawn shield', () => {
-  // The original v0.61.0 contract was "reset wipes every buff, the player
-  // respawns exposed". v0.69.0 changes this: reset clears existing buffs,
-  // then immediately grants a 5s 'shield' spawn-protection so the player
-  // does not die immediately to pirates / asteroids on respawn (the user's
-  // "ich werde sofort wieder abgeschossen" symptom).
-  const ship = newShip();
-  ship.addBuff('shield', 10); // picked-up shield
-  ship.addBuff('speed', 5);    // some other buff
-  assert.equal(ship.isShielded(), true);
-  assert.equal(ship.getThrustMultiplier(), 2.0); // speed buff is on
+test('v0.69.1: reset() preserves pickup shield longer than 5s (Math.max wins; not shortened to SPAWN_SHIELD_DURATION_S)', () => {
+  // v0.69.0 contract: addBuff('shield', 30) -> reset() -> getShieldRemaining() === 5.
+  // That was a deliberate (but wrong) part of v0.69.0's spawn-shield logic.
+  // v0.69.1 hot-fix: capture existingShield BEFORE state.buffs.clear() and
+  // use Math.max(SPAWN_SHIELD_DURATION_S, preservedShieldS). Net result: a
+  // 30s pickup shield mid-PLAYING is now PRESERVED across the respawn (30s,
+  // not 5s). A 1s-expiring pickup gets bumped up to 5s (Math.max wins).
+  // A fresh respawn grants the 5s spawn shield (pinned by a separate test).
+  const ship = createShip({ scene: makeScene(), events: makeEventsBus() });
+  ship.addBuff('shield', 30);
   ship.reset({ x: 0, y: 0, z: 0 });
-  // The 'speed' buff was cleared during reset (state.buffs.clear()).
-  assert.equal(ship.getThrustMultiplier(), 1.0,
-    'reset() must wipe the speed buff (matches the existing buff-wipe contract)');
-  // A NEW spawn shield is added by reset (5s).
-  assert.equal(ship.isShielded(), true,
-    'reset() must apply a fresh 5s spawn shield');
-  assert.equal(ship.getShieldRemaining(), 5,
-    'spawn shield has 5s duration per SPAWN_SHIELD_DURATION_S');
+  assert.equal(ship.isShielded(), true);
+  assert.equal(ship.getShieldRemaining(), 30, 'pickup shield must NOT be shortened to 5s on respawn');
+});
+
+test('v0.69.1: reset() preserves long pickup shield (30s survives, not shortened to 5s)', () => {
+  const ship = newShip();
+  ship.addBuff('shield', 30);
+  ship.reset({ x: 0, y: 0, z: 0 });
+  assert.equal(ship.isShielded(), true);
+  assert.equal(ship.getShieldRemaining(), 30, 'pickup shield must NOT be shortened to 5s on respawn');
+});
+
+test('v0.69.1: reset() with no active shield grants exactly SPAWN_SHIELD_DURATION_S (5s)', () => {
+  const ship = newShip();
+  ship.reset({ x: 0, y: 0, z: 0 });
+  assert.equal(ship.isShielded(), true);
+  assert.equal(ship.getShieldRemaining(), 5);
+});
+
+test('v0.69.1: reset() with remaining shield < SPAWN_SHIELD_DURATION_S boosts to 5s (Math.max wins)', () => {
+  const ship = newShip();
+  ship.addBuff('shield', 1);
+  ship.reset({ x: 0, y: 0, z: 0 });
+  assert.equal(ship.getShieldRemaining(), 5, 'max(5, 1) -> 5');
 });
