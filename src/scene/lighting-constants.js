@@ -59,8 +59,12 @@ export const SUN_MESH_RADIUS = 30;
  * Radius of the corona/halo sphere. Renders behind the sun sphere with
  * transparent material — gives the sun a soft glow without true bloom
  * post-processing (which v0.68.0 does not have).
+ *
+ * v0.69.4: bumped 70 -> 100u per user "make sun twice bright" — larger
+ * halo extends visibly past the 30u core mesh for a more pronounced
+ * soft glow.
  */
-export const SUN_CORONA_RADIUS = 70;
+export const SUN_CORONA_RADIUS = 100;
 
 /**
  * Intensity of the directional (shadow-casting) sun light. The
@@ -70,8 +74,14 @@ export const SUN_CORONA_RADIUS = 70;
  * Tuned for MeshStandardMaterial with PBR albedo/normal/roughness maps
  * (the asteroid textures). The sun is bright enough to cast defined
  * shadows without washing out the asteroid colors.
+ *
+ * v0.69.4: bumped 2.6 -> 5.2 per user "make sun twice bright". Doubled
+ * to push the asteroid field visibly closer to the illumination limit
+ * (white albedo values saturate). HemisphereLight fill unchanged so
+ * shaded undersides don’t crush to pure black — the proportional gap
+ * between lit and shaded sides widens to look more "sun-washed".
  */
-export const DIRECTIONAL_INTENSITY = 2.6;
+export const DIRECTIONAL_INTENSITY = 5.2;
 
 /**
  * Intensity of the PointLight at the sun position. Per user request
@@ -81,8 +91,12 @@ export const DIRECTIONAL_INTENSITY = 2.6;
  * field, but technically a PointLight so the user's literal request
  * is satisfied). The PointLight does NOT cast shadows — the
  * DirectionalLight handles that with cheaper runtime cost.
+ *
+ * v0.69.4: 0.45 -> 0.90 per user "make sun twice bright" — doubled
+ * to support the doubled directional intensity without deadening
+ * shadow contrast.
  */
-export const POINT_INTENSITY = 0.45;
+export const POINT_INTENSITY = 0.90;
 
 /**
  * Intensity of the hemisphere environment fill. Sky/ground colors give

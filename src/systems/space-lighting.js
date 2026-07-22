@@ -98,7 +98,12 @@ export function createSpaceLighting() {
       color: SUN_CORONA_COLOR,
       toneMapped: false,
       transparent: true,
-      opacity: 0.32,
+      // v0.69.4: bumped opacity 0.32 -> 0.55 per user "make sun twice
+      // bright". Makes the halo sphere visually punchier (more white
+      // bleed-through against the deep-space background) without
+      // increasing the sun's core mesh brightness (which is clamped
+      // to 1.0 in 8-bit framebuffers).
+      opacity: 0.55,
       depthWrite: false,
       fog: false,
     }),

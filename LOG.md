@@ -890,3 +890,16 @@ Visual: asteroid shadows now have hard 1-pixel anti-aliased edges (still looks c
 Performance: PCFShadowMap is ~4x cheaper than PCFSoftShadowMap (fewer sub-taps). Net: slight fps win.
 
 No code-reviewer-minimax-m3 verification (routing issues \u2014 fallback to npm test + browser smoke-test per AGENTS.md Known Quirks). Total tests unchanged at 621.
+
+## v0.69.4
+
+User: "make sun twice bright". Four literal tweaks:
+
+a) DIRECTIONAL_INTENSITY 2.6 \u2192 5.2 (\u00d72) \u2014 directional light doubled so lit asteroid faces & ship surfaces read closer to albedo saturation. Hemispherical fill unchanged so the proportional gap between lit and shaded widens (looks more "harsh sun on airless rock").
+b) POINT_INTENSITY 0.45 \u2192 0.90 (\u00d72) \u2014 omnidirektional fill at the sun position, supports the directional without deadening shadows.
+c) SUN_CORONA_RADIUS 70 \u2192 100u (+43%) \u2014 halo sphere extends visibly past the sun core mesh (radius 30u). Bigger soft glow.
+d) coronaMesh opacity 0.32 \u2192 0.55 (+72%) \u2014 punchier halo bleed-through against the deep-space background.
+
+The sun core mesh itself (radius 30u, color 0xfff8e7, MeshBasicMaterial) unchanged \u2014 Three.js color clamps 8-bit framebuffer outputs to [0,1], so increasing the core mesh color alone cannot make it visibly brighter on the existing render pipeline. Doubling the *lights* that the sun lights up is the correct way to make the sun "twice as bright" both visually + physically.
+
+No code-reviewer-minimax-m3 verification (routing issues \u2014 fallback to npm test + browser smoke-test per AGENTS.md Known Quirks). Total tests unchanged at 621.
