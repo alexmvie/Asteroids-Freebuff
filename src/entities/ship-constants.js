@@ -82,6 +82,18 @@ export const MAX_ENERGY = 100;
 export const ENERGY_RECHARGE_PER_SEC = 5;
 
 /**
+ * v0.69.0 — spawn-shield duration. Every `ship.reset()` grants
+ * the player 5s of invincibility so respawning into pirates /
+ * asteroids doesn't immediately kill again ("ich werde sofort
+ * wieder abgeschossen"). Tune this single value to retune spawn
+ * protection. The pickup-shield duration (30s as of v0.69.0) is
+ * a separate constant — POWERUP_SHIELD_DURATION_S in
+ * src/systems/powerup-system.js — so the two are independently
+ * tunable.
+ */
+export const SPAWN_SHIELD_DURATION_S = 5;
+
+/**
  * Per-buff default duration (seconds). Used by `ship.addBuff(type)`
  * when the caller doesn't pass an explicit `duration`. Shield is
  * intentionally NOT a buff — it's an instant effect: refill +
@@ -96,5 +108,7 @@ export const BUFF_DEFAULT_DURATIONS_S = Object.freeze({
   // v0.61.0 — shield grants 10s of invincibility when picked up.
   // Sole SSOT for the duration; the power-up system reads it on
   // activate (see src/systems/powerup-system.js).
-  shield: 10,
+  // v0.69.0: bumped 10s → 30s to mirror POWERUP_SHIELD_DURATION_S
+  // in src/systems/powerup-system.js. Both values MUST agree.
+  shield: 30,
 });

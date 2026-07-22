@@ -4,9 +4,11 @@
  *
  * Visual:
  *   - A glTF model loaded from /models/powerup-laser.glb (set in
- *     POWERUP_GLB_URL). Loaded asynchronously; the factory initially shows a
- *     procedural fallback mesh (cyan emissive cone) and swaps in the GLB
- *     once it loads.
+ *     POWERUP_GLB_URLS by type). Loaded asynchronously; the factory
+ *     initially shows a procedural fallback mesh (per-type shape + tint)
+ *     and swaps in the GLB once it loads. Types WITHOUT a registered
+ *     URL stay on the procedural fallback mesh (the shield stays on
+ *     its mint-green icosahedron until the user supplies the GLB).
  *   - Spins slowly around Y and bobs up/down.
  *   - An emissive "halo" ring under the entity (cosmetic — the actual
  *     collision uses a sphere of POWERUP_RADIUS).
@@ -25,7 +27,7 @@
  * @param {{
  *   scene: import('three').Scene,
  *   spec: {
- *     type: string,                         // e.g. 'laser'
+ *     type: string,                         // e.g. 'shield'
  *     position: { x:number, y:number, z:number },
  *     lifetime?: number,                    // seconds; default POWERUP_LIFETIME_S
  *     spawnTime?: number,                   // seconds since boot; offsets the bob phase
@@ -51,10 +53,30 @@ import {
   Vector3,
 } from 'three';
 
-// (No duplicate geometry import block — all 7 fallback shapes are
-// resolved via direct named imports above.)
+/**
+ * v0.69.0 — per-type GLB URLs. Each powerup type that has a real
+ * GLB asset registers here; types not listed stay on the procedural
+ * fallback mesh (the colored shape per POWERUP_TYPE_VARIANTS). The
+ * 'shield' type intentionally has no URL until the user supplies
+ * the real mesh + PBR — its mint-green icosahedron is the
+ * placeholder shape for now.
+ *
+ * Compared to v0.68.0: previously a single `POWERUP_GLB_URL` was
+ * loaded for ALL types. After the laser GLB loaded, every powerup
+ * (including shield, speed, energy, ...) had its colored fallback
+ * replaced by the laser mesh — visually wrong. v0.69.0 splits the
+ * cache per-type so each type only swaps when its own GLB is
+ * present.
+ *
+ * Users adding a new GLB: just append `type: '/models/powerup-NAME.glb'`.
+ * Until then, the procedural fallback is permanent.
+ */
+const POWERUP_GLB_URLS = Object.freeze({
+  // Add entries here when you have a GLB for a powerup type:
+  //   shield: '/models/powerup-shield.glb',
+  //   laser:  '/models/powerup-laser.glb',
+});
 
-const POWERUP_GLB_URL = '/models/powerup-laser.glb';
 const POWERUP_RADIUS = 1.5;
 
 /**
@@ -157,36 +179,45 @@ const BOB_AMPLITUDE = 0.35; // world units
 const BOB_FREQUENCY = 0.9; // Hz
 const FALLBACK_COLOR = 0x4dabf7; // sky blue (slightly more blue than the game's primary cyan)
 
-// ---- GLB cache (loaded once, shared across all power-ups of this type) --
-// Module-scoped promise so multiple concurrent `createPowerUp` calls all
-// await the same load. The resolved value is the normalized GLB root
-// (centered on origin, longest axis ≈ POWERUP_GLB_TARGET_SIZE units) or
-// `null` if the load failed.
-let _glbRoot = null;
-let _glbLoading = null;
+// ---- Per-type GLB cache (v0.69.0) --------------------------------------
+// Each type with a registered URL gets its own shared normalized
+// root. Types without a URL have no entry; `loadPowerUpGlb(type)`
+// returns null for them so `createPowerUp` keeps the procedural
+// fallback. The previous single-cache implementation loaded one
+// URL and applied it to all types — visually wrong.
+const _glbCache = new Map(); // type string → THREE.Group | null
+const _glbLoadingMap = new Map(); // type string → in-flight Promise
 const POWERUP_GLB_TARGET_SIZE = 3.0;
 
 /**
- * Lazily load (and normalize) the power-up GLB. The mesh is centered on
- * origin and uniformly scaled so the longest bbox axis is
- * POWERUP_GLB_TARGET_SIZE units. No forward-axis auto-rotation: the GLB
- * is meant to be viewed from all sides (it's a static prop, not a ship).
+ * Lazily load (and normalize) the GLB registered for `type`. If the
+ * type has no URL in POWERUP_GLB_URLS, returns null (caller keeps
+ * the procedural fallback). If the load fails, returns null too.
  *
+ * The mesh is centered on origin and uniformly scaled so the longest
+ * bbox axis is POWERUP_GLB_TARGET_SIZE units. No forward-axis
+ * auto-rotation: power-up GLBs are global prop meshes.
+ *
+ * @param {string} type  one of POWERUP_TYPE_VARIANTS keys
  * @returns {Promise<import('three').Group | null>}
  */
-function loadPowerUpGlb() {
-  if (_glbRoot !== null) return Promise.resolve(_glbRoot);
-  if (_glbLoading) return _glbLoading;
-  _glbLoading = (async () => {
+function loadPowerUpGlb(type) {
+  const url = POWERUP_GLB_URLS[type];
+  if (!url) return Promise.resolve(null);
+  if (_glbCache.has(type)) return Promise.resolve(_glbCache.get(type));
+  if (_glbLoadingMap.has(type)) return _glbLoadingMap.get(type);
+
+  const loading = (async () => {
     let GLTFLoader;
     try {
       ({ GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js'));
     } catch (_) {
+      _glbCache.set(type, null);
       return null;
     }
     try {
       const loader = new GLTFLoader();
-      const gltf = await loader.loadAsync(POWERUP_GLB_URL);
+      const gltf = await loader.loadAsync(url);
       const root = gltf.scene;
       if (!root) throw new Error('GLB has no scene');
 
@@ -200,25 +231,27 @@ function loadPowerUpGlb() {
       const scale = maxDim > 0 ? POWERUP_GLB_TARGET_SIZE / maxDim : 1;
       root.scale.setScalar(scale);
       root.position.sub(center.multiplyScalar(scale));
-      _glbRoot = root;
+      _glbCache.set(type, root);
       return root;
     } catch (_) {
+      _glbCache.set(type, null);
       return null;
     } finally {
-      _glbLoading = null;
+      _glbLoadingMap.delete(type);
     }
   })();
-  return _glbLoading;
+  _glbLoadingMap.set(type, loading);
+  return loading;
 }
 
 /**
- * Build the procedural fallback mesh (used until the GLB loads, or forever
- * if the GLB load fails). A short upright cone with a strong emissive
- * glow so the power-up reads as "pick me up!" even without the model.
+ * Build the procedural fallback mesh (used until the GLB loads, or
+ * forever if the GLB load fails or the type has no GLB registration —
+ * e.g. shield per v0.69.0).
  *
  * @returns {Mesh}
  */
-function buildFallbackMesh(type = 'laser') {
+function buildFallbackMesh(type = 'shield') {
   return buildTypeShapeMesh(type);
 }
 
@@ -230,7 +263,7 @@ function buildFallbackMesh(type = 'laser') {
  *
  * @returns {Mesh}
  */
-function buildHaloRing(type = 'laser') {
+function buildHaloRing(type = 'shield') {
   const variant = POWERUP_TYPE_VARIANTS[type] ?? POWERUP_TYPE_VARIANTS.shield;
   const geom = new RingGeometry(POWERUP_RADIUS * 1.1, POWERUP_RADIUS * 1.5, 36);
   const mat = new MeshBasicMaterial({
@@ -255,7 +288,7 @@ function buildHaloRing(type = 'laser') {
  *
  * @returns {Mesh}
  */
-function buildBeacon(type = 'laser') {
+function buildBeacon(type = 'shield') {
   const variant = POWERUP_TYPE_VARIANTS[type] ?? POWERUP_TYPE_VARIANTS.shield;
   const geom = new CylinderGeometry(0.05, 0.05, 2.6, 6, 1, true);
   const mat = new MeshBasicMaterial({
@@ -306,8 +339,13 @@ export function createPowerUp({ scene, spec } = {}) {
 
   scene.add(group);
 
-  // ---- Async: swap in the GLB if it loads -----------------------------
-  loadPowerUpGlb().then((glbRoot) => {
+  // ---- Async: swap in the GLB if THIS TYPE has one registered --------
+  // v0.69.0 -- per-type GLB lookup. `loadPowerUpGlb(spec.type)`
+  // returns null when the type has no URL registered (e.g. shield
+  // in v0.69.0). The procedural fallback is then permanent — the
+  // mint icosahedron stays visible until the user supplies a real
+  // mesh + PBR.
+  loadPowerUpGlb(spec.type).then((glbRoot) => {
     if (!glbRoot) return; // keep the fallback
     group.remove(fallback);
     if (fallback.geometry) fallback.geometry.dispose();
@@ -393,10 +431,10 @@ export function createPowerUp({ scene, spec } = {}) {
 
 /**
  * Module-scope test seam: drop the GLB cache so the next `createPowerUp`
- * call re-loads the GLB from scratch. Tests don't use this; it's a safety
- * hatch for hot-reload during development.
+ * call re-loads any per-type GLB from scratch. Tests don't use this;
+ * it's a safety hatch for hot-reload during development.
  */
 export function _resetGlbCache() {
-  _glbRoot = null;
-  _glbLoading = null;
+  _glbCache.clear();
+  _glbLoadingMap.clear();
 }

@@ -20,6 +20,7 @@ import {
   MAX_ENERGY,
   ENERGY_RECHARGE_PER_SEC,
   BUFF_DEFAULT_DURATIONS_S,
+  SPAWN_SHIELD_DURATION_S,
 } from './ship-constants.js';
 // PLAY_PLANE_Y is owned by the world data-model layer (the play plane
 // is a world concept, not a ship concept). See ../world/chunk-constants.js.
@@ -480,6 +481,34 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
       for (const type of clearedBuffs) {
         events.emit('buff:expired', { type, reason: 'reset' });
       }
+    }
+    // v0.69.0 -- spawn-shield on every respawn. Closes the
+    // "ich werde sofort wieder abgeschossen" gap: the player
+    // would otherwise respawn straight into pirates/asteroids
+    // and die again before input could react. Applies to ALL
+    // reset invocations (GAME_OVER, hit-survival, run-restart).
+    //
+    // **Honors any in-progress pickup shield.** If the player
+    // currently holds a 'shield' buff (e.g. picked up 25s of a
+    // 30s pickup shield moments earlier and is now dying), we
+    // keep whichever value is LARGER so a respawn does NOT
+    // shorten their pickup protection. Without this guard,
+    // respawning while shielded would silently reduce 25s → 5s,
+    // which would be a regression of the user's "long pickup
+    // shield" intent (the whole reason the pickup bumped 10s
+    // → 30s in this iteration).
+    const existingShield = state.buffs.get('shield');
+    const spawnShieldDur =
+      Number.isFinite(existingShield) && existingShield > SPAWN_SHIELD_DURATION_S
+        ? existingShield
+        : SPAWN_SHIELD_DURATION_S;
+    state.buffs.set('shield', spawnShieldDur);
+    if (events) {
+      events.emit('buff:added', {
+        type: 'shield',
+        duration: spawnShieldDur,
+        reason: 'spawn',
+      });
     }
     group.position.set(p.x, p.y, p.z);
     group.rotation.set(0, 0, 0);

@@ -259,44 +259,26 @@ canvas {
   left: 50%;
   transform: translateX(-50%);
   display: flex;
+  flex-wrap: wrap;       /* v0.69.0: cards wrap on narrow viewports */
+  justify-content: center;
   gap: var(--space-2);
   pointer-events: none;
   z-index: var(--z-hud);
+  /* v0.69.0: hosts `.hud__buff-card` (rich SVG+bar card system). The
+     legacy `.hud__buff` plain-text chip + its CSS are gone. */
 }
 .hud__buffs:empty {
   display: none;
 }
-.hud__buff {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-3);
-  background: var(--color-bg-panel-fade);
-  border: var(--border-width) solid var(--chip-color, var(--color-primary));
-  border-radius: var(--radius-md);
-  color: var(--chip-color, var(--color-primary));
-  font-size: var(--font-size-md);
-  font-weight: var(--font-weight-bold);
-  letter-spacing: var(--letter-spacing-wider);
-  text-transform: uppercase;
-  white-space: nowrap;
-  text-shadow: 0 0 var(--space-2) var(--chip-color, var(--color-primary-glow-soft));
-  animation: hud-buff-enter 0.22s ease-out;
-}
-@keyframes hud-buff-enter {
-  from { opacity: 0; transform: translateY(-6px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-.hud__buff__timer {
-  color: var(--color-fg);
-  font-weight: var(--font-weight-bold);
-  font-variant-numeric: tabular-nums;
-  font-size: var(--font-size-sm);
-  margin-left: var(--space-1);
-  min-width: 32px;
-  text-align: right;
-}
-
+/* v0.69.0: removed the v0.11.x chip CSS block (`.hud__buff`,
+   `@keyframes hud-buff-enter`, `.hud__buff__timer`) — superseded
+   by the .hud__buff-card styling below. Each active buff now
+   renders a richer card with an inline SVG icon + an uppercase
+   TYPE label + a 96px draining progress bar (driven by the
+   --buff-progress CSS variable set per-frame in
+   src/ui/hud.js's addBuffCard path) + a tabular-nums timer text.
+   Multi-buff active simultaneously is the default — the rail
+   hosts one card per type, wraps on narrow viewports. */
 /* ============================================================================
    Block: hud__powerup  (centered status panel between score and lives)
    ----------------------------------------------------------------------------
@@ -2448,4 +2430,97 @@ canvas {
 .ai-tuner__svg--speedometer line {
   stroke-width: 2.5;
   stroke-linecap: round;
+}
+
+/* ============================================================================
+   Block: hud__buff-card (v0.69.0 — actief-buff cards, replacing the
+   single-line `.hud__buff` chips).
+   ----------------------------------------------------------------------------
+   Each active buff (shield / speed / energy / credits / hull / weapon)
+   renders one card in the same `.hud__buffs` rail the old chips used.
+   The card has four children:
+     - icon (22×22 SVG with the per-type vector path)
+     - body (stacked: label, progress bar, timer)
+   Color comes from POWERUP_TYPE_VARIANTS via the JS factory's
+   inline `style="--buff-color: 0xRRGGBB"`; everything else uses
+   the project's design tokens. Multiple cards can be visible
+   simultaneously (one per buff type) — the rail is flex-row,
+   wraps on narrow viewports via `.hud__buffs { flex-wrap: wrap }`.
+   ============================================================================ */
+.hud__buff-card {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-bg-panel-fade);
+  border: var(--border-width) solid var(--buff-color, var(--color-primary));
+  border-radius: var(--radius-md);
+  color: var(--buff-color, var(--color-primary));
+  font-family: var(--font-family);
+  white-space: nowrap;
+  text-shadow: 0 0 var(--space-2) var(--buff-color, var(--color-primary-glow-soft));
+  pointer-events: none;
+  animation: hud-buff-card-enter 0.22s ease-out;
+}
+@keyframes hud-buff-card-enter {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.hud__buff-card__icon {
+  width: var(--space-5);
+  height: var(--space-5);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.hud__buff-card__icon svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* Energy icon's `<rect fill="currentColor">` charge cells need
+     to be filled solidly; the SVG default would leave strokes
+     only. paint-order: stroke fill keeps line work clean even
+     when fill follows the outline path. */
+  paint-order: stroke fill;
+}
+.hud__buff-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.hud__buff-card__label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  color: var(--buff-color, var(--color-primary));
+  line-height: var(--line-height-tight);
+}
+.hud__buff-card__bar {
+  width: 96px;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  position: relative;
+}
+.hud__buff-card__bar-fill {
+  width: var(--buff-progress, 100%);
+  height: 100%;
+  background: var(--buff-color, var(--color-primary));
+  box-shadow: 0 0 var(--space-1) var(--buff-color, var(--color-primary-glow-soft));
+  transition: width 0.15s linear;
+}
+.hud__buff-card__timer {
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-fg-dim);
+  letter-spacing: var(--letter-spacing-tight);
+  line-height: var(--line-height-tight);
 }

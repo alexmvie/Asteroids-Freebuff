@@ -157,13 +157,19 @@ const POWERUP_TYPE_SHIELD = 'shield';
 const POWERUP_ACTIVE_DURATION_S = 15; // countdown after pickup
 
 // v0.61.0 — shield grants this many seconds of invincibility.
+// v0.69.0 — bumped 10s → 30s per user request ("das aufgesammelte
+// shield soll 30 sekunden shield geben"). Picked-up shield now lasts
+// long enough to fly out of a hostile pick-up spot, deal with
+// pirates, or loop back for cleanup asteroids. Effect visible in the
+// HUD's chip card (timer drains visibly + bar drains). Sync with
+// BUFF_DEFAULT_DURATIONS_S['shield'] in src/entities/ship-constants.js.
 // Sole SSOT for the duration; the ship's buff timer reads it via
 // `ship.addBuff('shield', POWERUP_SHIELD_DURATION_S)`. The game
 // constant BUFF_DEFAULT_DURATIONS_S['shield'] mirrors this for
 // callers that go through `addBuff('shield')` without an argument;
 // the explicit arg here keeps the duration explicit + grep-able in
 // the buff-application code path.
-export const POWERUP_SHIELD_DURATION_S = 10;
+export const POWERUP_SHIELD_DURATION_S = 30;
 const POWERUP_RESPAWN_DELAY_S = 5; // seconds between (collection|expiry) and next spawn
 const SPAWN_MIN_DIST = 30; // min world units from the ship
 const SPAWN_MAX_DIST = 200; // max world units from the ship (inside the bubble)

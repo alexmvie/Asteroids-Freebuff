@@ -817,7 +817,7 @@ test('v0.61.0: shield pickup grants invincibility buff to the player collector',
   ship.position.z = pu.getPosition().z;
   sys.update(0.1, []);
   assert.equal(ship.addBuffCalls.length, 1, 'ship.addBuff called exactly once');
-  assert.deepEqual(ship.addBuffCalls[0], { type: 'shield', duration: 10 });
+  assert.deepEqual(ship.addBuffCalls[0], { type: 'shield', duration: 30 });
   assert.equal(ship.isShielded(), true, 'player ship is now invulnerable');
   sys.dispose();
 });

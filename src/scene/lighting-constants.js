@@ -12,16 +12,26 @@
  * Direction of the sun in world space (unit vector). The sun mesh +
  * lights sit at `ship.position + SUN_DIRECTION * SUN_DISTANCE` so the
  * sun is always on the same screen side relative to the ship, no matter
- * which chunk the ship flies through. The chosen vector points up-and-
- * to-the-right-behind, so the player sees a "high afternoon sun" by
- * default.
+ * which chunk the ship flies through.
+ *
+ * The chosen vector points up-and-to-the-right-IN-FRONT, so the player
+ * sees a "high afternoon sun" by default in the camera's normal view
+ * cone (the camera sits at ship + (0, 7, +22) and looks toward -Z +
+ * look-ahead; sun at ship + (361, 441, -560) lands above the horizon,
+ * in the rim of the visible field).
+ *
+ * v0.68.0's first cut used z = +0.7, which put the sun BEHIND the
+ * follow camera for yaw=0 ships — the user couldn't see the sun. The
+ * v0.69.0 flip to z = -0.7 brings it back into the default view
+ * frustum. Shadows cast by asteroids then fall toward the camera
+ * (backlit effect), which reads as cinematic for a space shooter.
  *
  * MUST be a unit vector. The factory does not normalize on read.
  */
 export const SUN_DIRECTION = Object.freeze({
   x: 0.45,
   y: 0.55,
-  z: 0.7,
+  z: -0.7,
 });
 
 /**

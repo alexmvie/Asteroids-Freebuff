@@ -240,11 +240,24 @@ test('v0.61.0: shield buff is independent of hull buff', () => {
   assert.equal(ship.isShielded(), false);
 });
 
-test('v0.61.0: reset() clears the active shield buff', () => {
+test('v0.69.0: reset() clears previously-active buff then re-applies a 5s spawn shield', () => {
+  // The original v0.61.0 contract was "reset wipes every buff, the player
+  // respawns exposed". v0.69.0 changes this: reset clears existing buffs,
+  // then immediately grants a 5s 'shield' spawn-protection so the player
+  // does not die immediately to pirates / asteroids on respawn (the user's
+  // "ich werde sofort wieder abgeschossen" symptom).
   const ship = newShip();
-  ship.addBuff('shield', 10);
+  ship.addBuff('shield', 10); // picked-up shield
+  ship.addBuff('speed', 5);    // some other buff
   assert.equal(ship.isShielded(), true);
+  assert.equal(ship.getThrustMultiplier(), 2.0); // speed buff is on
   ship.reset({ x: 0, y: 0, z: 0 });
-  assert.equal(ship.isShielded(), false,
-    'reset() must wipe the shield (matches the existing buff wipe contract)');
+  // The 'speed' buff was cleared during reset (state.buffs.clear()).
+  assert.equal(ship.getThrustMultiplier(), 1.0,
+    'reset() must wipe the speed buff (matches the existing buff-wipe contract)');
+  // A NEW spawn shield is added by reset (5s).
+  assert.equal(ship.isShielded(), true,
+    'reset() must apply a fresh 5s spawn shield');
+  assert.equal(ship.getShieldRemaining(), 5,
+    'spawn shield has 5s duration per SPAWN_SHIELD_DURATION_S');
 });
