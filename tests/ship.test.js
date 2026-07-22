@@ -248,7 +248,7 @@ test('v0.69.1: reset() preserves pickup shield longer than 5s (Math.max wins; no
   // 30s pickup shield mid-PLAYING is now PRESERVED across the respawn (30s,
   // not 5s). A 1s-expiring pickup gets bumped up to 5s (Math.max wins).
   // A fresh respawn grants the 5s spawn shield (pinned by a separate test).
-  const ship = createShip({ scene: makeScene(), events: makeEventsBus() });
+  const ship = newShip();
   ship.addBuff('shield', 30);
   ship.reset({ x: 0, y: 0, z: 0 });
   assert.equal(ship.isShielded(), true);
