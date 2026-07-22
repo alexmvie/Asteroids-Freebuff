@@ -862,3 +862,17 @@ Fix: capture `existingShield` BEFORE `state.buffs.clear()`. Use preserved value 
 - Respawn with 1s-expiring pickup shield -> bumped up to 5s.
 
 3 new regression tests in tests/ship.test.js pin the contract. Total 621 tests, build clean. Bug originally caught by code-reviewer-minimax-m3 on the v0.69.0 commit (16c0b66); this is the follow-up hotfix commit per project precedent.
+
+## v0.69.2
+
+Sun-visibility fix per user complaint "ich sehe keine sonnenkugel\u2014 vielleicht weil ich nicht rauf und runterdrehen kann". The user correctly identified that a 2DOF game with no pitch input can't see anything above the play plane's horizon.
+
+SUN_DIRECTION.y was 0.55, placing the sun ~33\u00b0 above horizontal. Camera vertical FOV is 62\u00b0 (31\u00b0 half-angle) and looks ~14\u00b0 below horizontal (camera at Y=+7 looking at play-plane target Y=0). Upper FOV edge therefore sits at +17\u00b0 above horizontal. y=0.55 \u2192 y=0.15 reduces the sun's vertical angle to ~10\u00b0 (still above the horizon, clearly off the play-plane midline).
+
+Side effects:
+- Shadow length increases (dusk-like\u2014cinematic).
+- Z=\u22120.7 (forward, v0.69.0 fix) unchanged.
+- X=0.45 unchanged.
+- Lighting-follows-ship logic unchanged.
+
+No code-reviewer-minimax-m3 verification (routing issues\u2014fallback to npm test + browser smoke-test per AGENTS.md Known Quirks). Total tests unchanged at 621 (literal-value change, no logic).

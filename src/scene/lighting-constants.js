@@ -14,23 +14,30 @@
  * sun is always on the same screen side relative to the ship, no matter
  * which chunk the ship flies through.
  *
- * The chosen vector points up-and-to-the-right-IN-FRONT, so the player
- * sees a "high afternoon sun" by default in the camera's normal view
- * cone (the camera sits at ship + (0, 7, +22) and looks toward -Z +
- * look-ahead; sun at ship + (361, 441, -560) lands above the horizon,
- * in the rim of the visible field).
+ * The chosen vector points up-and-to-the-right-IN-FRONT-LOW, so the
+ * player sees a "sun near the horizon" by default in the camera's
+ * normal view cone (the camera at ship + (0, 7, +22) looks toward
+ * -Z + look-ahead with a 62° vertical FOV centred ~14° below
+ * horizontal; sun at ship + (~410, ~136, -640) lands near the top
+ * of the visible field, clearly above the play plane).
  *
- * v0.68.0's first cut used z = +0.7, which put the sun BEHIND the
- * follow camera for yaw=0 ships — the user couldn't see the sun. The
- * v0.69.0 flip to z = -0.7 brings it back into the default view
- * frustum. Shadows cast by asteroids then fall toward the camera
- * (backlit effect), which reads as cinematic for a space shooter.
+ * History:
+ *   - v0.68.0: z = +0.7, behind follow camera for yaw=0 ships.
+ *   - v0.69.0: z flipped to -0.7, in front of camera again.
+ *   - v0.69.2: y reduced 0.55 -> 0.15. The v0.69.0 y=0.55 placed the
+ *     sun ~33° above horizontal (above the camera's +17° upper FOV
+ *     edge) so default-yaw ships saw only the sky glow. The user
+ *     complained "ich sehe keine sonnenkugel — vielleicht weil ich
+ *     nicht rauf und runterdrehen kann? die sonne sollte aus
+ *     unserer 2d ebene sichtbar sein — versatz: nach oben". y=0.15
+ *     yields ~10° above horizontal — comfortably inside the FOV.
+ *     Side effect: shadows are longer and duskier (cinematic).
  *
  * MUST be a unit vector. The factory does not normalize on read.
  */
 export const SUN_DIRECTION = Object.freeze({
   x: 0.45,
-  y: 0.55,
+  y: 0.15,
   z: -0.7,
 });
 
