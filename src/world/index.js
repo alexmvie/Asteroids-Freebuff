@@ -21,6 +21,10 @@ export {
   MAX_ASTEROID_DRIFT,
   PLAY_PLANE_Y,
   NEBULA_RENDER_THRESHOLD,
+  // v0.69.6 — shape-distribution SSOT.
+  SHAPE_TYPES,
+  SHAPE_WEIGHTS,
+  validateShapeWeights,
   // Starfield (visual)
   STARFIELD_COUNT,
   STARFIELD_RADIUS,
@@ -34,7 +38,19 @@ export {
 
 export { mulberry32 } from './rng.js';
 export { makeSimplex2 } from './noise.js';
-export { hashChunk, densityAt, chunkHasNebula, sizeRadius, generateChunk } from './chunks.js';
+export {
+  hashChunk,
+  densityAt,
+  chunkHasNebula,
+  sizeRadius,
+  generateChunk,
+  // v0.69.6 — shape-distribution SSOT (helpers; the enum + weight
+  // table + validator are re-exported via the constants.js entry
+  // at the top of this file, which avoids a duplicate-export
+  // SyntaxError caused by listing the same names twice).
+  pickShapeType,
+  shapeToIndex,
+} from './chunks.js';
 
 // Streaming layer (added 2026): the runtime that decides which
 // chunks should be live based on the ship's position. Sits one

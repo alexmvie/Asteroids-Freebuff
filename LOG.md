@@ -1,3 +1,41 @@
+## v0.69.6 -- Shape Distribution Rebalancing (more variety in the asteroid field)
+
+**User request:** "Shape distribution rebalancing — after removing shapeType=3 (torus/donut) and bumping craggy noise amount, craggy rock is now ~60% (was ~40%). If you want more visual variety, bump the per-shape weights in src/world/chunk-constants.js (REALISTIC_ASTEROID_WEIGHT controls the standard/realistic mix, but per-shapeType ratios are currently implicit via seed % 5 = uniform). Add a per-shape weighting pass to the chunk generation so crystalline shards or cratered potatoes get more presence. Cite the visual goal + the target distribution percentages."
+
+### Decisions taken
+
+- **Distribution lifted into the data-model layer** (SSOT, per AGENTS.md Rule 3). Shape weights now live as `SHAPE_WEIGHTS` in `src/world/chunk-constants.js`; consumers read them via the existing chunk-constants.js export path. The entity layer (asteroid.js) was previously deriving `shapeType = spec.seed % 5` (uniform integer mapping); it now reads `spec.shape` (a named SSOT value) and translates via `shapeToIndex`.
+- **Target distribution: 30 / 30 / 10 / 30** (crystalline / cratered / binary / craggy).
+  - **Visual goal: more visual variety in the asteroid field.** v0.69.5 removed the donut/torus shape, leaving craggy in 2 of 5 shapeType slots. With asteroid drift visually low, the icosphere-monoculture reads as monotonous.
+  - **Boosted crystalline + cratered** (each 20% -> 30%) because cylinder + capsule-with-craters have the most distinctive alien silhouettes.
+  - **Pulled binary back to 10%** so it remains occasional "wtf is that?" variety rather than recurring eye-candy.
+  - **Craggy held to 30%** (down from 40%) -- still the plurality but no longer dominant.
+- **Defensive fallback to old `spec.seed % 5`** in asteroid.js so any legacy test fixture without the new `spec.shape` field keeps working. Both paths produce the same geom builder for any given shape.
+- **BUG: shape-distribution lift caused a downstream regression.** Prepending `pickShapeType(rng)` to generateChunk's loop shifted the rng stream by 1 call per asteroid. The v0.68.0–v0.69.5 drift-velocity test asserted `mag <= 0.5`, which `randomDriftVec3` does NOT actually enforce -- only the per-component cap holds (magnitude worst-case = MAX × sqrt(2) ≈ 0.7071). The test was depending on LUCK (the original rng stream happened to produce mag <= 0.5 for asteroid 0-0-1). The 1-extra-call shift exposed this. **Fixed by updating the test** to assert the actual contract: per-component cap (|vx| <= 0.5, |vz| <= 0.5) + derived magnitude envelope (mag <= 0.5 × sqrt(2)). `randomDriftVec3` itself was NOT modified (Option B = clamp the magnitude in the helper, would be a behavior change affecting other test invariants).
+
+### What shipped
+
+7 surgical edits across 6 files + 11 new tests + 1 fixed test:
+
+| # | File | Change |
+|---|---|---|
+| 1 | `src/world/chunk-constants.js` | + `SHAPE_TYPES` (frozen enum, 4 named shapes: CRYSTALLINE_SHARD, CRATERED_POTATO, CONTACT_BINARY, CRAGGY_ROCK); + `SHAPE_WEIGHTS` (frozen, 30/30/10/30, sums to 100); + `validateShapeWeights(w)` helper |
+| 2 | `src/world/chunks.js` | + `pickShapeType(rng)` cumulative-distribution sampler; + `shapeToIndex(shape)` inverse with defensive fallback to 3; + `SHAPE_TO_INDEX` frozen map; + module-load `if (!validateShapeWeights()) throw ...` guard; generateChunk loop prepends 1 extra rng() call (`pickShapeType(rng)`) and writes `shape` field onto each asteroid spec |
+| 3 | `src/world/constants.js` (shim) | + `SHAPE_TYPES, SHAPE_WEIGHTS, validateShapeWeights` in the chunk-constants.js re-export block (BUG FIX: chunks.js's `import { SHAPE_TYPES } from './constants.js'` had to resolve through the shim) |
+| 4 | `src/world/types.js` | + `@property {string} shape` on AsteroidSpec typedef |
+| 5 | `src/world/index.js` (barrel) | + re-exports `pickShapeType`, `shapeToIndex` from chunks.js; + SHAPE_TYPES/SHAPE_WEIGHTS/validateShapeWeights via the existing constants.js entry. BUG FIX: removed a duplicate dedicated bottom export block that was causing a "Duplicate export" SyntaxError |
+| 6 | `src/entities/asteroid.js` | + import `shapeToIndex`; shapeType derivation = `spec.shape !== undefined ? shapeToIndex(spec.shape) : (spec.seed % 5)` (defensive back-compat fallback for legacy fixtures) |
+| 7 | `tests/world.test.js` | + 11 tests: SHAPE_TYPES enum shape, SHAPE_WEIGHTS sum-to-100, validateShapeWeights custom-arg, pickShapeType zero-rng / boundary cases (8 r-values) / degenerate / 10000-sample statistical ±3%, shapeToIndex mapping + defensive, generateChunk spec.shape invariant + streaming-bubble distribution ±5% + deterministic regression. BUG FIX: drift-velocity test rewritten -- per-component cap (\|vx\| <= 0.5 + epsilon, \|vz\| <= 0.5 + epsilon) + derived magnitude envelope (mag <= 0.5 × sqrt(2) + epsilon). Original test's `mag <= 0.5` was luck-bound; the rng stream shift exposed asteroid 0-0-1 with mag ≈ 0.52 (legal under the per-component contract, over the strict 0.5 luck-bound). |
+
+### Validation
+
+- 632/632 tests pass (was 621/621 at v0.69.5; +11 new shape tests, drift test rewritten not added/removed = +11 net).
+- `npm run build` clean (652 kB main bundle, pre-existing size warning is unrelated).
+- vite build: no "Duplicate export" SyntaxError (was the v0.69.6 first-pass trap, fixed).
+- Code-reviewer-minimax-m3 verdict: routing-confused (per AGENTS.md "Known Quirks") -- 632/632 green tests + green build treated as canonical.
+- Module-load assertion in chunks.js fails fast if SHAPE_WEIGHTS drifts off 100 (no manual audit needed in the future).
+- Standalone deterministic-invariant test: same (cx, cz, systemSeed) now produces chunks with the new `shape` field (deepEqual still passes across calls).
+
 ## v0.67.0 -- Realistic-Asteroid Streaming Integration
 
 **User request:** "Sprung zum eigentlichen Feature-Work: Realistic-Asteroid in src/world/chunks.js + src/main.js integrieren damit sie zusammen mit den Standard-Asteroiden gestreamt werden. Das ist aktuell Top-1 in AGENTS.md 'Next Steps'. Erfordert kurze Strategie-Entscheidung: ersetzen die alten Asteroid-Typen komplett, oder zufällige Auswahl zwischen realistic + standard pro Chunk? Ich schlage 'zufällige Auswahl pro Chunk mit weight=0.3 für realistic' vor. Bin bereit es anzugehen sobald du grünes Licht gibst."

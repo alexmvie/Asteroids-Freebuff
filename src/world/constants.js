@@ -30,6 +30,13 @@ export {
   MAX_ASTEROID_DRIFT,
   PLAY_PLANE_Y,
   NEBULA_RENDER_THRESHOLD,
+  // v0.69.6 — shape-distribution SSOT (re-exported from the shim
+  // so chunks.js's `import { SHAPE_TYPES, ... } from './constants.js'`
+  // resolves through chunk-constants.js, matching the SHIM pattern
+  // documented at the top of this file).
+  SHAPE_TYPES,
+  SHAPE_WEIGHTS,
+  validateShapeWeights,
 } from './chunk-constants.js';
 
 export {

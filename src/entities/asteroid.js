@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { Capsule } from '../geometry/capsule.js';
 import { mulberry32 } from '../world/rng.js';
+// v0.69.6 — shapeToIndex is the inverse of SHAPE_TYPES; the data-
+// model layer owns the shape taxonomy so the entity factory stays
+// decoupled from the named-string IDs.
+import { shapeToIndex } from '../world/chunks.js';
 
 // ---------------------------------------------------------------------------
 // Deterministic 3D value noise + fbm (fractal Brownian motion). Used to
@@ -287,7 +291,18 @@ function buildAsteroidMesh(spec) {
   // species so the deterministic-asteroid tests still pass.
   rng();
 
-  const shapeType = spec.seed % 5;
+  // v0.69.6 — shape distribution lifted into the data-model layer.
+  // v0.69.5 (and earlier) used `spec.seed % 5` for a uniform
+  // integer mapping that made craggy_rock a 40% monolith after the
+  // donut was removed. Specs now carry a named-shape field
+  // (`spec.shape` ∈ SHAPE_TYPES), translated to the entity-layer
+  // integer via `shapeToIndex`. The `spec.seed % 5` fallback
+  // preserves the v0.69.5 dispatch for any spec that lacks the
+  // new field (legacy test fixtures, hand-crafted mocks) — both
+  // paths produce the same geom builder for any given shape.
+  const shapeType = spec.shape !== undefined
+    ? shapeToIndex(spec.shape)
+    : (spec.seed % 5);
   const textureIdx = ((spec.seed >> 3) % 5) + 1; // 1 through 5
 
   const material = createAsteroidMaterial(textureIdx);

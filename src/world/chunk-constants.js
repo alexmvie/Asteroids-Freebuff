@@ -72,3 +72,73 @@ export const PLAY_PLANE_Y = 0;
  * skydome. The skydome fades independently of this threshold.)
  */
 export const NEBULA_RENDER_THRESHOLD = 0.1;
+
+/**
+ * v0.69.6 — Asteroid shape enumeration (single source of truth).
+ *
+ * Each named type is rendered by a distinct geometry builder in
+ * `src/entities/asteroid.js` (crystalline_shard → cylindrical
+ * CylinderGeometry+jitter, cratered_potato → Capsule+crater
+ * displacement, contact_binary → dual-icosphere peanut, craggy_rock
+ * → Icosphere+craggy displacement). The strings are the canonical
+ * IDs persisted on `AsteroidSpec.shape`; the entity factory
+ * translates them to integer shapeType values via `shapeToIndex`
+ * in `src/world/chunks.js`.
+ *
+ * Why an enum and not just integers: the SSOT for the shape
+ * taxonomy lives here so the data-model layer (chunk generation,
+ * test fixtures) and the entity layer (geometry dispatch) agree.
+ * v0.69.5 dropped the legacy shapeType=3 'torus' (the donut, which
+ * the user reported as "idiotisch") — the v0.69.6 enum therefore
+ * has 4 entries, not 5.
+ */
+export const SHAPE_TYPES = Object.freeze({
+  CRYSTALLINE_SHARD: 'crystalline_shard',
+  CRATERED_POTATO: 'cratered_potato',
+  CONTACT_BINARY: 'contact_binary',
+  CRAGGY_ROCK: 'craggy_rock',
+});
+
+/**
+ * v0.69.6 — Per-shape-type distribution weights (percentages,
+ * must sum to 100). See `pickShapeType` in `src/world/chunks.js`
+ * for the cumulative-distribution sampler.
+ *
+ * VISUAL GOAL — more variety in the asteroid field:
+ *   - v0.69.5 removed the donut/torus shape, leaving craggy_rock in
+ *     2 of the 5 shapeType slots → craggy combined = 40% of the
+ *     field, which reads as monotonous when flying through.
+ *   - crystalline_shard and cratered_potato have the most
+ *     distinctive alien silhouettes (cylinder vs capsule, regular
+ *     vs cratered); boosting them breaks the icosphere-monoculture.
+ *   - contact_binary pulled back to 10% so it remains an
+ *     occasional "wtf is that?" variety rather than recurring
+ *     eye-candy.
+ *
+ * TARGET DISTRIBUTION (single-source-of-truth edit point — bumping
+ * these numbers is the only knob to rebalance the field):
+ *   - crystalline_shard: 30% (was ~20%)
+ *   - cratered_potato:   30% (was ~20%)
+ *   - contact_binary:    10% (was ~20%)
+ *   - craggy_rock:       30% (was ~40%)
+ */
+export const SHAPE_WEIGHTS = Object.freeze({
+  crystalline_shard: 30,
+  cratered_potato: 30,
+  contact_binary: 10,
+  craggy_rock: 30,
+});
+
+/**
+ * v0.69.6 — Sum-validates `SHAPE_WEIGHTS` (must total 100).
+ * Exported so tests can call it explicitly; the module-load
+ * assertion in `src/world/chunks.js` also fails fast if a future
+ * edit accidentally breaks the sum.
+ *
+ * @param {Record<string, number>} [w]  Defaults to SHAPE_WEIGHTS.
+ * @returns {boolean}
+ */
+export function validateShapeWeights(w = SHAPE_WEIGHTS) {
+  const sum = Object.values(w).reduce((a, b) => a + b, 0);
+  return sum === 100;
+}

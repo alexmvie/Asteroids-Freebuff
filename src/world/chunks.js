@@ -17,7 +17,79 @@ import {
   NEBULA_RENDER_THRESHOLD,
   MAX_ASTEROID_DRIFT,
   PLAY_PLANE_Y,
+  SHAPE_TYPES,
+  SHAPE_WEIGHTS,
+  validateShapeWeights,
 } from './constants.js';
+
+// v0.69.6 — fail fast if SHAPE_WEIGHTS is malformed (sum != 100).
+// Catches drift during development: if a future edit bumps one
+// weight without compensating the others, the sampler would assign
+// some asteroids to a non-existent bucket or skip the last bucket
+// entirely. Better to throw at module-load than to silently corrupt
+// the streaming field's distribution on every page load.
+if (!validateShapeWeights()) {
+  const sum = Object.values(SHAPE_WEIGHTS).reduce((a, b) => a + b, 0);
+  throw new Error(`SHAPE_WEIGHTS must sum to 100, got ${sum}`);
+}
+
+// v0.69.6 — inverse of SHAPE_TYPES. Maps a named shape to the
+// legacy integer shapeType used by `src/entities/asteroid.js`'s
+// `buildAsteroidMesh` switch (0 = crystalline, 1 = cratered,
+// 2 = binary, 3 = craggy). Lives in the data-model layer so the
+// entity factory stays decoupled from SHAPE_TYPES' string IDs —
+// only `pickShapeType` (which produces the string names) is
+// called by chunk generation; only `shapeToIndex` (which consumes
+// the strings) is called by the entity factory.
+const SHAPE_TO_INDEX = Object.freeze({
+  crystalline_shard: 0,
+  cratered_potato: 1,
+  contact_binary: 2,
+  craggy_rock: 3,
+});
+
+/**
+ * v0.69.6 — Inverse of SHAPE_TYPES. Returns the integer shapeType
+ * that the entity factory uses to dispatch geometry builders.
+ * Defensive: unknown shapes fall back to craggy_rock (3) so a
+ * future SHAPE_TYPES addition without a matching SHAPE_TO_INDEX
+ * entry never produces a non-asteroid entity.
+ *
+ * @param {string} shape  One of SHAPE_TYPES values.
+ * @returns {0|1|2|3}
+ */
+export function shapeToIndex(shape) {
+  const idx = SHAPE_TO_INDEX[shape];
+  return typeof idx === 'number' ? idx : 3;
+}
+
+/**
+ * v0.69.6 — Cumulative-distribution sampler over SHAPE_WEIGHTS.
+ * Pure function of `rng()`. Returns one of the SHAPE_TYPES values,
+ * preserving the chunk's deterministic sequence (same (cx, cz,
+ * systemSeed) → same shape stream).
+ *
+ * Algorithm: draw r ~ [0, 100), walk SHAPE_WEIGHTS in declaration
+ * order accumulating the cumulative sum, return the first bucket
+ * whose cumulative exceeds r. Object.entries on a frozen plain
+ * object preserves insertion order. The fallback at the bottom
+ * handles a degenerate `rng = () => 1` (returns the last bucket)
+ * — should never trigger in practice because `mulberry32` returns
+ * values in [0, 1).
+ *
+ * @param {() => number} rng   Returns [0, 1).
+ * @returns {string}           A SHAPE_TYPES key (e.g. 'crystalline_shard').
+ */
+export function pickShapeType(rng) {
+  const r = rng() * 100; // [0, 100)
+  let cum = 0;
+  for (const [k, w] of Object.entries(SHAPE_WEIGHTS)) {
+    cum += w;
+    if (r < cum) return k;
+  }
+  const entries = Object.keys(SHAPE_WEIGHTS);
+  return entries[entries.length - 1]; // defensive: r === 100.0
+}
 
 // ---------------------------------------------------------------------------
 // Chunk hash
@@ -177,8 +249,19 @@ export function generateChunk(id) {
   // was removed by user request ("alte Asteroiden komplett raus").
   // The pure chunk-seed sequence below is unchanged, so the
   // deterministic invariants in tests/world.test.js still pass.
+  //
+  // v0.69.6 — per-shape-type distribution. pickShapeType(rng)
+  // consumes one extra rng() value per asteroid (picked FIRST,
+  // before size/position/axis/etc.) so the entity layer can read
+  // `spec.shape` instead of falling back to `spec.seed % 5` (the
+  // uniform distribution that made craggy_rock a 40% monolithic
+  // after the v0.69.5 donut removal). The seed stream shifts
+  // downstream, which is fine: no test pins specific values, only
+  // invariants (determinism, axis-unit, drift cap, etc.) — all
+  // of which the new stream still satisfies.
   const asteroids = [];
   for (let i = 0; i < count; i++) {
+    const shape = pickShapeType(rng);
     const size = pickSize(rng);
     const px = (id.cx + rng()) * CHUNK_SIZE;
     const pz = (id.cz + rng()) * CHUNK_SIZE;
@@ -188,6 +271,7 @@ export function generateChunk(id) {
     const seed = (rng() * 1e9) | 0;
     asteroids.push({
       id: `${id.cx}-${id.cz}-${i}`,
+      shape,
       position: { x: px, y: PLAY_PLANE_Y, z: pz },
       radius: sizeRadius(size),
       size,

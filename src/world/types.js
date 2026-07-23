@@ -41,6 +41,7 @@
  *
  * @typedef {Object} AsteroidSpec
  * @property {string}   id          // stable within the chunk, e.g. "12-7-3"
+ * @property {string}   shape       // v0.69.6 — one of SHAPE_TYPES (see src/world/chunk-constants.js)
  * @property {Vec3}     position    // world space
  * @property {number}   radius      // collision + render radius
  * @property {AsteroidSize} size
