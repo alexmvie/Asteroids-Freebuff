@@ -248,12 +248,34 @@ test('generateChunk: rotation axes are unit vectors (in floating point)', () => 
   }
 });
 
-test('generateChunk: drift velocities are within MAX_ASTEROID_DRIFT', () => {
+test('generateChunk: drift velocities are bounded by MAX_ASTEROID_DRIFT (component-wise cap; magnitude ≤ MAX × √2)', () => {
+  // v0.69.6 — FIX. The v0.68.0–v0.69.5 version of this test asserted
+  // `mag <= 0.5`, which `randomDriftVec3` does NOT enforce — the
+  // magnitude's worst-case cap is actually `MAX × √2 ≈ 0.7071` (when
+  // both x and z components are sampled at the same sign extreme).
+  // The v0.69.5 test passed because the rng stream for asteroid
+  // 0-0-1 happened to produce a small magnitude. The v0.69.6 shape-
+  // distribution prepended `pickShapeType(rng)` to the generateChunk
+  // loop (consuming 1 extra rng() per asteroid), shifting the stream
+  // and exposing asteroid 0-0-1 with a magnitude of ~0.52 — legal
+  // under the actual per-component contract but over the strict
+  // 0.5 luck-bound the old test asserted.
+  //
+  // The honest contract: randomDriftVec3 samples each component
+  // independently in [-MAX, +MAX], which mathematically bounds the
+  // magnitude to MAX × √2. The test now asserts:
+  //   1. per-component cap (the enforced contract),
+  //   2. magnitude cap derived from the components (the math envelope).
   const chunk = generateChunk({ cx: 0, cz: 0, systemSeed: INITIAL_SYSTEM_SEED });
+  const magCap = 0.5 * Math.sqrt(2);
   for (const a of chunk.asteroids) {
-    const mag = Math.hypot(a.velocity.x, a.velocity.y, a.velocity.z);
-    assert.ok(mag <= 0.5 + 1e-6, `drift too fast: ${mag} for ${a.id}`);
+    // Per-component cap (the actual enforcement target).
+    assert.ok(Math.abs(a.velocity.x) <= 0.5 + 1e-6, `vx too fast: ${a.velocity.x} for ${a.id}`);
     assert.equal(a.velocity.y, 0);
+    assert.ok(Math.abs(a.velocity.z) <= 0.5 + 1e-6, `vz too fast: ${a.velocity.z} for ${a.id}`);
+    // Derived magnitude cap (worst-case at both components at MAX).
+    const mag = Math.hypot(a.velocity.x, a.velocity.z); // y=0
+    assert.ok(mag <= magCap + 1e-6, `drift too fast: ${mag} > ${magCap} for ${a.id}`);
   }
 });
 
@@ -272,6 +294,12 @@ import {
   getActiveChunks,
   BUBBLE_RADIUS_CHUNKS,
   RECENTLY_EVICTED_TTL_S,
+  // v0.69.6 — shape-distribution SSOT.
+  SHAPE_TYPES,
+  SHAPE_WEIGHTS,
+  validateShapeWeights,
+  pickShapeType,
+  shapeToIndex,
 } from '../src/world/index.js';
 
 test('createWorld: returns empty active + empty recentlyGone + systemSeed + bubbleRadius', () => {
@@ -499,4 +527,165 @@ test('updateStreamingBubble: chunksPerFrame cap does NOT count reactivations', (
   assert.equal(delta.reactivated.length, 1, 'reactivation should not count against the cap');
   assert.equal(delta.added.length, 0, 'no new chunks should generate with cap=0');
   assert.equal(w.active.size, 1);
+});
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Shape distribution (v0.69.6 — SHAPE_TYPES, SHAPE_WEIGHTS, pickShapeType,
+// shapeToIndex, generateChunk spec.shape field)
+// ---------------------------------------------------------------------------
+
+test('SHAPE_TYPES: enum has the 4 expected shapes with frozen string IDs', () => {
+  // The 4-shape enum is the v0.69.6 SSOT. shapeType=3 'torus' from
+  // v0.69.4 and earlier was removed in v0.69.5 (donut is dumb-looking);
+  // the v0.69.6 enum therefore has exactly 4 entries, not 5.
+  assert.equal(SHAPE_TYPES.CRYSTALLINE_SHARD, 'crystalline_shard');
+  assert.equal(SHAPE_TYPES.CRATERED_POTATO, 'cratered_potato');
+  assert.equal(SHAPE_TYPES.CONTACT_BINARY, 'contact_binary');
+  assert.equal(SHAPE_TYPES.CRAGGY_ROCK, 'craggy_rock');
+  assert.equal(Object.keys(SHAPE_TYPES).length, 4, 'enum has exactly 4 shapes');
+});
+
+test('SHAPE_WEIGHTS: target distribution (30/30/10/30) sums to 100', () => {
+  assert.equal(SHAPE_WEIGHTS.crystalline_shard, 30, 'crystalline: 30%');
+  assert.equal(SHAPE_WEIGHTS.cratered_potato, 30, 'cratered: 30%');
+  assert.equal(SHAPE_WEIGHTS.contact_binary, 10, 'binary: 10%');
+  assert.equal(SHAPE_WEIGHTS.craggy_rock, 30, 'craggy: 30%');
+  // validateShapeWeights is a guard helper; default arg = SHAPE_WEIGHTS.
+  assert.equal(validateShapeWeights(), true, 'SHAPE_WEIGHTS sums to 100');
+  // Custom-argument test: a malformed table is rejected.
+  assert.equal(validateShapeWeights({ a: 50, b: 50 }), true, 'sum 100 still passes');
+  assert.equal(validateShapeWeights({ a: 50, b: 51 }), false, 'sum 101 fails');
+  assert.equal(validateShapeWeights({ a: 0, b: 0 }), false, 'sum 0 fails');
+});
+
+test('pickShapeType: zero-rng returns the first bucket (crystalline_shard)', () => {
+  // rng=()=>0 → r = 0*100 = 0; cumulative after first bucket (30) ⇒ 0 < 30 → returns 'crystalline_shard'.
+  assert.equal(pickShapeType(() => 0), 'crystalline_shard', 'r=0 picks first bucket');
+});
+
+test('pickShapeType: boundary r-values pick the expected bucket', () => {
+  // Buckets in declaration order: [crystalline: 30, cratered: 30, binary: 10, craggy: 30].
+  // r=29.99/100 ≈ 0.2999 → still in crystalline (cum 30).
+  // r=30/100 = 0.30 → at boundary; 0.30*100=30, cum=30, 30<30 is false → next bucket (cratered).
+  // r=60/100 = 0.60 → cum after [crystalline, cratered] = 60, 60<60 false → next bucket (binary).
+  // r=69.99/100 ≈ 0.6999 → binary cumulative = 70, 69.99<70 → binary.
+  // r=70/100 = 0.70 → cum after [crystalline, cratered, binary] = 70, 70<70 false → craggy.
+  // r=99.99/100 ≈ 0.9999 → craggy cumulative = 100, 99.99<100 → craggy.
+  const cases = [
+    { r: 0.0, expected: 'crystalline_shard' },
+    { r: 0.2999, expected: 'crystalline_shard' },
+    { r: 0.30, expected: 'cratered_potato' },
+    { r: 0.59, expected: 'cratered_potato' },
+    { r: 0.60, expected: 'contact_binary' },
+    { r: 0.6999, expected: 'contact_binary' },
+    { r: 0.70, expected: 'craggy_rock' },
+    { r: 0.999, expected: 'craggy_rock' },
+  ];
+  for (const { r, expected } of cases) {
+    assert.equal(pickShapeType(() => r), expected, `r=${r} → ${expected}`);
+  }
+});
+
+test('pickShapeType: degenerate rng=()=>1 falls back to last bucket (defensive)', () => {
+  // mulberry32 returns values in [0, 1) so this should never trigger
+  // in production; the defensive fallback returns the last bucket.
+  assert.equal(pickShapeType(() => 1), 'craggy_rock', 'r=1 → defensive last bucket');
+});
+
+test('pickShapeType: 10000 samples yield statistical distribution within ±3% of target', () => {
+  // The statistical guard: 10000 independent rng draws should produce
+  // counts within ±3% of each bucket's target. ±3% (instead of ±5%)
+  // gives generous slack for rng correlations and finite-sample noise
+  // but still fails fast if the sampler is mis-biased.
+  const N = 10000;
+  const counts = { crystalline_shard: 0, cratered_potato: 0, contact_binary: 0, craggy_rock: 0 };
+  let seq = 0;
+  const rng = () => {
+    // Linear-congruential helper so we exercise an independent stream
+    // (no mulberry32 correlation worry).
+    seq = (seq * 1664525 + 1013904223) >>> 0;
+    return (seq >>> 8) / 16777216; // [0, 1) with ~24 bits of mantissa.
+  };
+  for (let i = 0; i < N; i++) {
+    const shape = pickShapeType(rng);
+    counts[shape] = (counts[shape] || 0) + 1;
+  }
+  for (const [shape, target] of Object.entries(SHAPE_WEIGHTS)) {
+    const observed = (counts[shape] / N) * 100;
+    assert.ok(
+      Math.abs(observed - target) <= 3,
+      `shape ${shape}: observed ${observed.toFixed(2)}%, target ${target}% (tolerance ±3%)`,
+    );
+  }
+});
+
+test('shapeToIndex: maps SHAPE_TYPES values to legacy integer shapeType', () => {
+  // Legacy entity-layer dispatch: 0=crystalline, 1=cratered, 2=binary, 3=craggy.
+  assert.equal(shapeToIndex('crystalline_shard'), 0);
+  assert.equal(shapeToIndex('cratered_potato'), 1);
+  assert.equal(shapeToIndex('contact_binary'), 2);
+  assert.equal(shapeToIndex('craggy_rock'), 3);
+});
+
+test('shapeToIndex: unknown shape string falls back to craggy (defensive)', () => {
+  // A future SHAPE_TYPES addition without a matching SHAPE_TO_INDEX
+  // entry would crash the entity factory (no builder for shapeType=
+  // undefined). Defensive fallback to craggy keeps the streaming
+  // field rendering even after a partial migration.
+  assert.equal(shapeToIndex('unknown_shape'), 3, 'unknown → craggy');
+  assert.equal(shapeToIndex(''), 3, 'empty string → craggy');
+  assert.equal(shapeToIndex(undefined), 3, 'undefined → craggy');
+});
+
+test('generateChunk: every asteroid now carries spec.shape ∈ SHAPE_TYPES', () => {
+  // v0.69.6 — new SSOT field on AsteroidSpec. Generation MUST set it.
+  const validShapes = new Set(Object.values(SHAPE_TYPES));
+  for (let i = 0; i < 8; i++) {
+    const cx = i * 7;
+    const cz = i * 11;
+    const chunk = generateChunk({ cx, cz, systemSeed: INITIAL_SYSTEM_SEED });
+    for (const a of chunk.asteroids) {
+      assert.ok(
+        validShapes.has(a.shape),
+        `chunk(${cx},${cz}) asteroid ${a.id}: shape=${a.shape} not in SHAPE_TYPES`,
+      );
+    }
+  }
+});
+
+test('generateChunk: shape distribution across the bubble matches SHAPE_WEIGHTS within ±5%', () => {
+  // End-to-end check: streaming 49 chunks + counting shapes should
+  // produce a distribution close to SHAPE_WEIGHTS (30/30/10/30).
+  // ±5% is the wide-but-meaningful tolerance for N=~250-500 asteroids
+  // (49 chunks × ~7 asteroids average, varies with density noise).
+  const w = createWorld({ systemSeed: INITIAL_SYSTEM_SEED });
+  updateStreamingBubble(w, { x: 0, y: 0, z: 0 }, 0);
+  const counts = {};
+  let total = 0;
+  for (const { chunk } of getActiveChunks(w)) {
+    for (const a of chunk.asteroids) {
+      counts[a.shape] = (counts[a.shape] || 0) + 1;
+      total++;
+    }
+  }
+  assert.ok(total > 100, `expected >100 asteroids across the bubble, got ${total}`);
+  for (const [shape, target] of Object.entries(SHAPE_WEIGHTS)) {
+    const observed = (counts[shape] || 0) / total * 100;
+    assert.ok(
+      Math.abs(observed - target) <= 5,
+      `bubble shape ${shape}: observed ${observed.toFixed(2)}% of ${total} asteroids, ` +
+      `target ${target}% (tolerance ±5%)`,
+    );
+  }
+});
+
+test('generateChunk: deterministic — same id → identical chunk (shape field preserved)', () => {
+  // Regression: adding spec.shape to the pushed object must NOT
+  // disturb the v0.68.0 deterministic-invariant test. Same input
+  // → same chunk (incl. shape field).
+  const id = { cx: 5, cz: -3, systemSeed: INITIAL_SYSTEM_SEED };
+  const a = generateChunk(id);
+  const b = generateChunk(id);
+  assert.deepEqual(a, b);
 });
