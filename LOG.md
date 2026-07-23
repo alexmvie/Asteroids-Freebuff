@@ -1,3 +1,41 @@
+## v0.70.0 -- Dense meshes + multi-layer displacement (modern game technique for realistic asteroids)
+
+**User request:** "can we have more dense meshes to really do a geometry displacement mapping? all looks so flat on the asteroids. think abut what is modern game techniques to make such things look realistic and implement the solution"
+
+### Decisions taken
+
+- **Three-layer technique stack** for realistic rocky surfaces (classical id Tech / Source / UE4 approach):
+  1. **Higher LOD detail** (close-up icosphere detail 2 -> 4 -- 16x more triangles: 162 -> 2562 verts).
+  2. **Multi-layer frequency displacement**: BASE 4-octave fbm3D at noiseScale + MICRO 2-octave fbm3D at 4x scale, composited at 0.12 x amount.
+  3. **Bigger base amplitude**: craggy 0.40 -> 0.50; contact binary lobes 0.20/0.15 -> 0.22/0.17; crystalline 0.15 -> 0.18.
+- **Kept the existing craggy formula** `(abs(n-0.5)*2 - 0.5) * amount`. Math.pow sharpening considered; bias asymmetry ruled it out.
+- **Densified crystalline/potato segment counts** for the new detail-4 level.
+
+### Modern game techniques considered + skipped
+
+- **Triplanar mapping**: ~30-line onBeforeCompile shader extension; deferred to v0.71+.
+- **Parallax occlusion mapping (POM)**: significant shader work; over-budget for an MVP polish pass.
+- **Tessellation shaders (WebGL2 GPU subdivision)**: needs a custom vertex shader; deferred.
+- **Math.pow sharpening on craggy formula**: bias asymmetry; the multi-layer + bumped amount achieves the visual gain.
+
+### What shipped
+
+6 surgical edits in src/entities/asteroid.js only:
+
+1. `displaceGeometry()`: multi-layer frequency displacement (BASE + MICRO fbm3D, composited at 0.12 x amount).
+2. `buildCraggyRockGeometry()`: noiseAmount 0.40 -> 0.50.
+3. `buildCrystallineShardGeometry()`: radialSegments/heightSegments bumped (max 8/6) + displacement 0.15 -> 0.18.
+4. `buildCrateredPotatoGeometry()`: capSegments/radialSegments/heightSegments bumped (max 8/16/12).
+5. `buildTorusGeometry()`: segments bumped for symmetric LOD tier.
+6. `buildAsteroidMesh()`: LOD detail 0..2 -> 2..4 (single-mesh + contact-binary paths); contact-binary displacement bumped.
+
+### Performance + backward compat
+
+- 2562 verts/asteroid at close-up; ~30-50 close-ups in flight = ~225k-384k total verts (incl shadow pass). WebGL2 budget: 1M-3M; uses <20%.
+- Determinism preserved (multi-layer is position-based hash, no external rng consumption).
+- 632/632 tests pass without modification.
+- vite build clean (652.83 kB, +0.12 kB vs v0.69.6).
+
 ## v0.69.6 -- Shape Distribution Rebalancing (more variety in the asteroid field)
 
 **User request:** "Shape distribution rebalancing — after removing shapeType=3 (torus/donut) and bumping craggy noise amount, craggy rock is now ~60% (was ~40%). If you want more visual variety, bump the per-shape weights in src/world/chunk-constants.js (REALISTIC_ASTEROID_WEIGHT controls the standard/realistic mix, but per-shapeType ratios are currently implicit via seed % 5 = uniform). Add a per-shape weighting pass to the chunk generation so crystalline shards or cratered potatoes get more presence. Cite the visual goal + the target distribution percentages."

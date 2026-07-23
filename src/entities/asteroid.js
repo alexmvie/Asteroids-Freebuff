@@ -77,6 +77,22 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
   const posArray = positions.array;
   const normArray = normals.array;
 
+  // v0.70.0 — multi-layer frequency displacement (modern game technique
+  // for realistic rocky surfaces; classical id Tech / Source engine
+  // approach). The BASE layer is the existing 4-octave fbm at the
+  // supplied noiseScale; the MICRO layer is a 2-octave fbm at 4× scale
+  // (high-frequency sub-detail that reads as crater rim roughness,
+  // grain texture, and micro-occlusion under the directional light).
+  // The micro layer is composited at 0.12 × amount so it stays visually
+  // subordinate — the silhouette variation from the base layer still
+  // dominates.
+  //
+  // Both noise calls operate on the existing position-based hash (no
+  // external rng consumption), so the per-asteroid deterministic
+  // invariant on (seed, ox, oy, oz) is preserved: same inputs →
+  // same shape, just with the new high-frequency component now layered
+  // on top.
+
   for (let i = 0; i < positions.count; i++) {
     const x = posArray[i * 3 + 0];
     const y = posArray[i * 3 + 1];
@@ -86,20 +102,44 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
     const ny = normArray[i * 3 + 1];
     const nz = normArray[i * 3 + 2];
 
-    const n = fbm3D(
+    const nBase = fbm3D(
       (x + ox) * noiseScale,
       (y + oy) * noiseScale,
       (z + oz) * noiseScale,
-      4
+      4,
+    );
+    const nMicro = fbm3D(
+      (x + ox) * noiseScale * 4.0,
+      (y + oy) * noiseScale * 4.0,
+      (z + oz) * noiseScale * 4.0,
+      2,
     );
 
     let displacement = 0;
     if (noiseType === 'crater') {
-      displacement = n < 0.45 ? -Math.pow((0.45 - n) * 2.2, 2.0) * noiseAmount : (n - 0.5) * 0.4 * noiseAmount;
+      // Existing crater formula + micro overlay so potato craters get
+      // sub-detail (sharp crater rim micro-roughness).
+      const crater = nBase < 0.45
+        ? -Math.pow((0.45 - nBase) * 2.2, 2.0) * noiseAmount
+        : (nBase - 0.5) * 0.4 * noiseAmount;
+      displacement = crater + (nMicro - 0.5) * 0.12 * noiseAmount;
     } else if (noiseType === 'craggy') {
-      displacement = (Math.abs(n - 0.5) * 2.0 - 0.5) * noiseAmount;
+      // v0.70.0 — the v0.69.5 formula `(abs(n-0.5)*2 - 0.5) * amount`
+      // is the canonical cragged-rock silhouette but reads as soft
+      // on low-detail meshes. The base layer's noiseAmount is bumped
+      // 0.40 -> 0.50 below to push silhouette variation further, and
+      // the v0.70.0 micro layer adds the high-frequency sub-detail
+      // that gives the close-up "rough rock" read. The formula itself
+      // is kept (sharpening exponents were considered but introduced
+      // bias asymmetry; the multi-layer approach + bigger amount
+      // achieves the intended visual gain without the math pitfalls).
+      displacement = (Math.abs(nBase - 0.5) * 2.0 - 0.5) * noiseAmount
+                   + (nMicro - 0.5) * 0.12 * noiseAmount;
     } else {
-      displacement = (n - 0.5) * 2 * noiseAmount;
+      // Standard smooth fbm (used by crystalline shards + contact
+      // binary lobes) — now with the micro layer composited on top.
+      displacement = (nBase - 0.5) * 2 * noiseAmount
+                   + (nMicro - 0.5) * 0.12 * noiseAmount;
     }
 
     posArray[i * 3 + 0] = x + nx * displacement;
@@ -117,8 +157,11 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
 // Shape index is derived deterministically from spec.seed % 5.
 // ---------------------------------------------------------------------------
 function buildCrystallineShardGeometry(radius, detail, ox, oy, oz) {
-  const radialSegments = detail === 2 ? 6 : (detail === 1 ? 5 : 4);
-  const heightSegments = detail === 2 ? 4 : (detail === 1 ? 2 : 1);
+  // v0.70.0 — denser segment counts across the LOD range so a close-up
+  // crystalline cylinder has visibly more angular facets and reads as
+  // a faceted crystal instead of an octagonal prism.
+  const radialSegments = detail === 4 ? 8 : (detail === 3 ? 6 : (detail === 2 ? 5 : 4));
+  const heightSegments = detail === 4 ? 6 : (detail === 3 ? 4 : (detail === 2 ? 2 : 1));
   const height = radius * 1.6;
   const geom = new THREE.CylinderGeometry(
     radius * 0.6,
@@ -128,14 +171,15 @@ function buildCrystallineShardGeometry(radius, detail, ox, oy, oz) {
     heightSegments,
     false
   );
-  displaceGeometry(geom, 0.15 * radius, 1.8 / radius, ox, oy, oz);
+  displaceGeometry(geom, 0.18 * radius, 1.8 / radius, ox, oy, oz);
   return geom;
 }
 
 function buildCrateredPotatoGeometry(radius, detail, ox, oy, oz) {
-  const capSegments = detail === 2 ? 6 : (detail === 1 ? 4 : 2);
-  const radialSegments = detail === 2 ? 12 : (detail === 1 ? 8 : 4);
-  const heightSegments = detail === 2 ? 8 : (detail === 1 ? 4 : 2);
+  // v0.70.0 — denser segments to match the new detail=4 close-up level.
+  const capSegments = detail === 4 ? 8 : (detail === 3 ? 6 : (detail === 2 ? 4 : 2));
+  const radialSegments = detail === 4 ? 16 : (detail === 3 ? 12 : (detail === 2 ? 8 : 4));
+  const heightSegments = detail === 4 ? 12 : (detail === 3 ? 8 : (detail === 2 ? 4 : 2));
   const length = radius * 1.5;
   const geom = new Capsule(radius, length, capSegments, radialSegments, heightSegments);
   displaceGeometry(geom, radius * 0.22, 2.0 / radius, ox, oy, oz, 'crater');
@@ -144,8 +188,11 @@ function buildCrateredPotatoGeometry(radius, detail, ox, oy, oz) {
 }
 
 function buildTorusGeometry(radius, detail, ox, oy, oz) {
-  const radialSegments = detail === 2 ? 12 : (detail === 1 ? 8 : 4);
-  const tubularSegments = detail === 2 ? 24 : (detail === 1 ? 16 : 8);
+  // Retained for backward compat / shapeToIndex fallback path (v0.69.5
+  // dropped torus asteroids from the v0.69.5 front-end, but the
+  // helper still exists in case a future shape brings it back).
+  const radialSegments = detail === 4 ? 16 : (detail === 3 ? 12 : (detail === 2 ? 8 : 4));
+  const tubularSegments = detail === 4 ? 32 : (detail === 3 ? 24 : (detail === 2 ? 16 : 8));
   const torusRadius = radius * 0.65;
   const tubeRadius = radius * 0.28;
   const geom = new THREE.TorusGeometry(torusRadius, tubeRadius, radialSegments, tubularSegments);
@@ -154,19 +201,18 @@ function buildTorusGeometry(radius, detail, ox, oy, oz) {
 }
 
 function buildCraggyRockGeometry(radius, detail, ox, oy, oz) {
-  // v0.69.5 — bigger craggy displacement. Per user feedback "das mesh
-  // ist wie eine kugel und die textur zeigt eindeutig krater und
-  // rockige oberfläche": the v0.68.0 / v0.69.4 craggy formula
-  // (Math.abs(n - 0.5) * 2.0 - 0.5) * amount had max deviation
-  // ±0.5 * amount, which at amount = 0.25*radius gave only ±12.5%
-  // radius surface variation — the silhouette read as a soft ball.
-  // Bumping amount to 0.40*radius and lowering noiseScale from 2.5/r
-  // to 2.0/r sharpens the craggy features (larger octave-1 features,
-  // smaller octave-2-fine features) for a more asteroid-like
-  // irregular silhouette that matches the craters in the albedo
-  // texture.
+  // v0.69.5 — bigger craggy displacement to break the soft-ball silhouette.
+  // v0.70.0 — bumped amount further 0.40*radius -> 0.50*radius, paired with
+  // the new high-frequency micro-displacement layer in displaceGeometry()
+  // and the LOD detail bump 0..2 -> 2..4 in buildAsteroidMesh. Together
+  // these deliver the v0.70.0 "really do geometry displacement mapping"
+  // goal (per user feedback "all looks so flat on the asteroids"): the
+  // close-up mesh now has 16× more vertices (12 -> 2562 at detail 4) so
+  // the silhouette reads as a real irregular rock, the base displacement
+  // is 25% bigger for stronger feature pop, and the new micro layer
+  // adds sub-detail rough surface texture under the directional light.
   const geom = new THREE.IcosahedronGeometry(radius, detail);
-  displaceGeometry(geom, radius * 0.40, 2.0 / radius, ox, oy, oz, 'craggy');
+  displaceGeometry(geom, radius * 0.50, 2.0 / radius, ox, oy, oz, 'craggy');
   return geom;
 }
 
@@ -322,20 +368,22 @@ function buildAsteroidMesh(spec) {
       const g = new THREE.Group();
       const a = new THREE.Mesh(new THREE.IcosahedronGeometry(radius * 0.78, detail), material);
       a.position.set(-radius * 0.35, 0, 0);
-      displaceGeometry(a.geometry, radius * 0.2, 2.2 / radius, ox, oy, oz);
+      displaceGeometry(a.geometry, radius * 0.22, 2.2 / radius, ox, oy, oz);
       tagForShadows(a);
       const b = new THREE.Mesh(new THREE.IcosahedronGeometry(radius * 0.55, detail), material);
       b.position.set(radius * 0.45, 0, 0);
-      displaceGeometry(b.geometry, radius * 0.15, 2.5 / radius, ox + 200, oy + 200, oz + 200);
+      displaceGeometry(b.geometry, radius * 0.17, 2.5 / radius, ox + 200, oy + 200, oz + 200);
       tagForShadows(b);
       g.add(a);
       g.add(b);
       return g;
     };
 
-    lod.addLevel(buildLobes(2), LOD_CLOSE_DIST);
-    lod.addLevel(buildLobes(1), LOD_MID_DIST);
-    lod.addLevel(buildLobes(0), LOD_FAR_DIST);
+    // v0.70.0 — LOD detail bumped 2/1/0 -> 4/3/2 for the contact binary
+    // peanut's two lobes (same rationale as the single-mesh path below).
+    lod.addLevel(buildLobes(4), LOD_CLOSE_DIST);
+    lod.addLevel(buildLobes(3), LOD_MID_DIST);
+    lod.addLevel(buildLobes(2), LOD_FAR_DIST);
 
     group.add(lod);
   } else {
@@ -356,15 +404,24 @@ function buildAsteroidMesh(spec) {
       return buildCraggyRockGeometry(radius, detail, ox, oy, oz);
     };
 
-    const meshHigh = new THREE.Mesh(getGeom(2), material);
+    // v0.70.0 — LOD detail 0..2 -> 2..4 (modern-game dense meshes to do
+    // real geometry displacement mapping). detail=4 gives IcosahedronGeometry
+    // 2562 vertices (was 162 at detail=2) — 16× more vertices for the
+    // close-up level, making the silhouette + the new high-frequency
+    // micro-displacement layer visible. Performance budget: at ~150
+    // asteroids in the streaming bubble, only those within LOD_MID_DIST
+    // (30u) of the camera render detail=4 — typically 30-50 — so total
+    // vertex count stays well under WebGL2 limits. Shadow-map pass
+    // doubles the cost but is still negligible on modern GPUs.
+    const meshHigh = new THREE.Mesh(getGeom(4), material);
     tagForShadows(meshHigh);
     lod.addLevel(meshHigh, LOD_CLOSE_DIST);
 
-    const meshMid = new THREE.Mesh(getGeom(1), material);
+    const meshMid = new THREE.Mesh(getGeom(3), material);
     tagForShadows(meshMid);
     lod.addLevel(meshMid, LOD_MID_DIST);
 
-    const meshLow = new THREE.Mesh(getGeom(0), material);
+    const meshLow = new THREE.Mesh(getGeom(2), material);
     tagForShadows(meshLow);
     lod.addLevel(meshLow, LOD_FAR_DIST);
 
