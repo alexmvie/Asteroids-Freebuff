@@ -142,3 +142,116 @@ export function validateShapeWeights(w = SHAPE_WEIGHTS) {
   const sum = Object.values(w).reduce((a, b) => a + b, 0);
   return sum === 100;
 }
+
+// -----------------------------------------------------------------------
+// v0.71.0 — Asteroid size tier SSOT
+// -----------------------------------------------------------------------
+
+/**
+ * v0.71.0 — Asteroid size tier integer enum.
+ *
+ * Used as the type for `AsteroidSpec.size` (see `src/world/types.js`).
+ * Each value indexes into `ASTEROID_RADIUS_BY_SIZE` for the world-space
+ * radius and into `ASTEROID_SIZE_WEIGHTS` for the per-tier distribution
+ * weight in chunk generation.
+ *
+ *   - 0 = LARGE   (radius 8)  — the v0.69.x "big" tier
+ *   - 1 = MEDIUM  (radius 4)  — average asteroid
+ *   - 2 = SMALL   (radius 2)  — fragment splinters
+ *   - 3 = HUGE    (radius 30) — NEW v0.71.0: 10× SHIP_RADIUS, the
+ *                                "really huge" tier the user asked
+ *                                for. Apex tier: doesn't split on
+ *                                destruction (asteroid.js's split()
+ *                                guard `if (spec.size >= 2) return [];`
+ *                                already covers this — size 3 is
+ *                                >= 2 so it never produces children).
+ */
+export const ASTEROID_SIZE = Object.freeze({
+  LARGE: 0,
+  MEDIUM: 1,
+  SMALL: 2,
+  HUGE: 3,
+});
+
+/**
+ * v0.71.0 — Per-tier world-space radius (single source of truth).
+ *
+ * Used by both rendering (`src/entities/asteroid.js` reads
+ * `spec.radius` to size its LOD geometry) and collision
+ * (`src/systems/collision.js` reads `spec.radius` for sphere tests).
+ * Same radius for visual and physics — keeps the sphere-sphere
+ * collision honest against what the player sees.
+ *
+ * HUGE = 30 (= 10 × SHIP_RADIUS = 10 × 3.0) matches the user's
+ * "really huge like 10x ship size" target.
+ *
+ * Fits well inside the streaming bubble: BUBBLE_RADIUS_CHUNKS=3
+ * × CHUNK_SIZE=200 = 600u radius bubble, so a 30u radius (60u
+ * diameter) huge asteroid is <10% of the bubble radius.
+ */
+export const ASTEROID_RADIUS_BY_SIZE = Object.freeze({
+  0: 8,   // LARGE
+  1: 4,   // MEDIUM
+  2: 2,   // SMALL
+  3: 30,  // HUGE
+});
+
+/**
+ * v0.71.0 — Per-tier distribution weights (percentages, must sum to 100).
+ *
+ * TARGET DISTRIBUTION (single-source-of-truth edit point — bumping
+ * these numbers is the only knob to rebalance the size field):
+ *   - small:  35%  (was 30% — bumped from 30% to compensate for
+ *                    the new huge tier stealing share from the
+ *                    small/medium/large bulk)
+ *   - medium: 35%  (was 40%)
+ *   - large:  25%  (was 30%)
+ *   - huge:    5%  (NEW; rare "really huge" tier)
+ *
+ * Visual goal: at ~300 asteroids in the streaming bubble,
+ * 5% huge = ~15 huge. Frequent enough to read as a recurring
+ * visual landmark without crowding the field with monsters.
+ *
+ * Cumulative-distribution sampler lives in `src/world/chunks.js`
+ * (see `pickSize`).
+ */
+export const ASTEROID_SIZE_WEIGHTS = Object.freeze({
+  0: 25,  // LARGE
+  1: 35,  // MEDIUM
+  2: 35,  // SMALL
+  3: 5,   // HUGE
+});
+
+/**
+ * v0.71.0 — Sum-validates `ASTEROID_SIZE_WEIGHTS` (must total 100).
+ * Same fail-fast contract as `validateShapeWeights`.
+ *
+ * @param {Record<number, number>} [w]  Defaults to ASTEROID_SIZE_WEIGHTS.
+ * @returns {boolean}
+ */
+export function validateSizeWeights(w = ASTEROID_SIZE_WEIGHTS) {
+  const sum = Object.values(w).reduce((a, b) => a + b, 0);
+  return sum === 100;
+}
+
+/**
+ * v0.71.0 — Score table (mirrors `SCORE_BY_SIZE` in
+ * `src/systems/collision.js` but lives in the data-model layer as
+ * the SSOT for size-tier scoring values).
+ *
+ *   - 0 = LARGE:  20 pts (classic Asteroids convention)
+ *   - 1 = MEDIUM: 50 pts
+ *   - 2 = SMALL:  100 pts (small = high value, classic Asteroids)
+ *   - 3 = HUGE:   200 pts (NEW: 2× small reward for the rare apex kill;
+ *                       rewards the player for engaging the dangerous
+ *                       tier without trivializing it).
+ *
+ * `SCORE_BY_SIZE` in collision.js re-exports this so existing UI
+ * consumers stay backward-compatible.
+ */
+export const ASTEROID_SCORE_BY_SIZE = Object.freeze({
+  0: 20,   // LARGE
+  1: 50,   // MEDIUM
+  2: 100,  // SMALL
+  3: 200,  // HUGE (v0.71.0)
+});

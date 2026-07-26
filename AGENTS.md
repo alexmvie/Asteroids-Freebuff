@@ -289,15 +289,16 @@ The game is set in **unbounded open space** (not the classic bounded-and-wrapped
 
   Validation: 621/621 tests pass (literal-value tweaks + drop-if-removed-bumpMap don't affect test contracts). `npm run build` clean. Auto-pushed via post-commit hook.
 
+- [x] **v0.71.1 — Ship Hull Texture Integration** — Generated the missing `ship-hull-albedo.png` asset (1024x1024 seamless brushed aluminum panels with grid details/access hatches) and saved to `public/textures/`. Updated `src/entities/ship.js` to load the texture safely (with Node/headless test fallback) and apply it to the body material's `.map` property. All 638 tests pass; build succeeds.
+
 ### ⏳ Next Steps (priority order)
 
-1. **Apply regenerated textures from Nano Banana** — Wire the new `realistic-asteroid.js` component into `src/world/chunks.js` and `src/main.js` so it streams in place of or alongside the standard standard/capsule types once the active codebase modifications are complete.
-2. **Documentation-drift cleanup** — sweep AGENTS.md uncompressed entries; tighten the historical narrative so the project memory is honest + scannable at scale (the v0.20.x–v0.27.x block was the last major fold; make sure older entries match this style).
-3. **Occlusion culling** — skip asteroids hidden behind other geometry. Three.js's built-in `frustumCulled` does the frustum half; this is the "hidden by another object" half (BVH or depth-prepass). Worth it once the streaming field hits hundreds of asteroids.
-4. **Hyperspace stub** — `src/systems/hyperspace.js`: `requestJump(systemId)` no-op seam for Elite expansion.
-5. **Particles + visual polish** — explosions, thrust glow, screen shake, hit effects.
-6. **Powerup audio** — Web Audio API ping when collecting a powerup.
-7. **Final polish** — edge cases, manual smoke test, README clean-up.
+1. **Documentation-drift cleanup** — sweep AGENTS.md uncompressed entries; tighten the historical narrative so the project memory is honest + scannable at scale (the v0.20.x–v0.27.x block was the last major fold; make sure older entries match this style).
+2. **Occlusion culling** — skip asteroids hidden behind other geometry. Three.js's built-in `frustumCulled` does the frustum half; this is the "hidden by another object" half (BVH or depth-prepass). Worth it once the streaming field hits hundreds of asteroids.
+3. **Hyperspace stub** — `src/systems/hyperspace.js`: `requestJump(systemId)` no-op seam for Elite expansion.
+4. **Particles + visual polish** — explosions, thrust glow, screen shake, hit effects.
+5. **Powerup audio** — Web Audio API ping when collecting a powerup.
+6. **Final polish** — edge cases, manual smoke test, README clean-up.
 
 ### ✅ Tools available
 

@@ -66,6 +66,55 @@ function fbm3D(x, y, z, octaves = 4) {
 }
 
 // ---------------------------------------------------------------------------
+// v0.71.0 -- thermal-weathering crevice layer. Models micro-erosion:
+// narrow negative-displacement valleys carved into the asteroid surface
+// at a decorrelated frequency. Position-based-hash (zero rng consumed):
+// per-asteroid (ox, oy, oz) is the only varying input, so the erosion
+// pattern for any (seed, ox, oy, oz) asteroid is fully deterministic.
+//
+// Tunables (SSOT-local; exposed for unit testing):
+//   EROSION_SCALE_RATIO = 7 -- decorrelate from BASE (×1) and MICRO (×4).
+//     7 is prime so its multiples don't align with the powers-of-2 used
+//     by the base/micro fbm frequencies -- guarantees the erosion noise
+//     pattern is independent of the shape-defining frequencies.
+//   EROSION_AMOUNT_RATIO = 0.15 -- crevice amplitude as a fraction of
+//     noiseAmount. 0.15 is small enough that the silhouette variation
+//     from BASE stays the dominant visual signal (the carve "deepens"
+//     existing features rather than reshaping the silhouette), and
+//     large enough that a ~15%-of-radius valley is visible.
+//   EROSION_EXPONENT = 2.0 -- falloff exponent for creviceDepth().
+//     At exponent 2.0, only ~half the surface (where n < 0.5) gets
+//     carved, and the carving is biased toward sharp narrow channels
+//     rather than wide shallow dips. Increase to 3+ for narrower/more
+//     sparse crevices; decrease to 1 for wider/more uniform carving.
+// ---------------------------------------------------------------------------
+const EROSION_SCALE_RATIO = 7;
+const EROSION_AMOUNT_RATIO = 0.15;
+const EROSION_EXPONENT = 2.0;
+
+/**
+ * Pure helper: returns erosion depth ∈ [0, 1] (pre-amount scaling).
+ *   - n <  0.5  -> Math.pow(0.5 - n, exponent)  (valley depth)
+ *   - n >= 0.5  -> 0                                (no carving)
+ *
+ * Exponent=2.0 -> range [0, 0.25]. Exponent=3.0 -> range [0, 0.125]
+ * (narrower, more sparse). Exponent=1.0 -> range [0, 0.5] (uniform).
+ *
+ * Always non-negative, so the carve contributes only a negative-
+ * displacement subtraction at the call site. Exposed for direct
+ * unit testing (range + amplitude pinning).
+ *
+ * @param {number} n           fbm noise value, typically in [0, 1].
+ * @param {number} [exponent]  falloff exponent (default EROSION_EXPONENT=2.0).
+ * @returns {number}           erosion depth ∈ [0, 0.5^exponent]
+ */
+function creviceDepth(n, exponent = EROSION_EXPONENT) {
+  if (!Number.isFinite(n) || n >= 0.5) return 0;
+  if (n <= 0) return Math.pow(0.5, exponent);
+  return Math.pow(0.5 - n, exponent);
+}
+
+// ---------------------------------------------------------------------------
 // Geometry noise displacement. Displaces each vertex along its surface
 // normal by an fbm (or crater/craggy variant) value.
 // ---------------------------------------------------------------------------
@@ -115,6 +164,23 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
       2,
     );
 
+    // v0.71.0 — thermal-weathering EROSION layer (third layer). A
+    // fresh fbm3D call at EROSION_SCALE_RATIO=7 (prime, decorrelated
+    // from BASE=1 and MICRO=4) drives a NEGATIVE-ONLY carve via
+    // creviceDepth(). The carve is always subtracted, never added,
+    // so the BASE silhouette variation stays dominant — only the
+    // surface texture gets deeper narrow channels carved into it.
+    // 2 octaves matches MICRO layer cost; position-based-hash (zero
+    // rng consumption) → per-asteroid deterministic on
+    // (seed, ox, oy, oz).
+    const nErosion = fbm3D(
+      (x + ox) * noiseScale * EROSION_SCALE_RATIO,
+      (y + oy) * noiseScale * EROSION_SCALE_RATIO,
+      (z + oz) * noiseScale * EROSION_SCALE_RATIO,
+      2,
+    );
+    const erosionCarve = creviceDepth(nErosion) * EROSION_AMOUNT_RATIO * noiseAmount;
+
     let displacement = 0;
     if (noiseType === 'crater') {
       // Existing crater formula + micro overlay so potato craters get
@@ -122,7 +188,7 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
       const crater = nBase < 0.45
         ? -Math.pow((0.45 - nBase) * 2.2, 2.0) * noiseAmount
         : (nBase - 0.5) * 0.4 * noiseAmount;
-      displacement = crater + (nMicro - 0.5) * 0.12 * noiseAmount;
+      displacement = crater + (nMicro - 0.5) * 0.12 * noiseAmount - erosionCarve;
     } else if (noiseType === 'craggy') {
       // v0.70.0 — the v0.69.5 formula `(abs(n-0.5)*2 - 0.5) * amount`
       // is the canonical cragged-rock silhouette but reads as soft
@@ -134,12 +200,14 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
       // bias asymmetry; the multi-layer approach + bigger amount
       // achieves the intended visual gain without the math pitfalls).
       displacement = (Math.abs(nBase - 0.5) * 2.0 - 0.5) * noiseAmount
-                   + (nMicro - 0.5) * 0.12 * noiseAmount;
+                   + (nMicro - 0.5) * 0.12 * noiseAmount
+                   - erosionCarve;
     } else {
       // Standard smooth fbm (used by crystalline shards + contact
       // binary lobes) — now with the micro layer composited on top.
       displacement = (nBase - 0.5) * 2 * noiseAmount
-                   + (nMicro - 0.5) * 0.12 * noiseAmount;
+                   + (nMicro - 0.5) * 0.12 * noiseAmount
+                   - erosionCarve;
     }
 
     posArray[i * 3 + 0] = x + nx * displacement;
@@ -549,3 +617,14 @@ export function createAsteroidFromSpec({ spec, scene } = {}) {
     },
   };
 }
+
+// v0.71.0 -- crevice helper + erosion tunables exposed for direct
+// unit testing (range + amplitude pin tests live in
+// tests/asteroid.test.js). These are the SSOT for the erosion layer:
+// if you want to retune visual impact, edit the constants here.
+export {
+  creviceDepth,
+  EROSION_SCALE_RATIO,
+  EROSION_AMOUNT_RATIO,
+  EROSION_EXPONENT,
+};

@@ -312,10 +312,14 @@ test('findShipHit: missing args → -1, no throw', () => {
 
 // ---- scoreForSize / SCORE_BY_SIZE ---------------------------------------
 
-test('SCORE_BY_SIZE: classic Asteroids table (large=20, medium=50, small=100)', () => {
+test('SCORE_BY_SIZE: classic Asteroids table + v0.71.0 HUGE (large=20, medium=50, small=100, huge=200)', () => {
   assert.equal(SCORE_BY_SIZE[0], 20);
   assert.equal(SCORE_BY_SIZE[1], 50);
   assert.equal(SCORE_BY_SIZE[2], 100);
+  // v0.71.0 — new HUGE apex tier. 2× small's reward balances the
+  // rarity (5% distribution) with a meaningful payoff for engaging
+  // the dangerous 10×-ship-size tier.
+  assert.equal(SCORE_BY_SIZE[3], 200);
 });
 
 test('SCORE_BY_SIZE: frozen', () => {
@@ -329,9 +333,16 @@ test('scoreForSize: returns the table value for known sizes', () => {
 });
 
 test('scoreForSize: returns 0 for unknown sizes', () => {
-  assert.equal(scoreForSize(3), 0);
+  // v0.71.0 — size=3 is now a KNOWN tier (HUGE, score 200), so use
+  // truly out-of-range values for the unknown-size check.
+  assert.equal(scoreForSize(4), 0);
   assert.equal(scoreForSize(-1), 0);
   assert.equal(scoreForSize(undefined), 0);
+});
+
+test('scoreForSize: returns 200 for HUGE tier (v0.71.0)', () => {
+  // v0.71.0 — new HUGE apex tier at score 200 (2× small's 100).
+  assert.equal(scoreForSize(3), 200);
 });
 
 // ---- findAsteroidPairs -------------------------------------------------
@@ -425,6 +436,95 @@ test('resolveAsteroidCollision: larger mass barely moves', () => {
   const bigPos = big.getPosition();
   // Big asteroid barely moved
   assert.ok(Math.abs(bigPos.x - bigPosBefore.x) < 1, 'big barely moved');
+});
+
+// ---- v0.71.0 — HUGE tier collision verification ------------------------
+//
+// User explicitly asked: "be sure to have the asteroid to asteroid
+// collision system working" with the new huge 10×-ship-size tier.
+// These tests verify (a) the pair detector finds overlaps involving
+// huge asteroids and (b) the bounce resolver handles the massive
+// mass-ratio correctly (huge barely moves, small gets the kick).
+// The collision code is size-agnostic (radius-only), so these tests
+// are essentially pinning "the existing sphere-sphere collision
+// works for arbitrary radii including the new 30u HUGE tier".
+
+test('findAsteroidPairs: HUGE-vs-TINY overlap is detected (v0.71.0 size variation)', () => {
+  // HUGE r=30 at origin + SMALL r=2 at (10, 0, 0). Centers 10 apart,
+  // sum of radii = 32, so they overlap (10 < 32). The pair detector
+  // must find this pair regardless of the size asymmetry.
+  const asteroids = [
+    fakeAsteroid(0, 0, 0, 30, { x: 0, z: 0 }), // HUGE
+    fakeAsteroid(10, 0, 0, 2, { x: 0, z: 0 }), // SMALL (overlapping the huge)
+    fakeAsteroid(200, 0, 0, 2, { x: 0, z: 0 }), // SMALL (isolated, no pair)
+  ];
+  const pairs = findAsteroidPairs(asteroids);
+  assert.equal(pairs.length, 1, 'should detect the single HUGE-SMALL overlap');
+  assert.equal(pairs[0].i, 0);
+  assert.equal(pairs[0].j, 1);
+});
+
+test('findAsteroidPairs: two HUGE asteroids overlapping detected (v0.71.0)', () => {
+  // Two HUGE asteroids (r=30 each) at (0,0,0) and (10,0,0) overlap
+  // (sum=60 > 10). Same as before but both endpoints are now huge.
+  const asteroids = [
+    fakeAsteroid(0, 0, 0, 30, { x: 0, z: 0 }),
+    fakeAsteroid(10, 0, 0, 30, { x: 0, z: 0 }),
+  ];
+  const pairs = findAsteroidPairs(asteroids);
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].i, 0);
+  assert.equal(pairs[0].j, 1);
+});
+
+test('resolveAsteroidCollision: HUGE absorbs a TINY impact (v0.71.0 mass asymmetry)', () => {
+  // HUGE r=30 (mass=27000) vs TINY r=2 (mass=8). Mass ratio 3375:1.
+  // A TINY moving toward the HUGE should bounce back at ~2x its
+  // original speed (elastic-ish bounce, restitution 0.5) while the
+  // HUGE barely moves (impulse split by mass ratio).
+  const huge = fakeAsteroid(0, 0, 0, 30, { x: 0, z: 0 });
+  const tiny = fakeAsteroid(10, 0, 0, 2, { x: 5, z: 0 }); // moving +X toward huge at origin... wait, away.
+  // Wait, if huge is at origin and tiny at (10,0,0), tiny moving +X
+  // moves AWAY from huge. Set tiny velocity = (-5, 0) for moving
+  // toward huge.
+  tiny.setVelocity(-5, 0);
+  const hugePosBefore = { ...huge.getPosition() };
+  resolveAsteroidCollision(huge, tiny);
+  // HUGE: barely moved (<0.05u — its mass dwarfs the tiny's).
+  assert.ok(
+    Math.abs(huge.getPosition().x - hugePosBefore.x) < 0.1,
+    `huge should barely move, moved ${huge.getPosition().x - hugePosBefore.x}u`,
+  );
+  // TINY: bounced back (now moving +X — away from huge — after collision).
+  assert.ok(tiny.getVelocity().x > 0, `tiny should bounce back (+X), got vx=${tiny.getVelocity().x}`);
+  // Separation: pushed apart so dist >= sum of radii (32).
+  const dist = Math.hypot(
+    tiny.getPosition().x - huge.getPosition().x,
+    tiny.getPosition().z - huge.getPosition().z,
+  );
+  assert.ok(dist >= 32 - 0.01, `huge-tiny should be separated to ≥32u, got ${dist}u`);
+});
+
+test('findShipHit: HUGE asteroid kills the ship on contact (v0.71.0)', () => {
+  // Ship r=3 (v0.42.x), HUGE r=30. Centers 20 apart, sum=33 > 20 →
+  // overlap. findShipHit must return the HUGE's index (the ship dies
+  // on contact with any size of asteroid, the size only changes the
+  // hit sphere size).
+  const ship = { position: { x: 0, y: 0, z: 0 } };
+  const asteroids = [
+    fakeAsteroid(100, 0, 0, 30), // HUGE, far
+    fakeAsteroid(20, 0, 0, 30),  // HUGE, overlapping the ship
+  ];
+  assert.equal(findShipHit({ ship, asteroids }), 1);
+});
+
+test('findShipHit: ship survives close pass to non-overlapping HUGE (v0.71.0)', () => {
+  // Ship r=3, HUGE r=30. Centers 50 apart, sum=33 → no overlap.
+  const ship = { position: { x: 0, y: 0, z: 0 } };
+  const asteroids = [
+    fakeAsteroid(50, 0, 0, 30), // HUGE 50u away from ship
+  ];
+  assert.equal(findShipHit({ ship, asteroids }), -1);
 });
 
 test('resolveAsteroidCollision: non-overlapping does nothing', () => {

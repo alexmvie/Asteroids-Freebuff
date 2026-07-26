@@ -7,6 +7,10 @@ import {
   Color,
   Box3,
   Vector3,
+  TextureLoader,
+  SRGBColorSpace,
+  RepeatWrapping,
+  Texture,
 } from 'three';
 
 import {
@@ -95,11 +99,24 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
   // lower HemisphereLight (0.20), the body's flat-shaded facets now
   // have visible metal-side vs metal-shadow appearance — a hint of
   // an industrial spaceship rather than ceramic plastic.
+  let hullTex;
+  try {
+    const loader = new TextureLoader();
+    hullTex = loader.load('/textures/ship-hull-albedo.png');
+    hullTex.colorSpace = SRGBColorSpace;
+    hullTex.wrapS = RepeatWrapping;
+    hullTex.wrapT = RepeatWrapping;
+  } catch (e) {
+    hullTex = new Texture();
+    hullTex.colorSpace = SRGBColorSpace;
+  }
+
   const bodyMat = new MeshStandardMaterial({
     color: 0x9aa5b8,
     metalness: 0.85,
     roughness: 0.45,
     flatShading: true,
+    map: hullTex,
   });
   const bodyMesh = new Mesh(bodyGeom, bodyMat);
   // v0.68.0 -- body casts a shadow under the sun. also receives

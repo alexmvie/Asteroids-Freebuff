@@ -20,6 +20,9 @@ import {
   SHAPE_TYPES,
   SHAPE_WEIGHTS,
   validateShapeWeights,
+  ASTEROID_RADIUS_BY_SIZE,
+  ASTEROID_SIZE_WEIGHTS,
+  validateSizeWeights,
 } from './constants.js';
 
 // v0.69.6 — fail fast if SHAPE_WEIGHTS is malformed (sum != 100).
@@ -31,6 +34,12 @@ import {
 if (!validateShapeWeights()) {
   const sum = Object.values(SHAPE_WEIGHTS).reduce((a, b) => a + b, 0);
   throw new Error(`SHAPE_WEIGHTS must sum to 100, got ${sum}`);
+}
+
+// v0.71.0 — same fail-fast guard for ASTEROID_SIZE_WEIGHTS.
+if (!validateSizeWeights()) {
+  const sum = Object.values(ASTEROID_SIZE_WEIGHTS).reduce((a, b) => a + b, 0);
+  throw new Error(`ASTEROID_SIZE_WEIGHTS must sum to 100, got ${sum}`);
 }
 
 // v0.69.6 — inverse of SHAPE_TYPES. Maps a named shape to the
@@ -167,27 +176,55 @@ export function chunkHasNebula(id) {
 function lerp(a, b, t) { return a + (b - a) * t; }
 
 /**
- * Map an asteroid size tier to its world-space radius.
- * @param {0|1|2} size
- * @returns {number}
+ * v0.71.0 — Map an asteroid size tier to its world-space radius.
+ * Delegates to the SSOT in `chunk-constants.js`
+ * (`ASTEROID_RADIUS_BY_SIZE`) so the visual + physics + chunk-
+ * generation layers agree on a single number per tier.
+ *
+ * Unknown sizes fall back to MEDIUM (radius 4) defensively — a
+ * future size added to `ASTEROID_SIZE` without a matching radius
+ * row would otherwise produce NaN-radius asteroids that the
+ * collision layer would happily create infinite-overlap pairs for.
+ *
+ * @param {0|1|2|3} size  An AsteroidSize enum value.
+ * @returns {number}      World-space radius in scene units.
  */
 export function sizeRadius(size) {
-  if (size === 0) return 8;  // large
-  if (size === 1) return 4;  // medium
-  return 2;                  // small
+  const r = ASTEROID_RADIUS_BY_SIZE[size];
+  return typeof r === 'number' ? r : 4; // defensive fallback to MEDIUM
 }
 
 /**
- * Uniform random size pick. (Could later be density-biased by passing
- * `density` in from the caller; kept simple for MVP.)
- * @param {() => number} rng
- * @returns {0|1|2}
+ * v0.71.0 — Cumulative-distribution sampler over `ASTEROID_SIZE_WEIGHTS`.
+ * Pure function of `rng()`. Returns one of the 4 AsteroidSize
+ * integer values (0..3), preserving the chunk's deterministic
+ * sequence (same (cx, cz, systemSeed) → same size stream).
+ *
+ * Algorithm: draw r ~ [0, 100), walk ASTEROID_SIZE_WEIGHTS in
+ * declaration order accumulating the cumulative sum, return the
+ * first bucket whose cumulative exceeds r. Object.entries on a
+ * frozen plain object preserves insertion order — keys are
+ * '0','1','2','3' (stringified) but we coerce back to Number for
+ * the return value.
+ *
+ * Current target distribution: LARGE 25%, MEDIUM 35%, SMALL 35%,
+ * HUGE 5% (see ASTEROID_SIZE_WEIGHTS JSDoc).
+ *
+ * @param {() => number} rng   Returns [0, 1).
+ * @returns {0|1|2|3}          An AsteroidSize enum value.
  */
 function pickSize(rng) {
-  const r = rng();
-  if (r < 0.3) return 0; // large
-  if (r < 0.7) return 1; // medium
-  return 2;              // small
+  const r = rng() * 100; // [0, 100)
+  let cum = 0;
+  for (const [k, w] of Object.entries(ASTEROID_SIZE_WEIGHTS)) {
+    cum += w;
+    if (r < cum) return Number(k);
+  }
+  // Defensive: r === 100.0 fallback (mulberry32 returns [0, 1) so
+  // this should never trigger in production). Return the last
+  // declared tier.
+  const keys = Object.keys(ASTEROID_SIZE_WEIGHTS);
+  return Number(keys[keys.length - 1]);
 }
 
 /**

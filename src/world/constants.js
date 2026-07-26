@@ -37,6 +37,17 @@ export {
   SHAPE_TYPES,
   SHAPE_WEIGHTS,
   validateShapeWeights,
+  // v0.71.1 — size-tier SSOT (same re-export pattern as the SHAPE_*
+  // block above). `src/world/chunks.js`'s `sizeRadius()` /
+  // `pickSize()` and the `validateSizeWeights()` guard all import
+  // from './constants.js' for backward-compat with the SHIM pattern;
+  // those branches only resolved when this shim gained these
+  // re-exports, fixing the `SyntaxError: does not provide an export
+  // named 'ASTEROID_RADIUS_BY_SIZE'` that broke tests/world.test.js,
+  // tests/asteroid.test.js, and tests/powerup-system.test.js.
+  ASTEROID_RADIUS_BY_SIZE,
+  ASTEROID_SIZE_WEIGHTS,
+  validateSizeWeights,
 } from './chunk-constants.js';
 
 export {

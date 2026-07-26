@@ -18,10 +18,11 @@
 
 /**
  * Asteroid size tier.
- *   0 = large
- *   1 = medium
- *   2 = small
- * @typedef {0|1|2} AsteroidSize
+ *   0 = large  (radius 8)
+ *   1 = medium (radius 4)
+ *   2 = small  (radius 2)
+ *   3 = huge   (radius 30, v0.71.0 — 10× SHIP_RADIUS)
+ * @typedef {0|1|2|3} AsteroidSize
  */
 
 /**

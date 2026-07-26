@@ -29,11 +29,26 @@ export const BULLET_RADIUS = 0.15;
  * without registering hits. */
 export const SHIP_RADIUS = 3.0;
 
-/** Score table by asteroid size (classic Asteroids convention). */
+/**
+ * Score table by asteroid size (classic Asteroids convention + the
+ * v0.71.0 HUGE apex tier). Mirrors `ASTEROID_SCORE_BY_SIZE` in
+ * `src/world/chunk-constants.js` — kept in sync manually so the
+ * collision layer (UI/feedback concern) doesn't have to import
+ * from the world data-model layer for what is essentially a
+ * presentation table.
+ *
+ *   - 0 = large:  20 pts
+ *   - 1 = medium: 50 pts
+ *   - 2 = small:  100 pts
+ *   - 3 = huge:   200 pts  (v0.71.0 — 2× small reward for the rare
+ *                           apex kill; balances the rarity with
+ *                           a meaningful payoff)
+ */
 export const SCORE_BY_SIZE = Object.freeze({
-  0: 20, // large
-  1: 50, // medium
-  2: 100, // small
+  0: 20,   // large
+  1: 50,   // medium
+  2: 100,  // small
+  3: 200,  // huge (v0.71.0)
 });
 
 // ---- Pure geometry ------------------------------------------------------

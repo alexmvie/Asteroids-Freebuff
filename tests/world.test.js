@@ -223,13 +223,18 @@ test('generateChunk: asteroid positions are inside the chunk', () => {
   }
 });
 
-test('generateChunk: asteroid sizes are valid tiers', () => {
+test('generateChunk: asteroid sizes are valid tiers (v0.71.0 — added HUGE tier 3)', () => {
   for (let i = 0; i < 5; i++) {
     const chunk = generateChunk({ cx: i, cz: i, systemSeed: INITIAL_SYSTEM_SEED });
     for (const a of chunk.asteroids) {
-      assert.ok(a.size === 0 || a.size === 1 || a.size === 2, `bad size: ${a.size}`);
+      // v0.71.0 — size tier set extended from [0, 1, 2] to [0, 1, 2, 3]
+      // to add the HUGE tier (radius 30, 10× SHIP_RADIUS).
+      assert.ok(a.size >= 0 && a.size <= 3, `bad size: ${a.size}`);
       const r = a.radius;
-      assert.ok(r === 8 || r === 4 || r === 2, `bad radius: ${r}`);
+      assert.ok(r === 8 || r === 4 || r === 2 || r === 30, `bad radius: ${r}`);
+      // Radius must match sizeRadius(size) for that tier.
+      const expectedR = { 0: 8, 1: 4, 2: 2, 3: 30 }[a.size];
+      assert.equal(r, expectedR, `radius-size mismatch for size ${a.size}: r=${r}, expected ${expectedR}`);
     }
   }
 });
