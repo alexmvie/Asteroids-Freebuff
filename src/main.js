@@ -53,6 +53,7 @@ import { createPirateTexture, applyPirateTexture } from './systems/pirate-textur
 import { createParticleSystem } from './systems/particles.js';
 import { createCaptureMarkers } from './systems/capture-markers.js';
 import { createAiFlightDebug } from './systems/ai-flight-debug.js';
+import { createShowcase } from './systems/showcase.js';
 
 // ---- Radar radius (v0.59.0 + v0.62.0) -----------------------------------
 // Multiplier on the streaming bubble radius (= CHUNK_SIZE ×
@@ -160,6 +161,28 @@ const {
   updateLighting,
 } = createScene();
 const clock = new Clock();
+
+// ---- v0.72.0 — Object-Viewer showcase mode ------------------------------
+// A second, game-free demo mode that reuses the EXACT same rendering
+// setup (same scene, camera, sun, nebula, starfield, shadow map, ACES
+// tone mapping) but runs no game logic: every 3D object the game can
+// produce (5 asteroid shapes × 5 textures, player ship, pirate ship,
+// 6 power-ups) is shown one at a time on a turntable, navigated with
+// the arrow keys — like a character-select screen. Activation: F1 at
+// runtime, or `?showcase` in the URL for the screenshot/iteration
+// loop. `window.__showcase` exposes the automation API. See
+// src/systems/showcase.js.
+const showcase = createShowcase({ scene, camera, nebula, updateLighting });
+if (typeof window !== 'undefined') {
+  window.__showcase = showcase;
+  // URL boot: `?showcase` starts the page directly in the object viewer
+  // (no game). Used by the visual iteration loop to screenshot objects.
+  try {
+    if (new URLSearchParams(window.location.search).has('showcase')) {
+      showcase.activate();
+    }
+  } catch { /* SSR */ }
+}
 
 // ---- NEBULA_DEBUG runtime toggle ---------------------------------------
 // The default is the compile-time constant NEBULA_DEBUG_DEFAULT
@@ -1173,6 +1196,15 @@ function countSceneGeometry(scene) {
 }
 
 function tick(dt) {
+  // v0.72.0 — showcase mode short-circuits the entire game tick: no
+  // input, no ship physics, no streaming, no collisions, no AI. Only
+  // the showcase's own turntable/nebula/lighting update + render.
+  if (showcase.isActive()) {
+    showcase.update(dt);
+    renderer.render(scene, camera);
+    return;
+  }
+
   input.update();
   ship.update(dt);
   playerBullets.update(dt);

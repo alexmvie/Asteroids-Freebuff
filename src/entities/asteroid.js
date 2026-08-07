@@ -597,6 +597,23 @@ function getRealisticBump(idx) {
   return tex;
 }
 
+// v0.72.0 — per-texture-set albedo correction. The Antigravity albedo
+// sets were generated brighter + cooler than real asteroids (measured
+// avg luminance: set1=33, set2=104, set3=44, set4=54, set5=72). NASA
+// reference albedos: C-type (carbonaceous, set1) 0.03-0.10 (~8-25),
+// S-type (stony/basalt/ice, sets 2-4) 0.10-0.25 (~25-64), M-type
+// (nickel-iron, set5) ~0.10-0.20. The material `color` multiplies the
+// albedo map, so we can darken each set toward its physical target AND
+// warm the nickel-iron set (its blue-gray cast reads as unphysical —
+// real M-types are neutral gray). Indexed by textureIdx (1..5).
+const ALBEDO_TINT_BY_SET = Object.freeze({
+  1: 0x8a8a80, // carbonaceous: dark warm charcoal (was 33 -> target ~18)
+  2: 0x56564e, // stony: darkest — measured 104 is way over S-type target
+  3: 0x7a7a6e, // basalt: slight darken + warm
+  4: 0x6e6e68, // ice-rock: slight darken
+  5: 0x6f6a64, // nickel-iron: darken + remove blue cast (neutral-warm gray)
+});
+
 function createAsteroidMaterial(idx) {
   // v0.69.5 — matte regolith for vacuum-exposed asteroids. Per user
   // feedback "die asteroiden sollten nicht glänzen" + "alle objekte
@@ -621,12 +638,19 @@ function createAsteroidMaterial(idx) {
   //     idx=1..5 = 20 cached textures, of which 4 (=1 per set) are
   //     now freed).
   return new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+    // v0.72.0 — per-set albedo tint (see ALBEDO_TINT_BY_SET above).
+    color: ALBEDO_TINT_BY_SET[idx] ?? 0xffffff,
     metalness: 0,
     roughness: 0.95,
     flatShading: true,
     map: getRealisticAlbedo(idx),
     normalMap: getRealisticNormal(idx),
+    // v0.72.0 — normalScale 1.5x. The Antigravity normal maps are weak
+    // (set 2 measured meanB=167 vs ~230 for a proper tangent-space map),
+    // so the surface reads as smooth plastic. Boosting the normal scale
+    // makes the regolith grain + crater rim relief visible under the
+    // directional sun without re-rolling the textures.
+    normalScale: new THREE.Vector2(1.5, 1.5),
     roughnessMap: getRealisticRoughness(idx),
   });
 }

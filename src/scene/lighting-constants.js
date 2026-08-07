@@ -155,7 +155,13 @@ export const SUN_CORONA_COLOR = 0xffeaa0;
 /**
  * HemisphereLight sky color (read from the +Y half).
  */
-export const HEMISPHERE_SKY_COLOR = 0x4a6a9e;
+// v0.72.0 — de-blued hemisphere sky. Was 0x4a6a9e (cold blue): the blue
+// fill read onto every asteroid shadow side as an unphysical cyan aura
+// (NASA photos of Bennu/Ryugu show pitch-black shadow sides — the only
+// light in a vacuum comes from the sun + faint warm interplanetary dust
+// scattering). Warm dark gray keeps the shadow side near-black while
+// still lifting it off pure black for readability.
+export const HEMISPHERE_SKY_COLOR = 0x3a3f4a;
 
 /**
  * HemisphereLight ground color (read from the -Y half).
