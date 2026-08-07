@@ -262,6 +262,10 @@ canvas {
   flex-wrap: wrap;       /* v0.69.0: cards wrap on narrow viewports */
   justify-content: center;
   gap: var(--space-2);
+  /* v0.72.3 — keep the buff rail out of the debug (left, 220px) and
+     tuners (right, 340px) columns that now also start at top: 64px:
+     the centered rail can never reach either column's inner edge. */
+  max-width: calc(100vw - 600px);
   pointer-events: none;
   z-index: var(--z-hud);
   /* v0.69.0: hosts `.hud__buff-card` (rich SVG+bar card system). The
@@ -2052,10 +2056,14 @@ canvas {
 
 .debug-column {
   position: fixed;
-  top: var(--space-3);
+  /* v0.72.3 — hang BELOW the HUD top bar (score / energy live at
+     top:0..~59px) so the column toggle no longer overlaps the score.
+     The buffs rail also starts at 64px, so both sit on the same
+     horizontal line and never collide with the top bar. */
+  top: 64px;
   left: var(--space-3);
   width: 220px;
-  max-height: calc(100vh - var(--space-3) - var(--space-3));
+  max-height: calc(100vh - 64px - var(--space-3));
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
@@ -2188,10 +2196,14 @@ canvas {
 
 .ai-tuners-column {
   position: fixed;
-  top: var(--space-3);
+  /* v0.72.3 — hang BELOW the HUD top bar (the energy HUD lives at
+     top:0..~59px on the right) so the column toggle no longer
+     overlaps it. Same 64px line as the buffs rail + the debug
+     column on the left. */
+  top: 64px;
   right: var(--space-3);
   width: 340px;
-  max-height: calc(100vh - var(--space-3) - var(--space-3));
+  max-height: calc(100vh - 64px - var(--space-3));
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
@@ -2233,12 +2245,10 @@ canvas {
 }
 
 .ai-tuners-column__body {
-  /* Hang the panel below the HUD top bar (~49px tall: top:0 + padding:16px
-     + content:27px + padding-bottom:16px) so the expanded panel doesn't
-     cover the energy HUD on the right side of the top bar. The toggle
-     itself sits ABOVE this margin so the collapsed "small square" lands
-     at the very top-right of the screen. */
-  margin-top: var(--space-5);
+  /* v0.72.3 — the whole column now hangs below the HUD top bar
+     (top: 64px on the column), so the old margin-top: 24px is
+     reduced to a small breathing gap. */
+  margin-top: var(--space-2);
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
@@ -2306,13 +2316,18 @@ canvas {
    so it never intercepts clicks on the canvas or any UI. The chip
    is purely informational, never actionable, hence `aria-hidden=true`
    in the HTML (set by src/main.js and the index.html container).
+
+   v0.72.3 — the rule moved from `top: var(--space-3); left: 50%`
+   (which put the chip in the TOP-CENTER, contradicting this docblock
+   and colliding with the HUD's top bar) to the documented bottom-
+   right corner. Bottom-center is reserved for the demo/restart
+   message + the showcase label; bottom-left for the view toggle.
    ============================================================================ */
 
 .game-version {
   position: fixed;
-  top: var(--space-3);
-  left: 50%;
-  transform: translateX(-50%);
+  bottom: var(--space-3);
+  right: var(--space-3);
   z-index: var(--z-hud);
   font-family: var(--font-family);
   text-align: center;
@@ -2530,13 +2545,18 @@ canvas {
  * The character-select-style HUD for the game-free showcase mode. Sits at
  * the bottom center, above the debug HUD (z-hud). Labels the current
  * object + texture variant and lists the navigation keys.
+ *
+ * v0.72.3 — while the showcase is active, `document.body` carries
+ * `showcase-active`; the game HUD (score / energy / buffs) and the
+ * state message are hidden so nothing overlaps the object-viewer
+ * label (see the body.showcase-active rules at the end of this block).
  * ------------------------------------------------------------------------- */
 .showcase-overlay {
   position: fixed;
   bottom: var(--space-5, 20px);
   left: 50%;
   transform: translateX(-50%);
-  z-index: var(--z-hud, 100);
+  z-index: var(--z-overlay, 11);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2567,4 +2587,77 @@ canvas {
 }
 .showcase-overlay__nav span {
   white-space: nowrap;
+}
+
+/* ============================================================================
+   Block: view-toggle (v0.72.3 — game ↔ object-viewer switch)
+   ----------------------------------------------------------------------------
+   The visible button that toggles between the game (DEMO/PLAYING) and
+   the object-viewer showcase — same action as the F1 key. Sits in the
+   bottom-left corner (the only corner not claimed by the HUD top bar,
+   the debug/tuners columns, the bottom-center messages or the bottom-
+   right version chip). The label + pressed state flip while the
+   showcase is active (driven by main.js from the showcase:active /
+   showcase:inactive events).
+   ============================================================================ */
+.view-toggle {
+  position: fixed;
+  bottom: var(--space-3);
+  left: var(--space-3);
+  z-index: var(--z-hud);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-md);
+  color: var(--color-primary);
+  font-family: var(--font-family);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base),
+    box-shadow var(--transition-base);
+}
+.view-toggle:hover {
+  background: var(--color-bg-tint-primary-soft);
+  border-color: var(--color-primary-base);
+  color: var(--color-fg);
+}
+.view-toggle:active {
+  transform: translateY(1px);
+}
+/* Active state: the object viewer is showing — the button reads as the
+   way back ("EXIT OBJECT VIEW") and glows to be findable. */
+.view-toggle--active {
+  background: var(--color-bg-tint-primary-bold);
+  border-color: var(--color-primary-bright);
+  color: var(--color-fg-on-primary);
+  box-shadow: 0 0 var(--space-3) var(--color-primary-glow);
+}
+.view-toggle--active:hover {
+  background: var(--color-bg-tint-primary-bright);
+  color: var(--color-fg-on-primary);
+}
+
+/* ---------------------------------------------------------------------------
+   v0.72.3 — Showcase-active game-HUD hiding.
+   While the object viewer is active, the game's DOM overlays that would
+   collide with the showcase label (bottom center) and are meaningless in
+   the viewer (score / energy / buffs / state message) are hidden. The
+   debug + tuners columns and the version chip stay (dev tools / build
+   info are useful in both modes).
+   ------------------------------------------------------------------------- */
+body.showcase-active .hud,
+body.showcase-active .hud__buffs,
+body.showcase-active .hud-message {
+  display: none;
 }

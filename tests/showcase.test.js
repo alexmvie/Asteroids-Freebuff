@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { createShowcase } from '../src/systems/showcase.js';
+import { createShowcase, orbitCameraPosition } from '../src/systems/showcase.js';
 import { createStarfield } from '../src/systems/starfield.js';
 import { createNebulaBackground } from '../src/systems/nebula-background.js';
 import { createSpaceLighting } from '../src/systems/space-lighting.js';
@@ -129,6 +129,67 @@ test('Showcase: activate/deactivate without camera/nebula does not throw', () =>
   assert.doesNotThrow(() => showcase.update(0.016));
   assert.doesNotThrow(() => showcase.deactivate());
   assert.equal(showcase.isActive(), false);
+});
+
+// ---------------------------------------------------------------------------
+// v0.72.3 — Orbit camera + body-class + view-toggle contracts.
+// ---------------------------------------------------------------------------
+
+test('Showcase orbit: orbitCameraPosition math (pure helper)', () => {
+  // theta = 0 → camera on +Z axis at distance dist.
+  const p0 = orbitCameraPosition(0, 0, 10);
+  assert.deepEqual(p0, { x: 0, y: 0, z: 10 });
+  // theta = PI/2 → camera on +X axis.
+  const p90 = orbitCameraPosition(Math.PI / 2, 0, 10);
+  assert.ok(Math.abs(p90.x - 10) < 1e-9 && Math.abs(p90.z) < 1e-9, 'azimuth rotates around Y');
+  // phi = PI/2 → camera straight above (top-down).
+  const top = orbitCameraPosition(0, Math.PI / 2, 10);
+  assert.ok(Math.abs(top.y - 10) < 1e-9 && Math.abs(top.z) < 1e-9, 'elevation lifts the camera');
+  // Radius is preserved in all directions.
+  const r = (p) => Math.hypot(p.x, p.y, p.z);
+  assert.ok(Math.abs(r(p0) - 10) < 1e-9);
+  assert.ok(Math.abs(r(orbitCameraPosition(1.3, 0.7, 24)) - 24) < 1e-9);
+  // Target offset shifts the orbit center.
+  const off = orbitCameraPosition(0, 0, 10, { x: 5, y: 0, z: 0 });
+  assert.deepEqual(off, { x: 5, y: 0, z: 10 });
+});
+
+test('Showcase orbit: selecting an object frames the camera at the entry distance', () => {
+  const { showcase, camera } = makeHarness();
+  showcase.activate();
+  showcase.setIndex(0); // spinning top: dist 24, height 5
+  const d = Math.hypot(camera.position.x, camera.position.y, camera.position.z);
+  assert.ok(Math.abs(d - 24) < 0.01, `camera at entry dist (got ${d})`);
+  assert.ok(camera.position.y > 3 && camera.position.y < 7, `camera lifted (y=${camera.position.y})`);
+  showcase.deactivate();
+});
+
+test('Showcase: activate adds / deactivate removes the body showcase-active class', () => {
+  const adds = [];
+  const removes = [];
+  const fakeBody = {
+    classList: { add: (c) => adds.push(c), remove: (c) => removes.push(c) },
+    appendChild: () => {},
+  };
+  const realDoc = globalThis.document;
+  globalThis.document = {
+    body: fakeBody,
+    // No canvas → orbit controls skip their listeners; no overlay DOM.
+    querySelector: () => null,
+    createElement: () => ({
+      className: '', style: {}, innerHTML: '', textContent: '',
+      querySelector: () => null, appendChild: () => {},
+    }),
+  };
+  try {
+    const { showcase } = makeHarness();
+    showcase.activate();
+    assert.ok(adds.includes('showcase-active'), 'body tagged on activate');
+    showcase.deactivate();
+    assert.ok(removes.includes('showcase-active'), 'body untagged on deactivate');
+  } finally {
+    globalThis.document = realDoc;
+  }
 });
 
 test('Showcase: requires scene and camera', () => {

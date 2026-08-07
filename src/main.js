@@ -172,7 +172,7 @@ const clock = new Clock();
 // runtime, or `?showcase` in the URL for the screenshot/iteration
 // loop. `window.__showcase` exposes the automation API. See
 // src/systems/showcase.js.
-const showcase = createShowcase({ scene, camera, nebula, updateLighting });
+const showcase = createShowcase({ scene, camera, nebula, updateLighting, canvas: renderer.domElement });
 if (typeof window !== 'undefined') {
   window.__showcase = showcase;
   // URL boot: `?showcase` starts the page directly in the object viewer
@@ -182,6 +182,25 @@ if (typeof window !== 'undefined') {
       showcase.activate();
     }
   } catch { /* SSR */ }
+
+  // v0.72.3 — view-toggle button (bottom-left): the visible clickable
+  // control for the game ↔ object-viewer switch (same action as F1).
+  // The label flips while the showcase is active, driven by the same
+  // showcase:active / showcase:inactive events the automation loop
+  // uses. The initial state is seeded explicitly because a `?showcase`
+  // URL boot fires showcase:active BEFORE this listener is registered.
+  const viewToggle = document.getElementById('view-toggle');
+  if (viewToggle) {
+    const setViewToggle = (isShowcase) => {
+      viewToggle.textContent = isShowcase ? 'EXIT OBJECT VIEW' : 'OBJECT VIEW';
+      viewToggle.classList.toggle('view-toggle--active', isShowcase);
+      viewToggle.setAttribute('aria-pressed', String(isShowcase));
+    };
+    viewToggle.addEventListener('click', () => showcase.toggle());
+    window.addEventListener('showcase:active', () => setViewToggle(true));
+    window.addEventListener('showcase:inactive', () => setViewToggle(false));
+    setViewToggle(showcase.isActive());
+  }
 }
 
 // ---- NEBULA_DEBUG runtime toggle ---------------------------------------

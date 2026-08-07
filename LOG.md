@@ -1,3 +1,24 @@
+## v0.72.3 -- View toggle button + orbit camera + overlay order + watertight geometry
+
+**User request:** (1) a visible button to toggle demo/game ↔ object view, (2) the object view needs camera rotation, (3) the overlays overlap — bring order, (4) some asteroids have totally open triangles — every object must be watertight.
+
+### Watertight geometry (the "open triangles" fix)
+
+- **Root cause:** `displaceGeometry` displaced vertices ALONG THEIR NORMALS. On non-indexed icospheres (spinning top, elongated potato, craggy rock, rubble-pile lobes) each vertex copy carries a DIFFERENT face normal → the copies of one pre-noise position drifted apart → the surface tore (measured **1500 open boundary edges** on a detail-4 spinning top). Fix: displace along the unit **RADIAL** direction — identical for every coincident copy → watertight by construction.
+- **Capsule seam:** the indexed capsule was closed but its UV-seam wrap column landed ~2e-16 off the base column (theta=2π float drift), splitting open once displaced (28→56 edges). `_build` now copies the base position bit-exactly onto the wrap, before `setAttribute`.
+- **THREE.ConeGeometry is not watertight** (radiusTop=0 → stack of coincident tip copies + degenerate cap fan). New `src/geometry/watertight-cone.js` (`buildWatertightCone`): 1 tip + 1 base center + shared rim ring, winding verified (sides outward, base −Y). Used by ship body (4-side pyramid) + engine glow + powerup `cone` fallback. Powerup `capsule` shape swapped from THREE.CapsuleGeometry (non-indexed, 16 degenerate seam tris) to our `Capsule` class.
+- **Contract:** `tests/watertight.test.js` — every asteroid shape × LOD level, ship (body/wings/glow), and all 6 power-up bodies are watertight: 0 boundary edges, 0 odd-shared (non-manifold) edges, 0 degenerate triangles, no NaN, after position-dedupe with a relative epsilon (absorbs sub-float seam drift). Decorative 2D/additive FX (powerup halo ring + beacon) are explicitly tagged `userData.decorativeFx` and exempt by design. Measured: 24/24 asteroid meshes watertight (was 24 torn).
+
+### View toggle + orbit + overlay order
+
+- **Toggle button** `#view-toggle` (bottom-left): "OBJECT VIEW" ↔ "EXIT OBJECT VIEW", same action as F1, state driven by the showcase:active/inactive events (label, `--active` glow, aria-pressed). Seeded for `?showcase` URL boots.
+- **Orbit camera** in the showcase: drag on the renderer canvas rotates (azimuth/elevation), wheel zooms (3..400u), left-button only, listeners attached/detached with the mode. Pure helper `orbitCameraPosition(theta, phi, dist, target)` exported + unit-tested; framing resets per object; `getCameraPosition`/`getOrbit` on `window.__showcase` for automation. Canvas is passed explicitly (`renderer.domElement`) — the AI-debug radar canvas precedes the renderer's in the DOM.
+- **Overlay order** (no more overlaps, verified programmatically in both modes): debug + tuners columns moved below the HUD top bar (top: 64px — they previously overlapped score/energy); version chip moved from top-center to its documented bottom-right home; buffs rail constrained (`max-width: calc(100vw - 600px)`) so it can't reach the columns; while the showcase is active, `body.showcase-active` hides the game HUD + message (they collided with the showcase label at bottom-center). Layout now: top bar score/energy · top-left debug · top-right tuners · bottom-left toggle · bottom-center messages · bottom-right version.
+
+### Validation
+
+688/688 tests (+7 watertight, +3 showcase orbit/body-class), vite build clean, browser-verified: toggle round-trip, orbit drag (θ −0.96, φ 0.21→1.01), wheel zoom (24→12), zero overlay overlaps in showcase mode.
+
 ## v0.72.2 -- NormalMap A/B probe (2.0 vs 1.5): no measurable gain, 1.5 stays
 
 **User request (implicit):** continue the realism iteration loop until the asteroids look right; keep improving geometry/lighting/engine.

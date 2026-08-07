@@ -19,13 +19,21 @@ import { SHAPE_TYPES } from '../world/chunk-constants.js';
 // Controls (while active):
 //   → / ←      next / previous object
 //   ↑ / ↓      next / previous texture variant (asteroids only)
+//   drag        orbit the camera around the object (v0.72.3)
+//   wheel       zoom in / out (v0.72.3)
 //   F1 / Esc   leave the showcase, return to the game
 //
-// Activation: F1 toggles at runtime; `?showcase` in the URL boots
-// straight into the mode (used by the screenshot/iteration loop). The
-// automation handle `window.__showcase` exposes { next, prev, texNext,
-// texPrev, getLabel, getIndex, getCount, isActive, activate, deactivate }
-// so headless scripts can walk every object and capture screenshots.
+// Activation: F1 toggles at runtime; the `#view-toggle` HUD button
+// calls the same toggle; `?showcase` in the URL boots straight into
+// the mode (used by the screenshot/iteration loop). The automation
+// handle `window.__showcase` exposes { next, prev, texNext, texPrev,
+// getLabel, getIndex, getCount, isActive, activate, deactivate } so
+// headless scripts can walk every object and capture screenshots.
+//
+// While active, `document.body` carries the class `showcase-active`
+// so CSS can hide the game HUD (score/energy/message) that would
+// otherwise overlap the object-viewer label at the bottom of the
+// screen.
 //
 // Isolation strategy: when active, every scene mesh that is NOT marked
 // `userData.showcaseKeep` (sun/corona/nebula/lights/starfield) and NOT a
@@ -44,6 +52,45 @@ const ASTEROID_SHAPE_ORDER = [
 ];
 
 const POWERUP_TYPE_ORDER = ['shield', 'speed', 'energy', 'credits', 'hull', 'weapon'];
+
+// ---------------------------------------------------------------------------
+// v0.72.3 — Orbit camera. The object sits at the origin on the turntable;
+// the camera orbits it in spherical coordinates (theta = azimuth, phi =
+// elevation, dist = radius). Pure math is in `orbitCameraPosition`
+// (exported for unit tests); the drag/wheel listeners just mutate the
+// state and re-apply.
+// ---------------------------------------------------------------------------
+const ORBIT_PHI_MIN = 0.05;           // don't dive below the play plane
+const ORBIT_PHI_MAX = Math.PI / 2 - 0.05; // don't look straight down
+const ORBIT_DIST_MIN = 3;
+const ORBIT_DIST_MAX = 400;
+const ORBIT_DRAG_SPEED = 0.008;       // radians per pixel
+const ORBIT_WHEEL_SPEED = 0.001;
+
+/**
+ * Pure spherical-orbit math: camera position around a target point.
+ * theta = azimuth (rad), phi = elevation (rad), dist = radius.
+ * phi = 0 → camera at the object's height (horizon view); positive
+ * phi → camera rises (top-down-ish at PI/2).
+ *
+ * @param {number} theta
+ * @param {number} phi
+ * @param {number} dist
+ * @param {{x?:number,y?:number,z?:number}} [target]
+ * @returns {{x:number,y:number,z:number}}
+ */
+export function orbitCameraPosition(theta, phi, dist, target = { x: 0, y: 0, z: 0 }) {
+  const cosPhi = Math.cos(phi);
+  return {
+    x: target.x + dist * cosPhi * Math.sin(theta),
+    y: target.y + dist * Math.sin(phi),
+    z: target.z + dist * cosPhi * Math.cos(theta),
+  };
+}
+
+function clampOrbit(v, lo, hi) {
+  return Math.min(hi, Math.max(lo, v));
+}
 
 // Deterministic per (shape, texture) seed so the SAME combo always shows
 // the SAME geometry across reloads (screenshot-comparable). The texture
@@ -74,9 +121,11 @@ const SHAPE_LABELS = {
  *   nebula: { update: (camera: unknown, dt: number) => void },
  *   updateLighting: (dt: number, pos: {x:number,y:number,z:number}) => void,
  *   canvasRoot?: HTMLElement | null,
+ *   canvas?: HTMLCanvasElement | null,  // v0.72.3 — orbit-drag target;
+ *                                       // defaults to the first <canvas>.
  * }} opts
  */
-export function createShowcase({ scene, camera, nebula, updateLighting, canvasRoot = null } = {}) {
+export function createShowcase({ scene, camera, nebula, updateLighting, canvasRoot = null, canvas = null } = {}) {
   if (!scene || !camera) throw new Error('createShowcase: `scene` and `camera` are required');
 
   let active = false;
@@ -84,6 +133,72 @@ export function createShowcase({ scene, camera, nebula, updateLighting, canvasRo
   let textureIndex = 1; // 1..5 (asteroid texture sets)
   let current = null; // { dispose, update(dt), root, label }
   const visibilityBackup = new Map(); // Object3D -> original visible
+
+  // v0.72.3 — orbit state (camera around the origin turntable).
+  const orbit = { theta: 0, phi: 0.21, dist: 24 };
+  let orbitDragging = false;
+  let lastPointer = { x: 0, y: 0 };
+
+  function applyOrbit() {
+    const p = orbitCameraPosition(orbit.theta, orbit.phi, orbit.dist);
+    camera.position.set(p.x, p.y, p.z);
+    camera.lookAt(0, 0, 0);
+  }
+
+  // ---- Orbit pointer/wheel handlers (attached while active) -----------
+  function onCanvasPointerDown(e) {
+    if (!active) return;
+    if (e.button !== undefined && e.button !== 0) return; // left button only
+    orbitDragging = true;
+    lastPointer = { x: e.clientX, y: e.clientY };
+    if (e.target && typeof e.target.setPointerCapture === 'function') {
+      try { e.target.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    }
+  }
+  function onPointerMove(e) {
+    if (!active || !orbitDragging) return;
+    const dx = e.clientX - lastPointer.x;
+    const dy = e.clientY - lastPointer.y;
+    lastPointer = { x: e.clientX, y: e.clientY };
+    orbit.theta -= dx * ORBIT_DRAG_SPEED;
+    orbit.phi = clampOrbit(orbit.phi + dy * ORBIT_DRAG_SPEED, ORBIT_PHI_MIN, ORBIT_PHI_MAX);
+    applyOrbit();
+  }
+  function onPointerUp() {
+    orbitDragging = false;
+  }
+  function onCanvasWheel(e) {
+    if (!active) return;
+    e.preventDefault();
+    orbit.dist = clampOrbit(orbit.dist * (1 + e.deltaY * ORBIT_WHEEL_SPEED), ORBIT_DIST_MIN, ORBIT_DIST_MAX);
+    applyOrbit();
+  }
+  // The orbit-drag target: an explicit renderer canvas beats a DOM query
+  // (a future UI could add canvases before the renderer's).
+  function orbitCanvas() {
+    if (canvas) return canvas;
+    if (typeof document !== 'undefined') return document.querySelector('canvas');
+    return null;
+  }
+  function attachOrbitControls() {
+    if (typeof window === 'undefined') return;
+    const c = orbitCanvas();
+    if (!c) return;
+    c.addEventListener('pointerdown', onCanvasPointerDown);
+    c.addEventListener('wheel', onCanvasWheel, { passive: false });
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+  }
+  function detachOrbitControls() {
+    if (typeof window === 'undefined') return;
+    const c = orbitCanvas();
+    if (c) {
+      c.removeEventListener('pointerdown', onCanvasPointerDown);
+      c.removeEventListener('wheel', onCanvasWheel);
+    }
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', onPointerUp);
+  }
 
   // ---- Entry catalogue ---------------------------------------------------
   // Each entry knows how to BUILD its object. Build is lazy (happens on
@@ -215,7 +330,8 @@ export function createShowcase({ scene, camera, nebula, updateLighting, canvasRo
     overlay.innerHTML =
       `<div class="showcase-overlay__label"></div>` +
       `<div class="showcase-overlay__nav">` +
-      `<span>←/→ object</span><span>↑/↓ texture</span><span>F1/Esc exit</span>` +
+      `<span>←/→ object</span><span>↑/↓ texture</span>` +
+      `<span>drag orbit</span><span>wheel zoom</span><span>F1 exit</span>` +
       `</div>`;
     host.appendChild(overlay);
   }
@@ -269,10 +385,14 @@ export function createShowcase({ scene, camera, nebula, updateLighting, canvasRo
     if (!current.root) return;
     const dist = current.dist;
     const height = current.height;
-    // Frame the object: camera looks at the origin where the turntable
-    // sits, positioned at a per-entry distance/height.
-    camera.position.set(0, height, dist);
-    camera.lookAt(0, 0, 0);
+    // v0.72.3 — reset the orbit framing to the entry's default (so each
+    // object is framed cleanly on selection), then apply. The user's
+    // drag/zoom orbit is preserved for the CURRENT object until they
+    // switch (switching re-frames).
+    orbit.theta = 0;
+    orbit.phi = Math.atan2(height, dist);
+    orbit.dist = dist;
+    applyOrbit();
     updateOverlay();
   }
 
@@ -325,9 +445,11 @@ export function createShowcase({ scene, camera, nebula, updateLighting, canvasRo
     hideGameObjects();
     ensureOverlay();
     if (overlay) overlay.style.display = 'block';
+    if (typeof document !== 'undefined' && document.body) document.body.classList.add('showcase-active');
     if (typeof window !== 'undefined') window.addEventListener('keydown', onKeyDown);
+    attachOrbitControls();
     select();
-    // Announce for automation.
+    // Announce for automation + the view-toggle button label.
     if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('showcase:active', { detail: { index } }));
   }
 
@@ -337,7 +459,9 @@ export function createShowcase({ scene, camera, nebula, updateLighting, canvasRo
     disposeCurrent();
     restoreGameObjects();
     if (overlay) overlay.style.display = 'none';
+    if (typeof document !== 'undefined' && document.body) document.body.classList.remove('showcase-active');
     if (typeof window !== 'undefined') window.removeEventListener('keydown', onKeyDown);
+    detachOrbitControls();
     if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('showcase:inactive'));
   }
 
@@ -368,6 +492,10 @@ export function createShowcase({ scene, camera, nebula, updateLighting, canvasRo
     getCount,
     getLabel: () => (current ? current.label : null),
     setIndex: (i) => { if (active) { index = ((i % getCount()) + getCount()) % getCount(); select(); } },
+    // v0.72.3 — orbit introspection for automation (screenshot loop
+    // can verify the camera moved) + the drag/zoom dev loop.
+    getCameraPosition: () => ({ x: camera.position.x, y: camera.position.y, z: camera.position.z }),
+    getOrbit: () => ({ ...orbit }),
   };
 
   // Global keyboard: F1 toggles even when the game is running (but never

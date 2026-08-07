@@ -144,6 +144,33 @@ export class Capsule extends THREE.BufferGeometry {
     // Bottom pole — straight down at the cap tip.
     pushVertex(0, -length / 2 - radius, 0);
 
+    // ---- 1b. Wrap-column sync (v0.72.3 — exact watertightness) --------
+    // Every ring's wrap vertex (ix === radialSegments) is generated
+    // from theta = 2π, which in floating point lands a hair (~2e-16
+    // rad) short of the ring's ix === 0 vertex (theta = 0). The two
+    // are THE SAME world point by design — the wrap exists so the
+    // ring closes on itself — but the sub-float discrepancy means the
+    // mesh is not EXACTLY watertight across the seam: an exact edge
+    // analyzer would see the seam column as 2·radialSegments open
+    // boundary edges instead of one shared geometric column. Copy the
+    // base vertex's exact position onto the wrap so the closed
+    // surface is bit-exact. Done BEFORE `setAttribute` so the
+    // attribute never holds pre-sync data. (`jitter()` re-enforces
+    // the same guarantee after displacement — see its docblock for
+    // the ring iteration layout, which this mirrors.)
+    const syncWrapToBase = (ringStart) => {
+      positions[(ringStart + radialSegments) * 3 + 0] = positions[ringStart * 3 + 0];
+      positions[(ringStart + radialSegments) * 3 + 1] = positions[ringStart * 3 + 1];
+      positions[(ringStart + radialSegments) * 3 + 2] = positions[ringStart * 3 + 2];
+    };
+    // Bottom cap rings start right after the top pole (this sync block
+    // runs before the index section declares `bottomCapStart`, so the
+    // offset is computed here from the already-defined topPoleIdx).
+    const bottomCapStartHere = topPoleIdx + 1;
+    for (let r = 0; r < bodyRings; r++) syncWrapToBase(r * ringSize);
+    for (let iy = 1; iy < capSegments; iy++) syncWrapToBase(bodyRings * ringSize + (iy - 1) * ringSize);
+    for (let iy = 1; iy < capSegments; iy++) syncWrapToBase(bottomCapStartHere + (iy - 1) * ringSize);
+
     this.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 
     // ---- 2. Index buffer ----------------------------------------------

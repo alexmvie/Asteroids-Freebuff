@@ -280,11 +280,9 @@ function boulderContribution(n, b) {
 // ---------------------------------------------------------------------------
 function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType = 'fbm', craterCount = 0, boulderCount = 0) {
   const positions = geom.attributes.position;
-  const normals = geom.attributes.normal;
-  if (!positions || !normals) return;
+  if (!positions) return;
 
   const posArray = positions.array;
-  const normArray = normals.array;
 
   // v0.71.5 — Worley-style impact craters. Precompute the deterministic
   // crater field once (same centers for every LOD level — placement
@@ -314,14 +312,44 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
   // same shape, just with the new high-frequency component now layered
   // on top.
 
+  // v0.72.3 — WATER-TIGHTNESS FIX (the "totally open triangles" bug).
+  // The displacement was previously applied ALONG THE VERTEX NORMAL
+  // (`posArray[i] = x + nx * displacement`). On NON-indexed geometry
+  // (every icosphere shape: spinning top, elongated potato, craggy
+  // rock, rubble-pile lobes), each vertex copy belongs to exactly one
+  // face and carries that FACE's normal — so the 3+ copies of the
+  // same pre-noise position all receive the same noise SCALAR but
+  // DIFFERENT displacement DIRECTIONS, and the copies drift apart.
+  // The surface tears: every shared edge becomes an open boundary
+  // (measured 1500 boundary edges on a detail-4 spinning top). The
+  // indexed Capsule (cratered potato) was not spared either: its
+  // UV-seam wrap vertex and base vertex have different normals, so
+  // the seam split open (28 -> 56 boundary edges).
+  //
+  // FIX: displace along the unit RADIAL direction from the origin.
+  // The radial direction is a pure function of the pre-noise position,
+  // so every coincident copy — and the capsule's base/wrap seam pair
+  // — moves by the SAME vector and stays exactly coincident. The
+  // surface stays connected by construction: the mesh is as water-
+  // tight as its base geometry (IcosahedronGeometry / Capsule).
+  // Visual side effect is nil: face normals on a displaced icosphere
+  // are within a few degrees of radial, and the crater/boulder
+  // layers were always computed as functions of the unit radial
+  // direction anyway.
+
   for (let i = 0; i < positions.count; i++) {
     const x = posArray[i * 3 + 0];
     const y = posArray[i * 3 + 1];
     const z = posArray[i * 3 + 2];
 
-    const nx = normArray[i * 3 + 0];
-    const ny = normArray[i * 3 + 1];
-    const nz = normArray[i * 3 + 2];
+    // Unit radial direction — shared by crater/boulder lookup AND the
+    // displacement application (guarantees watertightness). One shared
+    // dir object reused by both feature blocks (no per-block alloc).
+    const vLen = Math.hypot(x, y, z) || 1e-6;
+    const rx = x / vLen;
+    const ry = y / vLen;
+    const rz = z / vLen;
+    const dir = { x: rx, y: ry, z: rz };
 
     const nBase = fbm3D(
       (x + ox) * noiseScale,
@@ -357,8 +385,6 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
     // Direction = unit vertex direction; scale = CRATER_SCALE × |v|.
     let craterMod = 0;
     if (craters.length > 0) {
-      const vLen = Math.hypot(x, y, z) || 1e-6;
-      const dir = { x: x / vLen, y: y / vLen, z: z / vLen };
       for (let c = 0; c < craters.length; c++) {
         craterMod += craterContribution(dir, craters[c]);
       }
@@ -376,8 +402,6 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
   // protrude FROM the cratered/noise surface).
   let boulderMod = 0;
   if (boulders.length > 0) {
-    const vLen = Math.hypot(x, y, z) || 1e-6;
-    const dir = { x: x / vLen, y: y / vLen, z: z / vLen };
     for (let b = 0; b < boulders.length; b++) {
       boulderMod += boulderContribution(dir, boulders[b]);
     }
@@ -424,9 +448,9 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
                    + boulderMod;
     }
 
-    posArray[i * 3 + 0] = x + nx * displacement;
-    posArray[i * 3 + 1] = y + ny * displacement;
-    posArray[i * 3 + 2] = z + nz * displacement;
+    posArray[i * 3 + 0] = x + rx * displacement;
+    posArray[i * 3 + 1] = y + ry * displacement;
+    posArray[i * 3 + 2] = z + rz * displacement;
   }
 
   positions.needsUpdate = true;

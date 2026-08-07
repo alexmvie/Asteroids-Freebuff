@@ -2,7 +2,6 @@ import {
   Group,
   Mesh,
   MeshStandardMaterial,
-  ConeGeometry,
   BoxGeometry,
   Color,
   Box3,
@@ -12,6 +11,11 @@ import {
   RepeatWrapping,
   Texture,
 } from 'three';
+// v0.72.3 — strictly watertight cone/pyramid (THREE.ConeGeometry has a
+// degenerate tip column: multiple coincident tip copies + a collapsed
+// cap fan → open tip edges by a strict edge analyzer). See
+// src/geometry/watertight-cone.js.
+import { buildWatertightCone } from '../geometry/watertight-cone.js';
 
 import {
   THRUST_ACCEL,
@@ -84,9 +88,12 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
   body.scale.setScalar(3); // triple the visual size of mesh + glow
   group.add(body);
 
-  // Body: 4-sided pyramid pointing forward (-Z). ConeGeometry's default tip
-  // is +Y; rotateX(-PI/2) maps +Y → -Z.
-  const bodyGeom = new ConeGeometry(1.0, 2.5, 4, 1);
+  // Body: 4-sided pyramid pointing forward (-Z). The watertight cone
+  // builder (v0.72.3) also emits its tip at +Y, so the same
+  // rotateX(-PI/2) maps +Y → -Z. Strictly watertight: one tip vertex,
+  // one base center, one rim ring shared by side + base — no open
+  // edges, no degenerate triangles (THREE.ConeGeometry fails both).
+  const bodyGeom = buildWatertightCone(1.0, 2.5, 4);
   bodyGeom.rotateX(-Math.PI / 2);
   // v0.69.5 — brushed-metal body (was plastic-looking very-pale
   // off-white with low metalness). Per user feedback "das ship sieht
@@ -173,7 +180,7 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = nu
     opacity: 0,             // invisible by default (toggled in update)
     depthWrite: false,      // don't occlude the model behind the glow
   });
-  const glow = new Mesh(new ConeGeometry(0.35, 0.6, 8), glowMat);
+  const glow = new Mesh(buildWatertightCone(0.35, 0.6, 8), glowMat);
   glow.rotation.x = Math.PI / 2; // tip points +Z (backward)
   glow.position.set(0, 0, 1.5);
   glow.userData.isEngineGlow = true;

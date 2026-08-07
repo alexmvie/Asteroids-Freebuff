@@ -121,6 +121,15 @@
     </div>
       </div><!-- /.debug-column__body -->
     </div><!-- /#debug-column -->
+    <!-- v0.72.3 — view toggle: switches between the game (demo/play)
+         and the object-viewer showcase. Same action as the F1 key.
+         Lives bottom-left (a corner no other overlay claims). The
+         label flips to "EXIT OBJECT VIEW" while the showcase is
+         active — src/main.js updates it on the showcase:active /
+         showcase:inactive events. -->
+    <button id="view-toggle" class="view-toggle" type="button"
+            title="Toggle game / object viewer (F1)"
+            aria-pressed="false" data-view-toggle>OBJECT VIEW</button>
     <!-- Bottom-right version chip. Populated by src/main.js so the
          version string lives in a single SSOT (GAME_VERSION constant).
          aria-hidden=true because it's decorative and not actionable. -->

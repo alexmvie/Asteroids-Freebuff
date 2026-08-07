@@ -38,12 +38,10 @@
 import {
   Group,
   Mesh,
-  ConeGeometry,
   RingGeometry,
   CylinderGeometry,
   BoxGeometry,
   IcosahedronGeometry,
-  CapsuleGeometry,
   TorusGeometry,
   OctahedronGeometry,
   MeshStandardMaterial,
@@ -52,6 +50,14 @@ import {
   Box3,
   Vector3,
 } from 'three';
+// v0.72.3 — strictly watertight cone for the `cone` fallback shape
+// (THREE.ConeGeometry degenerates at the tip: coincident copies + a
+// collapsed cap fan).
+import { buildWatertightCone } from '../geometry/watertight-cone.js';
+// v0.72.3 — our own strictly-watertight Capsule replaces THREE's
+// CapsuleGeometry (non-indexed → duplicate seam columns produce
+// degenerate seam triangles under a strict watertight analysis).
+import { Capsule } from '../geometry/capsule.js';
 
 /**
  * v0.69.0 — per-type GLB URLs. Each powerup type that has a real
@@ -148,13 +154,15 @@ function buildTypeShapeMesh(typeStr) {
   let geom;
   switch (shape) {
     case 'icosahedron': geom = new IcosahedronGeometry(0.8, 0); break;
-    case 'capsule':     geom = new CapsuleGeometry(0.5, 1.0, 4, 8); break;
+    case 'capsule':     geom = new Capsule(0.5, 1.0, 4, 8); break;
     case 'torus':       geom = new TorusGeometry(0.7, 0.25, 8, 24); break;
     case 'cylinder':    geom = new CylinderGeometry(0.6, 0.6, 0.2, 16, 1); break;
     case 'cube':        geom = new BoxGeometry(1.0, 1.0, 1.0); break;
     case 'octahedron':  geom = new OctahedronGeometry(0.9, 0); break;
+    // v0.72.3 — watertight cone (THREE.ConeGeometry's tip is a stack of
+    // coincident vertex copies → open edges + degenerate cap fan).
     case 'cone':
-    default:            geom = new ConeGeometry(0.7, 1.8, 8, 1);
+    default:            geom = buildWatertightCone(0.7, 1.8, 8);
   }
   const mat = new MeshStandardMaterial({
     color,
@@ -277,6 +285,10 @@ function buildHaloRing(type = 'shield') {
   const ring = new Mesh(geom, mat);
   ring.rotation.x = -Math.PI / 2; // lay flat in the XZ plane
   ring.position.y = -0.6; // sit below the body
+  // v0.72.3 — decorative-FX tag: a flat 2D annulus has two boundary
+  // loops BY DESIGN (it is not a solid object), so the watertightness
+  // contract (`tests/watertight.test.js`) exempts it explicitly.
+  ring.userData.decorativeFx = true;
   return ring;
 }
 
@@ -299,7 +311,12 @@ function buildBeacon(type = 'shield') {
     depthWrite: false,
     toneMapped: false,
   });
-  return new Mesh(geom, mat);
+  const beam = new Mesh(geom, mat);
+  // v0.72.3 — decorative-FX tag: the beacon is an open-ended cylinder
+  // (no caps) BY DESIGN — it is a transparent light column, not a
+  // solid object, so the watertightness contract exempts it.
+  beam.userData.decorativeFx = true;
+  return beam;
 }
 
 /** Public helper: the short uppercase label for a powerup type (e.g.
