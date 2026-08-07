@@ -92,9 +92,84 @@
 import { createPowerUp, POWERUP_LIFETIME_S } from '../entities/powerup.js';
 import { chunkKey, getActiveChunks } from '../world/world.js';
 import { CHUNK_SIZE } from '../world/chunk-constants.js';
+import { SHIP_RADIUS } from './collision.js';
 
-const POWERUP_TYPE_LASER = 'laser';
+/**
+ * Per-type spawn weights for the powerup system. Each spawn (natural
+ * respawn, first spawn, kill-drop) draws from this distribution via
+ * `pickWeightedPowerupType()` below. Equal weights = uniform random.
+ *
+ * Owners: this file is the SOLE owner of these weights on the
+ * `refine-coded-ai` branch (which has no trainer). The 6 in-game
+ * types live in `POWERUP_TYPE_VARIANTS` in `src/entities/powerup.js`
+ * — adding a 7th type requires bumping this map + the variants
+ * registry in lockstep.
+ *
+ * Tuning history:
+ *   - v0.11.x in trainer SSOT: equal weights (each type = 1.0).
+ *   - On removal of the trained-brain path: moved here as the
+ *     in-game SSOT.
+ */
+export const POWERUP_SPAWN_WEIGHTS = Object.freeze({
+  shield: 1.0,
+  speed: 1.0,
+  energy: 1.0,
+  credits: 1.0,
+  hull: 1.0,
+  weapon: 1.0,
+});
+
+/**
+ * Draw a powerup type from POWERUP_SPAWN_WEIGHTS. Falls back to
+ * 'shield' if the weight map is empty or all weights are zero.
+ *
+ * Pure math + an injected `rng()` — no shared state. Used by
+ * `createPowerUpEntity` so every spawn goes through the same
+ * distribution.
+ *
+ * @param {() => number} rng
+ * @returns {string} one of the keys of POWERUP_SPAWN_WEIGHTS
+ */
+function pickWeightedPowerupType(rng) {
+  const entries = Object.entries(POWERUP_SPAWN_WEIGHTS);
+  if (entries.length === 0) return 'shield';
+  let total = 0;
+  for (const [, w] of entries) total += Math.max(0, w);
+  if (total <= 0) return entries[0][0];
+  let r = rng() * total;
+  for (const [type, w] of entries) {
+    r -= Math.max(0, w);
+    if (r <= 0) return type;
+  }
+  return entries[entries.length - 1][0]; // rounding-fallback
+}
+
+// v0.11.0: the first pickup is now type 'shield' (matches the
+// trainer's POWERUP_TYPE_INDEX['shield']=0). The v0.10.x 'laser'
+// type string is intentionally retired — the brain no longer has
+// a 'laser' entry, so 'laser' would silently remap to shield
+// anyway via `?? 0` in the env. Emitting 'shield' directly makes
+// the inconsistency impossible. Callers using isLaserActive()
+// continue to work — the function returns true while the
+// shield pickup is the ship's active buff (`activeType` is
+// 'shield' while the pickup is on the bar).
+const POWERUP_TYPE_SHIELD = 'shield';
 const POWERUP_ACTIVE_DURATION_S = 15; // countdown after pickup
+
+// v0.61.0 — shield grants this many seconds of invincibility.
+// v0.69.0 — bumped 10s → 30s per user request ("das aufgesammelte
+// shield soll 30 sekunden shield geben"). Picked-up shield now lasts
+// long enough to fly out of a hostile pick-up spot, deal with
+// pirates, or loop back for cleanup asteroids. Effect visible in the
+// HUD's chip card (timer drains visibly + bar drains). Sync with
+// BUFF_DEFAULT_DURATIONS_S['shield'] in src/entities/ship-constants.js.
+// Sole SSOT for the duration; the ship's buff timer reads it via
+// `ship.addBuff('shield', POWERUP_SHIELD_DURATION_S)`. The game
+// constant BUFF_DEFAULT_DURATIONS_S['shield'] mirrors this for
+// callers that go through `addBuff('shield')` without an argument;
+// the explicit arg here keeps the duration explicit + grep-able in
+// the buff-application code path.
+export const POWERUP_SHIELD_DURATION_S = 30;
 const POWERUP_RESPAWN_DELAY_S = 5; // seconds between (collection|expiry) and next spawn
 const SPAWN_MIN_DIST = 30; // min world units from the ship
 const SPAWN_MAX_DIST = 200; // max world units from the ship (inside the bubble)
@@ -223,7 +298,7 @@ export function createPowerUpSystem({
       const angle = rng() * Math.PI * 2;
       return {
         x: anchorPos.x + Math.cos(angle) * spawnMinDist,
-        y: 2,
+        y: 0,
         z: anchorPos.z + Math.sin(angle) * spawnMinDist,
       };
     }
@@ -236,14 +311,14 @@ export function createPowerUpSystem({
       const dz = z - anchorPos.z;
       const dist = Math.hypot(dx, dz);
       if (dist >= spawnMinDist && dist <= spawnMaxDist) {
-        return { x, y: 2, z };
+        return { x, y: 0, z };
       }
     }
     // Fallback: spawnMinDist in a random direction from the anchor.
     const angle = rng() * Math.PI * 2;
     return {
       x: anchorPos.x + Math.cos(angle) * spawnMinDist,
-      y: 2,
+      y: 0,
       z: anchorPos.z + Math.sin(angle) * spawnMinDist,
     };
   }
@@ -266,8 +341,10 @@ export function createPowerUpSystem({
    */
   function createPowerUpEntity(pos) {
     const currentLifetime = powerupLifetimeByState[getGameState()] ?? powerupLifetimeS;
+  // v0.11.x: draw the type from POWERUP_SPAWN_WEIGHTS instead of
+  // hardcoding 'shield'. The game can show any of the 6 colors.
     const spec = {
-      type: POWERUP_TYPE_LASER,
+      type: pickWeightedPowerupType(rng),
       position: pos,
       lifetime: currentLifetime,
       spawnTime: performance.now() / 1000,
@@ -298,20 +375,67 @@ export function createPowerUpSystem({
   function spawnAtPosition(position) {
     if (pending) return false;
     if (!position || typeof position.x !== 'number') return false;
-    const pos = { x: position.x, y: position.y ?? 2, z: position.z };
+    const pos = { x: position.x, y: position.y ?? 0, z: position.z };
     createPowerUpEntity(pos);
     return true;
   }
 
-  function activate() {
-    activeType = POWERUP_TYPE_LASER;
+  function activate(type) {
+    // v0.11.x — `type` is the picked-up powerup's type (drawn from
+    // POWERUP_SPAWN_WEIGHTS (defined above in this file) on spawn). The previous
+    // hardcoded 'shield' meant every pickup — speed, energy, hull,
+    // weapon — was reported to subscribers and the HUD as 'shield'
+    // (mint-green chip, "SHIELD" label, wrong color). Now we record
+    // the ACTUAL picked-up type so `getActiveType()` and the
+    // `powerup:activated` event both surface the right value to
+    // callers (HUD chip via powerupColorFor/typeFor).
+    activeType = type;
     activeRemaining = activeDurationS;
-    // Track which entity collected the power-up so the laser beam
-    // can be rendered from the correct ship's position. The caller
-    // decides the collector via `getCollector()` at pickup time
-    // (below); we snapshot it here.
+    // Back-compat: callers that gate on `isLaserActive()` continue
+    // to see "true" while ANY power-up is held, not just shield.
+    // The legacy 'shield-is-laser' semantic is preserved by
+    // mapping the previously-implemented 15-second weapon window
+    // onto whatever was picked up; consumers distinguish types via
+    // `getActiveType()` going forward.
     activeCollector = getCollector();
-    emit('powerup:activated', { type: activeType, duration: activeDurationS, collector: activeCollector });
+
+    // v0.61.0 — shield grants 10s invincibility to the PLAYER
+    // collector only. The AI demo ship has infinite lives and gets
+    // free pickups (no GAME_OVER transition), so shielding it would
+    // be invisible/inflation-deflation. Gate on identity (`===
+    // ship`, captured at factory-construction time) so the AI
+    // picking up its own shield pickup does not pad its HP.
+    //
+    // Lifetime note: POWERUP_SHIELD_DURATION_S (10s) is the buff
+    // duration — SHORTER than the 15s active window above. After
+    // 10s the shield is gone but the active window continues (the
+    // HUD chip still shows 'SHIELD' for 5s). Main.js clips the
+    // HUD's `remaining` value to ship.getShieldRemaining() so the
+    // bar never lies about the buff.
+    //
+    // Order: addBuff is called BEFORE emit so any bus listener
+    // that reads ship.isShielded() after the event sees the
+    // post-buff state (consistent with the documented contract on
+    // `powerup:activated`).
+    const shieldApplied = type === POWERUP_TYPE_SHIELD &&
+        activeCollector === ship &&
+        typeof activeCollector.addBuff === 'function';
+    if (shieldApplied) {
+      activeCollector.addBuff('shield', POWERUP_SHIELD_DURATION_S);
+    }
+
+    // Single emit carries `shieldApplied` boolean so listeners that
+    // want to discern "the type was shield AND the buff landed on
+    // the player" can do so with one event subscription. No new
+    // event name (per the project's "extract when 2+ consumers
+    // need it" rule — there are zero listeners for a dedicated
+    // shield:activated right now).
+    emit('powerup:activated', {
+      type: activeType,
+      duration: activeDurationS,
+      collector: activeCollector,
+      shieldApplied,
+    });
   }
 
   function deactivate(reason /* 'expired' | 'cancelled' */) {
@@ -420,14 +544,16 @@ export function createPowerUpSystem({
           const dx = sp.x - pp.x;
           const dz = sp.z - pp.z;
           const distSq = dx * dx + dz * dz;
-          const r = pending.getRadius() + 0.5; // small grace for the collector's nose
+          const r = pending.getRadius() + SHIP_RADIUS + 2.0; // generous grace so high-speed flybys still collect
           if (distSq < r * r) {
-            // Picked up!
+            // Picked up! Capture the spec.type BEFORE clearPending
+            // so activate() can record the actual picked-up type
+            // instead of the previous hardcoded 'shield'.
             const type = pending.spec.type;
             clearPending();
             respawnTimer = currentRespawnDelay;
             emit('powerup:collected', { type });
-            activate();
+            activate(type);
             emit('powerup:respawning', { remaining: respawnTimer });
           }
         }
@@ -450,7 +576,15 @@ export function createPowerUpSystem({
 
   // ---- Public read API ------------------------------------------------
 
-  function isLaserActive() { return activeType === POWERUP_TYPE_LASER; }
+  // v0.11.x — the function name is historical (pre-v0.11.0) but
+  // its semantics are now "is any power-up currently in its
+  // pickup-celebration window?". The 15-second countdown fires
+  // for ALL picked-up types (shield, speed, energy, credits,
+  // hull, weapon) so the laser weapon system can keep firing
+  // during that window. Callers that want to know the SPECIFIC
+  // type should use `getActiveType()` (returns the actual
+  // picked-up type). Kept the legacy name for caller stability.
+  function isLaserActive() { return activeType !== null; }
   function getActiveType() { return activeType; }
   function getActiveRemaining() { return activeRemaining; }
   function getActiveMax() { return activeDurationS; }

@@ -182,6 +182,104 @@ canvas {
 }
 
 /* ============================================================================
+   Block: hud__energy (v0.11.0 — replaces the v0.10.x LIVES counter).
+   ----------------------------------------------------------------------------
+   Top-right slot. Displays "ENERGY  [▓▓▓▓░░]  78/100". The bar fill is
+   driven by `--energy-progress` (set per-frame by the ship events bus).
+   Below 20% the bar flashes danger-orange to warn the player; below 0%
+   means death (the ship emits energy:changed { value: 0 } and main.js
+   transitions to GAME_OVER).
+
+   Buff chips live in a sibling `.hud__buffs` rail below (centered) so the
+   player can see what temporary effects are stacked.
+   ============================================================================ */
+.hud__energy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.hud__energy-label {
+  font-size: var(--font-size-md);
+  letter-spacing: var(--letter-spacing-wider);
+  color: var(--color-primary);
+  white-space: nowrap;
+}
+.hud__energy-bar {
+  width: 140px;
+  height: var(--space-3);
+  background: var(--color-bg-elevated-2);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  position: relative;
+}
+.hud__energy-bar-fill {
+  width: var(--energy-progress, 100%);
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-primary), #6ee0ff);
+  box-shadow: 0 0 var(--space-2) var(--color-primary-glow-soft);
+  transition: width 0.18s ease-out;
+}
+.hud__energy--low .hud__energy-bar-fill {
+  background: linear-gradient(90deg, var(--color-danger), var(--color-warn));
+  box-shadow: 0 0 var(--space-2) var(--color-danger-glow);
+  animation: hud-energy-low-pulse 0.5s ease-in-out infinite alternate;
+}
+@keyframes hud-energy-low-pulse {
+  from { opacity: 0.6; }
+  to   { opacity: 1; }
+}
+.hud__energy--low .hud__energy-label,
+.hud__energy--low .hud__energy-timer {
+  color: var(--color-warn);
+  text-shadow: 0 0 var(--space-2) rgba(255, 136, 68, 0.55);
+}
+.hud__energy-timer {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-fg);
+  min-width: 60px;
+  text-align: right;
+  letter-spacing: var(--letter-spacing-base);
+}
+
+/* ============================================================================
+   Block: hud__buffs (v0.11.0 — active-buff chips).
+   ----------------------------------------------------------------------------
+   Stacked horizontal rail of per-type buff chips, anchored under the HUD
+   top bar. Each chip is added on `buff:added` and removed on `buff:expired`
+   (or when its countdown hits 0). Per-type color is set inline via
+   `style="--chip-color: 0xRRGGBB"` (matches the powerup type's hex tint).
+   The chip shows the type name + remaining seconds to 1 decimal.
+   ============================================================================ */
+.hud__buffs {
+  position: fixed;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-wrap: wrap;       /* v0.69.0: cards wrap on narrow viewports */
+  justify-content: center;
+  gap: var(--space-2);
+  pointer-events: none;
+  z-index: var(--z-hud);
+  /* v0.69.0: hosts `.hud__buff-card` (rich SVG+bar card system). The
+     legacy `.hud__buff` plain-text chip + its CSS are gone. */
+}
+.hud__buffs:empty {
+  display: none;
+}
+/* v0.69.0: removed the v0.11.x chip CSS block (`.hud__buff`,
+   `@keyframes hud-buff-enter`, `.hud__buff__timer`) — superseded
+   by the .hud__buff-card styling below. Each active buff now
+   renders a richer card with an inline SVG icon + an uppercase
+   TYPE label + a 96px draining progress bar (driven by the
+   --buff-progress CSS variable set per-frame in
+   src/ui/hud.js's addBuffCard path) + a tabular-nums timer text.
+   Multi-buff active simultaneously is the default — the rail
+   hosts one card per type, wraps on narrow viewports. */
+/* ============================================================================
    Block: hud__powerup  (centered status panel between score and lives)
    ----------------------------------------------------------------------------
    Shows the active power-up's label + draining bar + seconds remaining.
@@ -1447,4 +1545,982 @@ canvas {
 
 .edit-screen__pick-hint--hidden {
   display: none;
+}
+
+/* ============================================================================
+   Block: ai-debug  (v0.23.x — AI Debug Overlay)
+   ----------------------------------------------------------------------------
+   Always-visible (no toggle, user-requested) bottom-right stack:
+     • Header chip ("AI DEBUG")
+     • Radar canvas (200x200) with subject-centered mini-map
+     • Mode chip (color-coded by brain mode)
+     • Decision panel (yaw / thrust / fire / weapon / target / threats)
+     • State panel (state / score / energy)
+   The whole stack respects the existing right-margin reserved for the
+   .game-version chip — moved up so they don't overlap (the version
+   chip auto-positions to its own bottom corner via flex-end padding,
+   the AI debug lives above it). `pointer-events: none` on the
+   container so the underlying canvas stays clickable.
+   ============================================================================ */
+
+.ai-debug {
+  position: fixed;
+  bottom: 60px;
+  right: var(--space-3);
+  z-index: var(--z-hud);
+  font-family: var(--font-family);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-md);
+  color: var(--color-fg);
+  pointer-events: none;
+  min-width: 200px;
+}
+
+.ai-debug__title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  color: var(--color-primary);
+  text-shadow: 0 0 var(--space-2) var(--color-primary-glow-soft);
+  text-align: center;
+  padding-bottom: var(--space-half);
+  border-bottom: var(--border-width) solid var(--color-primary-soft);
+}
+
+.ai-debug__mode-toggle {
+  pointer-events: auto;
+  display: block;
+  width: 100%;
+  margin: var(--space-1) 0 0;
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-bg-tint-primary-soft);
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-md);
+  color: var(--color-fg);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base);
+}
+
+.ai-debug__mode-toggle:hover {
+  background: var(--color-bg-tint-primary-base);
+  border-color: var(--color-primary-bright);
+}
+
+.ai-debug__mode-toggle:active {
+  transform: translateY(1px);
+}
+
+.ai-debug__radar {
+  display: block;
+  margin: 0 auto;
+  background: var(--color-bg-elevated);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-md);
+  /* Logical size 200x200; the canvas bitmap is DPR-scaled by the
+     factory at mount time (src/ui/ai-debug-overlay.js). CSS sizes
+     the canvas visually. */
+  width: 200px;
+  height: 200px;
+}
+
+.ai-debug__chip {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  text-align: center;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  border: var(--border-width) solid currentColor;
+  background: var(--color-bg-tint-primary-faint);
+  color: var(--color-primary);
+  text-shadow: 0 0 var(--space-2) currentColor;
+}
+.ai-debug__chip--dodge {
+  color: var(--color-danger);
+  background: rgba(255, 85, 102, 0.10);
+  animation: ai-debug-chip-pulse 0.4s ease-in-out infinite alternate;
+}
+.ai-debug__chip--asteroid {
+  color: var(--color-primary);
+  background: var(--color-bg-tint-primary-soft);
+}
+.ai-debug__chip--powerup {
+  color: #c084fc; /* purple — distinct from cyan/orange/red */
+  background: rgba(192, 132, 252, 0.10);
+}
+.ai-debug__chip--idle {
+  color: var(--color-fg-dim);
+  background: rgba(151, 163, 196, 0.05);
+}
+@keyframes ai-debug-chip-pulse {
+  from { opacity: 0.85; }
+  to   { opacity: 1.0; }
+}
+
+.ai-debug__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-quarter);
+  margin-top: var(--space-half);
+}
+
+.ai-debug__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-base);
+}
+
+.ai-debug__row__key {
+  color: var(--color-primary);
+  font-weight: var(--font-weight-bold);
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-base);
+}
+
+.ai-debug__row__value {
+  color: var(--color-fg);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-bold);
+}
+
+/* Laser-active weapon row tints to orange — visual mirror of the
+   laser powerup chip color in the top HUD. */
+.ai-debug__row__value--weapon-laser {
+  color: var(--color-warn);
+  text-shadow: 0 0 var(--space-2) rgba(255, 136, 68, 0.45);
+}
+
+.ai-debug__divider {
+  height: var(--border-width);
+  margin: var(--space-1) 0;
+  background: var(--color-primary-soft);
+}
+
+.ai-debug__row__energy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.ai-debug__row__energy-bar {
+  display: inline-block;
+  width: 60px;
+  height: var(--space-2);
+  background: var(--color-bg-elevated-2);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  position: relative;
+}
+.ai-debug__row__energy-bar-fill {
+  display: block;
+  width: var(--energy-bar-progress, 0%);
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-primary), #6ee0ff);
+  box-shadow: 0 0 var(--space-1) var(--color-primary-glow-soft);
+  transition: width 0.18s ease-out;
+}
+
+/* Future: a compass dial can swap the radar for a horizon-line view
+   when the root has the ai-debug--compass class. The factory adds
+   the class lazily (see createAiDebugOverlay in src/ui/ai-debug-overlay.js)
+   so the CSS-only swap is intentional. */
+.ai-debug--compass .ai-debug__radar {
+  /* placeholder — full compass dial is a future iteration */
+}
+
+/* ============================================================================
+   Block: ai-debug__chip--evade (v0.46.x — added when EVADE mode
+   replaced DODGE on the ai.js branch). Pulse animation distinguishes
+   it from idle so the user can tell apart "I'm not doing anything"
+   from "I'm actively escaping a threat".
+   ============================================================================ */
+.ai-debug__chip--evade {
+  color: var(--color-warn);
+  background: rgba(255, 136, 68, 0.12);
+  border-color: var(--color-warn);
+  animation: ai-debug-chip-pulse 0.5s ease-in-out infinite alternate;
+}
+
+/* ============================================================================
+   Block: ai-debug__row--why (v0.46.x — short text explaining WHY
+   the AI chose its current mode). Sits at the bottom of the decision
+   panel as a 2-line wraparound row so the explanation doesn't crowd
+   the chip + radar. The text is short by design (the behavior's
+   `reason` string never exceeds ~40 chars).
+   ============================================================================ */
+.ai-debug__row--why .ai-debug__row__value {
+  flex: 1;
+  text-align: right;
+  color: var(--color-fg-dim);
+  font-weight: var(--font-weight-normal);
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--letter-spacing-tight);
+  /* Allow long reason strings to wrap to a second line. */
+  white-space: normal;
+  max-width: 60%;
+}
+
+/* ============================================================================
+   Block: ai-tuners (v0.46.x — Live AI Tuners panel)
+   ----------------------------------------------------------------------------
+   Always-visible (no toggle, matches the .ai-debug overlay above it).
+   Bottom-right column stack: AI Debug Overlay (top) → AI Tuners (below).
+   The panel hosts a per-group set of sliders that write directly to
+   the mutable AI_TUNABLES bag. Sized to the same width as the AI
+   debug overlay (~200px) so they read as one cohesive unit.
+   ============================================================================ */
+
+.ai-tuners {
+  position: fixed;
+  /* Sit ABOVE the AI Debug Overlay so the two bottom-right panels
+     don't pile on top of each other. The debug overlay is at
+     `bottom: 60px` and stacks ~480px of content (title + radar 200px
+     + chip + 8 decision rows + divider + 3 state rows). Add ~40px
+     margin between them so the buttons at the top of the tuner
+     panel stay reachable on a 900px+ viewport. */
+  bottom: 540px;
+  right: var(--space-3);
+  z-index: var(--z-hud);
+  font-family: var(--font-family);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-md);
+  color: var(--color-fg);
+  pointer-events: none;
+  /* Fixed width matches the AI Debug Overlay so they read as one
+     stack. tall vertical max-height keeps runtime sliders in
+     reach on standard 900px+ viewports; the inner .ai-tuners__groups
+     scrolls if the user is on a smaller viewport. */
+  min-width: 220px;
+  max-width: 220px;
+  /* Cap so the panel never bleeds off the top. On small viewports
+     the inner .ai-tuners__groups scrolls. */
+  max-height: calc(100vh - 580px);
+  font-size: var(--font-size-sm);
+}
+
+.ai-tuners--mounted {
+  /* Same trick as .ai-debug--mounted: a class the JS can target so
+     CSS-only styling can hook into "factory has finished building
+     the panel". */
+}
+
+.ai-tuner__title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  color: var(--color-primary);
+  text-shadow: 0 0 var(--space-2) var(--color-primary-glow-soft);
+  text-align: center;
+  padding-bottom: var(--space-half);
+  border-bottom: var(--border-width) solid var(--color-primary-soft);
+}
+
+.ai-tuner__actions {
+  display: flex;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  pointer-events: auto;
+}
+
+.ai-tuner__btn {
+  flex: 1;
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-bg-tint-primary-soft);
+  border: var(--border-width) solid var(--color-primary-base);
+  border-radius: var(--radius-md);
+  color: var(--color-fg);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wide);
+  text-transform: uppercase;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base);
+}
+
+.ai-tuner__btn:hover {
+  background: var(--color-bg-tint-primary-base);
+  border-color: var(--color-primary-bright);
+  color: var(--color-fg-on-primary);
+}
+
+.ai-tuner__btn:active {
+  transform: translateY(1px);
+}
+
+.ai-tuner__groups {
+  /* Scrollable inner area so 22 sliders fit on a 900px-tall viewport
+     without making the panel itself overflow. */
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-primary-soft) transparent;
+  pointer-events: auto;
+  padding-right: var(--space-1);
+}
+
+.ai-tuner__groups::-webkit-scrollbar {
+  width: 4px;
+}
+.ai-tuner__groups::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ai-tuner__groups::-webkit-scrollbar-thumb {
+  background: var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+}
+
+.ai-tuner__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1) 0;
+  border: 0;
+  border-top: var(--border-width) dashed var(--color-primary-soft);
+  margin: 0;
+  min-width: 0;
+}
+
+.ai-tuner__group-legend {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  color: var(--color-primary);
+  padding: var(--space-quarter) 0;
+}
+
+.ai-tuner__row {
+  display: grid;
+  grid-template-columns: 110px 1fr 50px 60px;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+}
+
+.ai-tuner__label {
+  color: var(--color-primary);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-tight);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-tuner__slider {
+  width: 100%;
+  height: var(--space-3);
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  margin: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  /* Slim track; cyan fill matches the project's primary color. */
+}
+
+.ai-tuner__slider::-webkit-slider-runnable-track {
+  height: 2px;
+  background: var(--color-primary-soft);
+  border-radius: 1px;
+}
+.ai-tuner__slider::-moz-range-track {
+  height: 2px;
+  background: var(--color-primary-soft);
+  border-radius: 1px;
+}
+
+.ai-tuner__slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: var(--space-3);
+  height: var(--space-3);
+  background: var(--color-primary);
+  border: 1px solid var(--color-fg-on-primary);
+  border-radius: 50%;
+  cursor: grab;
+  margin-top: -6px;
+  box-shadow: 0 0 var(--space-1) var(--color-primary-glow-soft);
+  transition:
+    box-shadow var(--transition-base),
+    transform var(--transition-fast);
+}
+.ai-tuner__slider:hover::-webkit-slider-thumb {
+  box-shadow: 0 0 var(--space-3) var(--color-primary-glow);
+  transform: scale(1.1);
+}
+.ai-tuner__slider:active::-webkit-slider-thumb {
+  cursor: grabbing;
+  transform: scale(1.2);
+  background: var(--color-fg-on-primary);
+  box-shadow: 0 0 var(--space-3) var(--color-primary-bright);
+}
+
+.ai-tuner__slider::-moz-range-thumb {
+  width: var(--space-3);
+  height: var(--space-3);
+  background: var(--color-primary);
+  border: 1px solid var(--color-fg-on-primary);
+  border-radius: 50%;
+  cursor: grab;
+  box-shadow: 0 0 var(--space-1) var(--color-primary-glow-soft);
+}
+.ai-tuner__slider:hover::-moz-range-thumb {
+  box-shadow: 0 0 var(--space-3) var(--color-primary-glow);
+}
+
+.ai-tuner__value {
+  color: var(--color-fg);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-bold);
+  text-align: right;
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-tuner__status {
+  min-height: var(--space-3);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-tight);
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--color-primary);
+  pointer-events: none;
+}
+
+.ai-tuner__status:empty {
+  display: none;
+}
+
+.ai-tuner__status--error {
+  color: var(--color-warn);
+}
+
+/* ============================================================================
+   Block: debug-column (v0.50.x — collapsible left-side debug stack)
+   ----------------------------------------------------------------------------
+   Wraps the AI debug overlay (radar + mode chip + decision panels) and the
+   diagnostic HUD (FPS / state / score / lives / ...) as two equal-width
+   rows in a left-anchored column. Click the top-left toggle (the "quad")
+   to collapse both panels into a single small chip. State persists in
+   localStorage so the user's preference survives reloads. The two
+   children keep their existing class names + data-attrs so the existing
+   mount() calls in main.js work unchanged — only their `position: fixed`
+   is overridden so the flex container can stack them as static children.
+   ============================================================================ */
+
+.debug-column {
+  position: fixed;
+  top: var(--space-3);
+  left: var(--space-3);
+  width: 220px;
+  max-height: calc(100vh - var(--space-3) - var(--space-3));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  z-index: var(--z-debug);
+  font-family: var(--font-family);
+  pointer-events: none;
+}
+
+.debug-column__toggle {
+  pointer-events: auto;
+  align-self: flex-start;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-icon);
+  cursor: pointer;
+  padding: 0;
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base);
+}
+.debug-column__toggle:hover {
+  background: var(--color-bg-tint-primary-soft);
+  border-color: var(--color-primary-base);
+  color: var(--color-fg);
+}
+.debug-column__toggle:active {
+  transform: translateY(1px);
+}
+
+.debug-column__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-primary-soft) transparent;
+}
+.debug-column__body::-webkit-scrollbar {
+  width: 4px;
+}
+.debug-column__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.debug-column__body::-webkit-scrollbar-thumb {
+  background: var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+}
+
+/* Equal-width: each row stretches the column's width. */
+.debug-column__body > * {
+  width: 100%;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+/* Override the children's fixed positioning so the flex container can
+   stack them. The base rules (`bottom: var(--space-3); left/right: ...`)
+   don't apply when the panel is inside the column. We zero out
+   position + offset anchors here. */
+.debug-column .debug-hud {
+  position: static;
+  bottom: auto;
+  left: auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.debug-column .ai-debug {
+  position: static;
+  bottom: auto;
+  right: auto;
+  width: 100%;
+  min-width: 0;
+}
+
+/* Collapsed state: hide the body, show only the toggle button.
+   The button stays at top-left as the "little quad" the user can
+   click again to expand. */
+.debug-column--collapsed .debug-column__body {
+  display: none;
+}
+.debug-column--collapsed .debug-column__toggle {
+  border-color: var(--color-primary-base);
+  color: var(--color-fg);
+  background: var(--color-bg-tint-primary-soft);
+}
+.debug-column--collapsed .debug-column__toggle:hover {
+  background: var(--color-bg-tint-primary-base);
+  color: var(--color-primary);
+}
+
+/* ============================================================================
+   Block: ai-tuners-column (v0.51.x — collapsible right-side AI tuners stack)
+   ----------------------------------------------------------------------------
+   Wraps the AI Live Tuners panel as a 340px-wide column anchored to the
+   right edge of the screen. 340px was chosen so all 21 slider labels fit
+   without truncation at the 9px monospace font — the longest label is
+   "PU APPROACH GAIN" at 16 chars (~86px of glyph width). The grid
+   `.ai-tuner__row` was widened from `70px 1fr 56px 60px` to
+   `110px 1fr 50px 60px` to match: the label cell grows from 70 to 110px
+   so even the longest label has comfortable headroom, the value cell
+   trims slightly to `50px` (numeric values like `9999.00` still fit),
+   the guide-SVG cell stays at `60px`, and the slider gets the remaining
+   ~108px of the 340px column.
+
+   Click the top-right toggle to collapse the panel into a single small
+   chip (the "small square to the top right" the user asked for). State
+   persists in localStorage. The toggle is anchored at the very top of
+   the column (top: var(--space-3)) and the body hangs below the HUD
+   top bar via `margin-top: var(--space-5)` so the expanded panel does
+   NOT overlap the energy HUD on the right side of the top bar.
+
+   Module (createAiTunersPanel) untouched — the child keeps its existing
+   `data-ai-tuners-root` attribute so main.js's mount() call works
+   unchanged.
+   ============================================================================ */
+
+.ai-tuners-column {
+  position: fixed;
+  top: var(--space-3);
+  right: var(--space-3);
+  width: 340px;
+  max-height: calc(100vh - var(--space-3) - var(--space-3));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  z-index: var(--z-debug);
+  font-family: var(--font-family);
+  pointer-events: none;
+}
+
+.ai-tuners-column__toggle {
+  pointer-events: auto;
+  align-self: flex-end;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-icon);
+  cursor: pointer;
+  padding: 0;
+  transition:
+    background var(--transition-base),
+    border-color var(--transition-base),
+    color var(--transition-base);
+}
+.ai-tuners-column__toggle:hover {
+  background: var(--color-bg-tint-primary-soft);
+  border-color: var(--color-primary-base);
+  color: var(--color-fg);
+}
+.ai-tuners-column__toggle:active {
+  transform: translateY(1px);
+}
+
+.ai-tuners-column__body {
+  /* Hang the panel below the HUD top bar (~49px tall: top:0 + padding:16px
+     + content:27px + padding-bottom:16px) so the expanded panel doesn't
+     cover the energy HUD on the right side of the top bar. The toggle
+     itself sits ABOVE this margin so the collapsed "small square" lands
+     at the very top-right of the screen. */
+  margin-top: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-primary-soft) transparent;
+}
+.ai-tuners-column__body::-webkit-scrollbar {
+  width: 4px;
+}
+.ai-tuners-column__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ai-tuners-column__body::-webkit-scrollbar-thumb {
+  background: var(--color-primary-soft);
+  border-radius: var(--radius-sm);
+}
+
+/* Equal-width: the single child stretches the column's width. */
+.ai-tuners-column__body > * {
+  width: 100%;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+/* Override AI tuners' fixed positioning when inside the column. The
+   base rules (`bottom: 540px; right: ...`) don't apply when the panel
+   is inside the column. We zero out position + offset anchors here so
+   the flex container can stack the panel as a static child. */
+.ai-tuners-column .ai-tuners {
+  position: static;
+  bottom: auto;
+  right: auto;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  max-height: none;
+}
+
+/* Collapsed state: hide the body, show only the toggle button. The
+   button stays at top-right as the "small square" the user can click
+   again to expand. */
+.ai-tuners-column--collapsed .ai-tuners-column__body {
+  display: none;
+}
+.ai-tuners-column--collapsed .ai-tuners-column__toggle {
+  border-color: var(--color-primary-base);
+  color: var(--color-fg);
+  background: var(--color-bg-tint-primary-soft);
+}
+.ai-tuners-column--collapsed .ai-tuners-column__toggle:hover {
+  background: var(--color-bg-tint-primary-base);
+  color: var(--color-primary);
+}
+
+/* ============================================================================
+   Block: game-version (bottom-right HUD)
+   ----------------------------------------------------------------------------
+   Display-only chip that always shows the live build version + branch
+   + short commit hash. Lives in the bottom-right corner (the chosen
+   corner because top-bar / top-right / bottom-left are taken by the
+   score + energy bar + debug HUD respectively). `pointer-events: none`
+   so it never intercepts clicks on the canvas or any UI. The chip
+   is purely informational, never actionable, hence `aria-hidden=true`
+   in the HTML (set by src/main.js and the index.html container).
+   ============================================================================ */
+
+.game-version {
+  position: fixed;
+  top: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-hud);
+  font-family: var(--font-family);
+  text-align: center;
+  user-select: none;
+  pointer-events: none;
+  line-height: var(--line-height-tight);
+  color: var(--color-fg);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  background: var(--color-bg-debug);
+  border: var(--border-width) solid var(--color-primary-soft);
+  border-radius: var(--radius-md);
+  /* Keep the chip on a single line even if the branch name is long;
+     the chip itself can be wider than its container if needed. */
+  white-space: nowrap;
+}
+.game-version__branch {
+  display: inline-block;
+  font-size: var(--font-size-xs);
+  letter-spacing: var(--letter-spacing-wide);
+  color: var(--color-fg-dim);
+  opacity: 0.8;
+  text-transform: uppercase;
+}
+.game-version__ver {
+  display: inline-block;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  color: var(--color-primary);
+}
+.game-version__commit {
+  display: inline-block;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-normal);
+  letter-spacing: var(--letter-spacing-tight);
+  color: var(--color-fg-dim);
+  opacity: 0.7;
+  /* tabular-nums keeps the SHA's letters at a fixed width so the
+     chip's right edge doesn't jitter as the user types new SHAs
+     (the COMMIT span changes between dev sessions and rebuilds).
+     Monospace is overkill here but tabular-nums is enough. */
+  font-variant-numeric: tabular-nums;
+  text-transform: lowercase;
+}
+.game-version__sep {
+  display: inline-block;
+  color: var(--color-fg-dim);
+  opacity: 0.4;
+  font-size: var(--font-size-md);
+  /* Keep the separator visually balanced — no bold, no spacing tweaks. */
+  font-weight: var(--font-weight-normal);
+  user-select: none;
+  /* Slight Y nudge so the · sits on the visual midline of the row
+     (default baseline renders it slightly low next to the larger
+     ver span). */
+  line-height: 1;
+}
+
+
+/* ---- AI Tuner visual guides (v0.48.0) ----
+   Inline SVG next to each slider showing the semantic shape
+   (cone / circle / speedometer / bar / clock). The 60px grid
+   column reserved above (.ai-tuner__row's 4th column) houses
+   this 56×36 SVG container. Theme colors (.ai-tuner__svg-bg /
+   .ai-tuner__svg-fg / .ai-tuner__svg-axis) come from project
+   tokens so dark-mode / light-mode follow the HUD palette. */
+.ai-tuner__guide {
+  width: 100%;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.ai-tuner__svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  display: block;
+}
+
+.ai-tuner__svg-bg {
+  fill: rgba(150, 200, 230, 0.05);
+  stroke: rgba(150, 200, 230, 0.25);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+}
+
+.ai-tuner__svg-fg {
+  fill: var(--color-primary);
+  stroke: var(--color-primary);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* Mixed line + shape elements look cleaner if the stroke is
+     rendered under the fill (the panel's pointer cones are
+     stroked edges, the disc fills are filled shapes). */
+  paint-order: stroke fill;
+}
+
+.ai-tuner__svg-axis {
+  fill: rgba(255, 255, 255, 0.50);
+  stroke: rgba(255, 255, 255, 0.50);
+  stroke-width: 0.5;
+}
+
+/* Clock + speedometer needles are visible-only lines so they
+   benefit from a slightly thicker stroke + rounded caps. */
+.ai-tuner__svg--clock line,
+.ai-tuner__svg--speedometer line {
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+/* ============================================================================
+   Block: hud__buff-card (v0.69.0 — actief-buff cards, replacing the
+   single-line `.hud__buff` chips).
+   ----------------------------------------------------------------------------
+   Each active buff (shield / speed / energy / credits / hull / weapon)
+   renders one card in the same `.hud__buffs` rail the old chips used.
+   The card has four children:
+     - icon (22×22 SVG with the per-type vector path)
+     - body (stacked: label, progress bar, timer)
+   Color comes from POWERUP_TYPE_VARIANTS via the JS factory's
+   inline `style="--buff-color: 0xRRGGBB"`; everything else uses
+   the project's design tokens. Multiple cards can be visible
+   simultaneously (one per buff type) — the rail is flex-row,
+   wraps on narrow viewports via `.hud__buffs { flex-wrap: wrap }`.
+   ============================================================================ */
+.hud__buff-card {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-bg-panel-fade);
+  border: var(--border-width) solid var(--buff-color, var(--color-primary));
+  border-radius: var(--radius-md);
+  color: var(--buff-color, var(--color-primary));
+  font-family: var(--font-family);
+  white-space: nowrap;
+  text-shadow: 0 0 var(--space-2) var(--buff-color, var(--color-primary-glow-soft));
+  pointer-events: none;
+  animation: hud-buff-card-enter 0.22s ease-out;
+}
+@keyframes hud-buff-card-enter {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.hud__buff-card__icon {
+  width: var(--space-5);
+  height: var(--space-5);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.hud__buff-card__icon svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* Energy icon's `<rect fill="currentColor">` charge cells need
+     to be filled solidly; the SVG default would leave strokes
+     only. paint-order: stroke fill keeps line work clean even
+     when fill follows the outline path. */
+  paint-order: stroke fill;
+}
+.hud__buff-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.hud__buff-card__label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-bold);
+  letter-spacing: var(--letter-spacing-wider);
+  text-transform: uppercase;
+  color: var(--buff-color, var(--color-primary));
+  line-height: var(--line-height-tight);
+}
+.hud__buff-card__bar {
+  width: 96px;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  position: relative;
+}
+.hud__buff-card__bar-fill {
+  width: var(--buff-progress, 100%);
+  height: 100%;
+  background: var(--buff-color, var(--color-primary));
+  box-shadow: 0 0 var(--space-1) var(--buff-color, var(--color-primary-glow-soft));
+  transition: width 0.15s linear;
+}
+.hud__buff-card__timer {
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-fg-dim);
+  letter-spacing: var(--letter-spacing-tight);
+  line-height: var(--line-height-tight);
 }

@@ -16,12 +16,33 @@
         </div>
         <span class="hud__powerup-timer" data-hud="powerupTimer">15.0s</span>
       </div>
-      <div class="hud__lives" data-hud="lives">LIVES: 3</div>
+      <div class="hud__lives hud__energy" data-hud="energy">
+        <span class="hud__energy-label" data-hud="energyLabel">ENERGY</span>
+        <div class="hud__energy-bar">
+          <div class="hud__energy-bar-fill" data-hud="energyBar" style="--energy-progress: 100%"></div>
+        </div>
+        <span class="hud__energy-timer" data-hud="energyTimer">100/100</span>
+      </div>
+      <div class="hud__buffs" data-hud="buffs" aria-label="Active buffs"></div>
     </div>
     <div id="overlay">
       <div class="hud-message" data-hud="message">PRESS ANY KEY TO START</div>
     </div>
-    <div id="debug-hud" class="debug-hud" data-debug-hud-root>
+    <!-- v0.50.x Debug Column: collapsible left-side 2-row column
+         containing the AI debug overlay (radar + mode chip + decision
+         panels) and the diagnostic HUD (FPS / state / score / lives).
+         Click the top-left toggle to collapse both into a single small
+         chip. State persists via localStorage so the user's preference
+         survives reloads. The children keep their existing
+         data-ai-debug-root + data-debug-hud-root attributes so
+         main.js's mount() calls work unchanged. -->
+    <div id="debug-column" class="debug-column">
+      <button id="debug-column-toggle" class="debug-column__toggle" type="button"
+              aria-expanded="true" title="Collapse debug panels"
+              data-debug-column-toggle>▼</button>
+      <div class="debug-column__body" data-debug-column-body>
+        <div id="ai-debug-overlay" class="ai-debug" data-ai-debug-root></div>
+        <div id="debug-hud" class="debug-hud" data-debug-hud-root>
       <div class="debug-hud__section">Debug</div>
       <div class="debug-hud__row">
         <span class="debug-hud__label">FPS</span>
@@ -83,25 +104,45 @@
       </div>
       <div class="debug-hud__divider"></div>
       <div class="debug-hud__row">
-        <span class="debug-hud__label">AI Brain</span>
-        <span class="debug-hud__value" data-debug="aiBrain">hand-coded</span>
+        <span class="debug-hud__label">Capture</span>
+        <span class="debug-hud__value" data-debug="captureState">OFF</span>
       </div>
       <div class="debug-hud__row">
-        <span class="debug-hud__label">AI Gen</span>
-        <span class="debug-hud__value" data-debug="aiGen">—</span>
+        <span class="debug-hud__label">Cap Time</span>
+        <span class="debug-hud__value" data-debug="captureRemaining">--</span>
       </div>
       <div class="debug-hud__row">
-        <span class="debug-hud__label">AI Fitness</span>
-        <span class="debug-hud__value" data-debug="aiFitness">—</span>
-      </div>
-      <div class="debug-hud__row">
-        <span class="debug-hud__label">AI Mode</span>
-        <span class="debug-hud__value" data-debug="aiMode">wander</span>
+        <span class="debug-hud__label">Cap Mode</span>
+        <span class="debug-hud__value" data-debug="captureMode">--</span>
       </div>
       <div class="debug-hud__divider"></div>
-      <button class="debug-hud__toggle" id="debug-toggle-uv" type="button" data-debug="uvToggle">UV GRID: OFF</button>
-      <button class="debug-hud__toggle" id="debug-toggle-uv-viewer" type="button" data-debug="uvViewerToggle">UV UNWRAP: OFF</button>
-      <button class="debug-hud__toggle" id="debug-toggle-edit" type="button" data-debug="editToggle">EDIT OBJECT</button>
+      <button class="debug-hud__toggle" id="debug-toggle-capture" type="button" data-debug="captureToggle">CAPTURE: OFF</button>
+      <button class="debug-hud__toggle" id="debug-toggle-ai-flight" type="button" data-debug="aiFlightToggle">AI FLIGHT: ON</button>
+    </div>
+      </div><!-- /.debug-column__body -->
+    </div><!-- /#debug-column -->
+    <!-- Bottom-right version chip. Populated by src/main.js so the
+         version string lives in a single SSOT (GAME_VERSION constant).
+         aria-hidden=true because it's decorative and not actionable. -->
+    <div id="game-version" class="game-version" aria-hidden="true"></div>
+    <!-- v0.51.x AI Tuners Column: collapsible right-side column hosting
+         the AI Live Tuners panel. 340px wide so all 21 slider labels
+         fit without truncation (longest is "PU APPROACH GAIN" at 16
+         chars at the 9px font). The toggle button sits at the very
+         top-right of the column; the body hangs below the HUD top
+         bar via a margin so the column doesn't overlap the energy
+         HUD on the right side of the top bar. Click the toggle to
+         collapse the panel into a single small chip — state persists
+         via localStorage so the user's preference survives reloads.
+         The child keeps its `data-ai-tuners-root` attribute so
+         main.js's mount() call works unchanged. -->
+    <div id="ai-tuners-column" class="ai-tuners-column">
+      <button id="ai-tuners-column-toggle" class="ai-tuners-column__toggle" type="button"
+              aria-expanded="true" title="Collapse AI tuners panel"
+              data-ai-tuners-column-toggle>▼</button>
+      <div class="ai-tuners-column__body" data-ai-tuners-column-body>
+        <div id="ai-tuners" class="ai-tuners" data-ai-tuners-root></div>
+      </div>
     </div>
     <script type="module" src="/src/main.js"></script>
   </body>

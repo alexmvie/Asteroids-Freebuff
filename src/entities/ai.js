@@ -1,556 +1,665 @@
 /**
- * Demo AI — an NPC ship that wanders, targets the nearest asteroid, and
- * dodges close threats. Uses the same ship look as the player (injected
- * via `shipFactory` so the same mesh + physics can be shared, and so
- * tests can swap in a mock ship).
+ * Demo / Pirate AI — v0.55.0 + v0.56.0.
  *
- * Behaviors (priority order, evaluated each tick):
+ * The brain is intentionally small. The whole game boils down to
+ * five questions:
  *
- *   1. HUNT   — if a power-up is pending in the world, steer toward it
- *               (highest priority; the AI chases the glowing pickup).
- *   2. DODGE  — if any asteroid is within `dodgeDist`, thrust perpendicular
- *               to escape.
- *   3. TARGET — if any asteroid is within `targetDist`, steer toward the
- *               nearest one, full thrust.
- *   4. WANDER — no asteroids in range. Pick a random heading, full thrust;
- *               pick a new heading every `wanderTurnPeriod` seconds.
+ *   1. Is anything about to kill me?         → EVADE   (thrust perpendicular)
+ *   2. Is there an attackable ship in range?→ PIRATE  (predict + steer + fire)
+ *   3. Is there a powerup in range?         → COLLECT (predict + steer; coast-in)
+ *   4. Is there an asteroid in range?       → ENGAGE  (predict + steer; fire)
+ *   5. Nothing in range?                    → IDLE    (do nothing)
  *
- * The brain is a pure function (`aiBrainTick`) — it takes the ship's
- * current position + yaw, the live asteroid list, and a `time` clock, and
- * returns `{ yaw, thrust, mode }` where `yaw ∈ {-1, 0, +1}` and
- * `thrust ∈ {true, false}`. The factory wraps the brain, holds the
- * wander clock, drives the ship, and disposes the mesh on teardown.
+ * v0.56.0 added the PIRATE behavior — the FIRST extension of the
+ * registry this design was built for. Pirate AI is the foundation
+ * for the future "pirate mode" (combat between AI ships + the
+ * player ship). Future extensions (station landing, formation
+ * flight, etc.) follow the same shape.
  *
- * Infinite lives: the AI is decorative and never collides with the player.
- * The collision layer (`processCollisions`) only checks `demoAsteroids`
- * against the player ship; the AI ship is not a target.
+ * Architecture
+ * ------------
+ *   1. Pure helpers (`facingAngle`, `wrapAngle`, `predictPosition`,
+ *      `isTargetInFront`) — universal across any moving target.
+ *   2. `evaluatePerception(args)` — turns raw world state into a
+ *      snapshot `{ nearestAst, nearestPw, nearestShip }`. Add new
+ *      fields here when new target types appear.
+ *   3. `BEHAVIORS` — open-ended, priority-ordered registry. Each
+ *      entry: `{ name, run(snap, args) }` returning a decision or
+ *      null. Inserting a behavior at a priority slot is the ONLY
+ *      change needed to add a new AI mode.
+ *   4. `aiBrainTick(args)` — pure decision mapper. Calls perception,
+ *      walks BEHAVIORS in order, returns the first non-null decision
+ *      with `fire` set by the independent fire loop.
  *
- * If the AI drifts too far from the world origin (e.g. chasing an asteroid
- * out of the local area), it resets to a fresh spawn position so the
- * player always has a visible NPC in the demo field.
+ * Fire is decoupled from chase target. The ship can shoot any in-cone
+ * target (asteroid OR ship). Pirate AI shoots ships; demo AI shoots
+ * asteroids — same fire loop.
+ *
+ * Aggression is per-AI, controlled by the factory option
+ * `aggroDist`. Set `aggroDist: 0` for pacifist AIs (the demo AI),
+ * `aggroDist: 300` for aggressive AIs (pirates). Reads
+ * `AI_TUNABLES.aggroDist` as the live fallback so the tuner panel
+ * can adjust at runtime.
+ *
+ * What was deliberately REMOVED (and why)
+ * ---------------------------------------
+ *   - Velocity-error controller / final-approach guard → replaced by
+ *     `predict + steer` + a single `POWERUP_COAST_DIST` for stationary
+ *     pickups.
+ *   - Angular-velocity prediction (YAW_INERTIA_TAU counter-steer) →
+ *     ship.js already has YAW_INERTIA_TAU; the AI doesn't need to
+ *     model it.
+ *   - Adaptive closing-speed throttle → coast-in alone handles close
+ *     range.
+ *   - Sticky powerup commitment → re-evaluating every tick fixes the
+ *     "stale target" bug.
+ *   - 13 of 22 AI_TUNABLES → purged.
+ *
+ * v0.56.0 ADDITIONS
+ * ------------------
+ *   - `evaluatePerception` adds `nearestShip` (from `args.ships`,
+ *     duck-typed on `ship.position` / `ship.velocity`).
+ *   - `BEHAVIORS = [evade, pirate, collect, engage, idle]`.
+ *   - `evaluateFire` scans `args.ships` IN ADDITION to asteroids
+ *     (universal in-cone + in-range check).
+ *   - `aiBrainTick` accepts `aggroDist = AI_TUNABLES.aggroDist`.
+ *   - `createDemoAi` factory accepts `getShips` callback for the
+ *     perception layer; `options.aggroDist` overrides the live bag
+ *     for this AI's pirate aggressiveness.
  */
 
 import { createShip } from './ship.js';
+import { AI_TUNABLES } from './ai-tunables.js';
 
-const DEFAULTS = Object.freeze({
-  /** Dodges when any asteroid is within this many world units. */
-  dodgeDist: 14,
-  /** Targets the nearest asteroid when any are within this many units. */
-  targetDist: 90,
-  /** Seconds between random heading changes during WANDER. */
-  wanderTurnPeriod: 1.5,
-  /** If the AI drifts beyond this radius from origin, reset it. */
-  resetDist: 220,
-  /** Spawn radius (XZ) from origin for the initial position. */
+// ------------------------------------------------------------------
+// Factory-only constants (not part of the runtime tunable surface)
+// ------------------------------------------------------------------
+
+const FACTORY_DEFAULTS = Object.freeze({
+  /** Reset the AI ship if it drifts beyond this radius from origin. */
+  resetDist: 400,
+  /** Spawn radius (XZ) for the initial position + on-reset placement. */
   spawnRadius: 30,
-  /** Vertical jitter on spawn (cosmetic, scene has flat Y anyway). */
-  spawnJitterY: 0,
   /** Initial yaw (radians). */
   spawnYaw: 0,
   /**
-   * Half-angle of the "in front" cone (radians) for the TARGET-mode
-   * fire decision. The AI fires when the absolute angular difference
-   * between the ship's facing and the target direction is less than
-   * this value. ~0.35 rad ≈ 20° — a forgiving cone that rewards
-   * aggressive pursuit without making the AI feel like a turret.
+   * Default aggro distance for the pirate behavior (world units).
+   * Factory callers override per-AI via `options.aggroDist`.
+   * 0 = pacifist (the pirate behavior never fires — demo AI default).
+   * 300 = aggressive (pirates chase + shoot any ship within 300u).
    */
-  fireConeHalfAngle: 0.35,
-  /**
-   * Maximum pursuit range for power-ups (world units). If a pending
-   * power-up is farther than this, the AI ignores it and falls
-   * through to asteroid hunting.
-   */
-  powerupHuntDist: 500,
+  aggroDist: 0,
 });
 
 /**
- * Normalize an angle to (-PI, PI].
- * @param {number} a
- * @returns {number}
+ * Coast-in distance (world units) for the COLLECT behavior. When the
+ * ship is closer than this to a stationary target, thrust is cut and
+ * LINEAR_DRAG handles the deceleration. The single brake that
+ * prevents "fly past and orbit forever" at high cruise speed.
  */
-function wrapAngle(a) {
-  // Two-arg atan2-style wrap; keeps yaw steering in a single range.
+const POWERUP_COAST_DIST = 5;
+
+// ------------------------------------------------------------------
+// Pure math helpers
+// ------------------------------------------------------------------
+
+/**
+ * Wrap an angle into (-π, π].
+ */
+export function wrapAngle(a) {
   const TAU = Math.PI * 2;
   let r = a % TAU;
   if (r > Math.PI) r -= TAU;
-  else if (r <= -Math.PI) r += TAU;
+  else if (r < -Math.PI) r += TAU;
   return r;
 }
 
 /**
- * Convert a ship rotation `yaw` (the convention used by `ship.js`,
- * where the forward vector is `(-sin(yaw), 0, -cos(yaw))`) into the
- * angle of that forward vector in the standard (x, z) `atan2(z, x)`
- * space used by the rest of the brain.
- *
- * The two are NOT the same: `yaw = 0` means the ship faces -Z, which
- * in `atan2(z, x)` space is `-π/2`. The relationship is
- * `facingAngle = -π/2 - yaw (mod 2π)`. This helper centralizes the
- * conversion so the brain's steering + the `isTargetInFront` check
- * agree on which direction the ship is actually pointing.
- *
- * @param {number} yaw  radians (ship.js convention)
- * @returns {number}    radians in (-PI, PI], atan2(z, x) convention
+ * Ship forward direction in atan2(z, x) space.
+ * yaw=0 → forward=(-sin(0), 0, -cos(0)) = (0,0,-1) → angle = -π/2.
  */
 export function facingAngle(yaw) {
   return Math.atan2(-Math.cos(yaw), -Math.sin(yaw));
 }
 
 /**
- * Find the nearest asteroid to a point. Returns `null` if the list is empty.
- * Each asteroid must expose `getPosition()` returning `{x,y,z}` (a live
- * Three.js Vector3 or a plain object). The caller can also use a mock
- * that returns `{x,z}` — the brain only reads `.x` and `.z`.
- *
- * @param {{x:number,z:number}} pos
- * @param {Array<{getPosition: () => {x:number,z:number}}>} asteroids
- * @returns {{ dx:number, dz:number, dist:number, asteroid: any } | null}
+ * Predict a target's position at ship arrival time.
+ * `target = { pos: {x,z}, vel?: {x,z} }`. Universal — asteroids,
+ * powerups, ships. For targets with `vel.x === vel.z === 0`,
+ * collapses to the current position.
  */
-export function findNearestAsteroid(pos, asteroids) {
-  let best = null;
-  let bestDist = Infinity;
-  for (const a of asteroids) {
-    if (!a || typeof a.getPosition !== 'function') continue;
-    const p = a.getPosition();
-    if (!p) continue;
-    const dx = p.x - pos.x;
-    const dz = p.z - pos.z;
-    const d = Math.hypot(dx, dz);
-    if (d < bestDist) {
-      bestDist = d;
-      best = { dx, dz, dist: d, asteroid: a };
-    }
-  }
-  return best;
+export function predictPosition(target, aiPos, bulletSpeed) {
+  if (!target || !target.pos || typeof target.pos.x !== 'number') return null;
+  const dx = target.pos.x - aiPos.x;
+  const dz = target.pos.z - aiPos.z;
+  const d = Math.hypot(dx, dz);
+  const t = d / Math.max(bulletSpeed, 1);
+  const vx = (target.vel && typeof target.vel.x === 'number') ? target.vel.x : 0;
+  const vz = (target.vel && typeof target.vel.z === 'number') ? target.vel.z : 0;
+  return { x: target.pos.x + vx * t, z: target.pos.z + vz * t };
 }
 
 /**
- * True if the given target position is in front of a ship at `aiPos`
- * facing `aiYaw`, within a half-angle cone of `halfAngle` radians.
- *
- * The ship's forward direction in world space (matching ship.js) is
- * `(-sin(yaw), 0, -cos(yaw))` in (x, z). The angle of that vector in
- * the (x, z) plane is `atan2(-cos(yaw), -sin(yaw))` — we centralize
- * that in `facingAngle(yaw)`. We compare it to the angle of the
- * target direction (from the ship to the target): `atan2(dz, dx)`.
- *
- * @param {{x:number,z:number}} aiPos
- * @param {number} aiYaw  radians
- * @param {{x:number,z:number}} targetPos
- * @param {number} halfAngle  radians (e.g. 0.35 ≈ 20°)
- * @returns {boolean}
+ * True iff a target position is in front of the ship within
+ * `halfAngle` radians. Ship-yaw convention: yaw 0 faces -Z.
  */
 export function isTargetInFront(aiPos, aiYaw, targetPos, halfAngle) {
   if (!aiPos || !targetPos) return false;
   const dx = targetPos.x - aiPos.x;
   const dz = targetPos.z - aiPos.z;
-  // Guard against zero-length target direction.
   if (dx === 0 && dz === 0) return false;
   const targetAngle = Math.atan2(dz, dx);
-  const facing = facingAngle(aiYaw);
-  const diff = Math.abs(wrapAngle(targetAngle - facing));
+  const diff = Math.abs(wrapAngle(targetAngle - facingAngle(aiYaw)));
   return diff < halfAngle;
 }
 
 /**
- * Pure: decide what the AI should do this tick.
- *
- * Returns `{ yaw, thrust, mode, fire }` where:
- *   - `yaw`     ∈ {-1, 0, +1}  (steering; -1 = turn left, +1 = turn right)
- *   - `thrust`  boolean         (true = accelerate)
- *   - `mode`    'hunt' | 'dodge' | 'target' | 'wander'
- *   - `fire`    boolean         (true when the target is roughly in
- *                                front of the ship — only in TARGET mode)
- *
- * @param {{
- *   aiPos: { x: number, z: number },
- *   aiYaw: number,                            // current yaw in radians
- *   aiVel?: { x: number, z: number },         // current velocity (default zero)
- *   asteroids: Array<{ getPosition: () => any }>,
- *   time: number,                             // seconds since boot (for wander clock)
- *   powerupPos?: { x: number, z: number } | null,  // pending power-up position (optional)
- *   dodgeDist?: number,
- *   targetDist?: number,
- *   wanderTurnPeriod?: number,
- *   wanderHeading?: number | null,            // current wander target (radians); null = pick one
- *   wanderHeadingExpiresAt?: number,          // time at which to pick a new wander heading
- *   fireConeHalfAngle?: number,
- *   powerupHuntDist?: number,
- *   rng?: () => number,                       // injectable for tests; default Math.random
- * }} args
+ * Find the nearest item in a list to `pos`. `getPos` defaults to
+ * `.getPosition()` for duck-typed asteroid-like objects; pass an
+ * alternative for live-property targets (e.g. `s => s.position`
+ * for ships where `position` is a live object reference).
  */
-export function aiBrainTick({
-  aiPos,
-  aiYaw,
-  aiVel = { x: 0, z: 0 },
-  asteroids,
-  time,
-  powerupPos = null,
-  dodgeDist = DEFAULTS.dodgeDist,
-  targetDist = DEFAULTS.targetDist,
-  wanderTurnPeriod = DEFAULTS.wanderTurnPeriod,
-  wanderHeading = null,
-  wanderHeadingExpiresAt = 0,
-  fireConeHalfAngle = DEFAULTS.fireConeHalfAngle,
-  powerupHuntDist = DEFAULTS.powerupHuntDist,
-  rng = Math.random,
-}) {
-  if (!aiPos) throw new Error('aiBrainTick: aiPos is required');
-  if (typeof aiYaw !== 'number') throw new Error('aiBrainTick: aiYaw must be a number');
-  if (!Array.isArray(asteroids)) throw new Error('aiBrainTick: asteroids must be an array');
-
-  const nearest = findNearestAsteroid(aiPos, asteroids);
-
-  // ---- 1. HUNT POWER-UP (highest priority) ----------------------------
-  //
-  // Intercept controller — acts like a human pilot. Instead of
-  // blindly pointing at the target and thrusting (which causes
-  // circular orbits), it reads the ship's velocity and computes
-  // a closing speed, then decides between three phases:
-  //
-  //   BRAKE:  closing too fast → flip opposite velocity + burn
-  //   FINAL:  close & slow → coast in with gentle steering
-  //   APPROACH: steer toward target, thrust when aligned & need speed
-  //
-  // The result is a natural "approach → brake → coast" cycle that
-  // looks like a pilot managing their approach. No more circles.
-  if (powerupPos && typeof powerupPos.x === 'number') {
-    const pdx = powerupPos.x - aiPos.x;
-    const pdz = powerupPos.z - aiPos.z;
-    const pdist = Math.hypot(pdx, pdz);
-    if (pdist < powerupHuntDist) {
-      const speed = Math.hypot(aiVel.x, aiVel.z);
-      // Closing speed: velocity component toward the target.
-      // Positive = approaching, negative = receding.
-      const closingSpeed = pdist > 0.01
-        ? (pdx * aiVel.x + pdz * aiVel.z) / pdist
-        : 0;
-
-      // Desired closing speed: proportional to distance, capped
-      // at 20 u/s. At distance 50+ the AI cruises at 20 u/s;
-      // at distance 10 it slows to 10 u/s; at distance 2 it
-      // wants 2 u/s. This prevents overshoot.
-      const desiredClosing = Math.min(20, pdist * 1.0);
-
-      // ---- Phase 1: FINAL APPROACH (coast in) ------------------------
-      // Very close and slow enough. Coast in with gentle steering.
-      // No thrust — let momentum carry us to the pickup. The
-      // pickup radius handles the actual collection.
-      //
-      // Checked BEFORE brake so the ship doesn't flip-and-burn
-      // when it's practically on top of the power-up. Only extreme
-      // close-range overshoots (closingSpeed > 15 at pdist < 8)
-      // fall through to the brake phase.
-      if (pdist < 8 && closingSpeed < 15 && speed < 20) {
-        const targetAngle = Math.atan2(pdz, pdx);
-        const diff = wrapAngle(targetAngle - facingAngle(aiYaw));
-        return {
-          yaw: diff > 0.3 ? -1 : diff < -0.3 ? 1 : 0,
-          thrust: false,
-          mode: 'hunt',
-          fire: false,
-        };
-      }
-
-      // ---- Phase 2: BRAKE (flip and burn) ----------------------------
-      // We're approaching too fast to stop in time. Turn opposite
-      // to velocity and thrust to decelerate. This is the key
-      // behavior that prevents circular orbits — a human pilot
-      // would do exactly this: "I'm going too fast, let me flip
-      // and burn."
-      if (closingSpeed > desiredClosing * 1.5 && speed > 2) {
-        const brakeAngle = Math.atan2(-aiVel.z, -aiVel.x);
-        const diff = wrapAngle(brakeAngle - facingAngle(aiYaw));
-        return {
-          yaw: diff > 0.2 ? -1 : diff < -0.2 ? 1 : 0,
-          // Only thrust when pointing in the brake direction.
-          // If we thrust while still facing forward, we'd
-          // accelerate toward the target we're trying to stop for.
-          thrust: Math.abs(diff) < 0.6,
-          mode: 'hunt',
-          fire: false,
-        };
-      }
-
-      // ---- Phase 3: NORMAL APPROACH ----------------------------------
-      // Steer toward the target. Only thrust when we need more
-      // speed AND we're pointing the right way. This is the
-      // "cruise and correct" phase — the pilot sees the target,
-      // adjusts heading, and accelerates when aligned.
-      const targetAngle = Math.atan2(pdz, pdx);
-      const diff = wrapAngle(targetAngle - facingAngle(aiYaw));
-      const absDiff = Math.abs(diff);
-      const needSpeed = closingSpeed < desiredClosing;
-      const aligned = absDiff < 0.5;
-      return {
-        yaw: diff > 0.15 ? -1 : diff < -0.15 ? 1 : 0,
-        thrust: needSpeed && aligned,
-        mode: 'hunt',
-        fire: false,
-      };
+function findNearest(pos, items, getPos) {
+  const getter = getPos || ((i) => i && i.getPosition && i.getPosition());
+  let best = null;
+  let bestDist = Infinity;
+  for (const item of items) {
+    if (!item) continue;
+    const p = getter(item);
+    if (!p || typeof p.x !== 'number' || typeof p.z !== 'number') continue;
+    const dx = p.x - pos.x;
+    const dz = p.z - pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d < bestDist) {
+      bestDist = d;
+      best = { item, dx, dz, dist: d, pos: p };
     }
   }
+  return best;
+}
 
-  // ---- 2. DODGE -------------------------------------------------------
-  if (nearest && nearest.dist < dodgeDist) {
-    // Steer 90° counter-clockwise from the threat direction (in the
-    // (x, z) atan2 frame), so the ship thrusts perpendicular to the
-    // threat and escapes out the port (left) side. The diff is in
-    // the atan2 frame — we compare the ship's ACTUAL facing
-    // direction (facingAngle(yaw) = atan2(-cos(yaw), -sin(yaw))) to
-    // the escape direction. Comparing to `yaw` directly would be
-    // off by a 90° offset, because yaw=0 means the ship faces -Z,
-    // not 0. See `facingAngle` for the math.
-    const threatAngle = Math.atan2(nearest.dz, nearest.dx);
-    const escapeAngle = threatAngle + Math.PI / 2;
-    const diff = wrapAngle(escapeAngle - facingAngle(aiYaw));
-    return {
-      yaw: diff > 0.1 ? -1 : diff < -0.1 ? 1 : 0,
-      thrust: true,
-      mode: 'dodge',
-      fire: false,
-    };
-  }
+// ------------------------------------------------------------------
+// Universal steering (one helper, used by every non-idle behavior)
+// ------------------------------------------------------------------
 
-  // ---- 3. TARGET (middle priority) ------------------------------------
-  if (nearest && nearest.dist < targetDist) {
-    // Steer toward the nearest asteroid. The angle to the target from
-    // our position is atan2(dz, dx) in the (x, z) plane. Our facing
-    // angle in the SAME plane is `facingAngle(aiYaw)`. The signed
-    // shortest rotation from facing to target is the steering.
-    //
-    // The brain returns `yaw: +1` to mean "turn right" — the ship
-    // applies that as `yaw += YAW_SPEED * dt`, which makes the facing
-    // angle in atan2 space DECREASE (yaw and facing are anti-
-    // correlated). So the diff sign flips:
-    //   diff > 0  → target is to the right of facing → yaw: -1
-    //   diff < 0  → target is to the left of facing  → yaw: +1
-    // which is the opposite sign of the (wrong) `aiYaw`-based diff
-    // the older code used.
-    const targetAngle = Math.atan2(nearest.dz, nearest.dx);
-    const diff = wrapAngle(targetAngle - facingAngle(aiYaw));
-    // Fire when the target is roughly in front (within the cone).
-    // isTargetInFront reads the asteroid's *current* world position
-    // (so a fast-moving target can dodge the AI's aim — same as the
-    // player trying to lead a moving target).
-    const targetPos = nearest.asteroid.getPosition();
-    const fire = isTargetInFront(aiPos, aiYaw, targetPos, fireConeHalfAngle);
-    return {
-      yaw: diff > 0.1 ? -1 : diff < -0.1 ? 1 : 0,
-      thrust: true,
-      mode: 'target',
-      fire,
-    };
-  }
+/**
+ * Compute heading error to a target position (radians, (-π, π]).
+ */
+function headingError(args, targetPos) {
+  const dx = targetPos.x - args.aiPos.x;
+  const dz = targetPos.z - args.aiPos.z;
+  if (dx === 0 && dz === 0) return 0;
+  const targetAngle = Math.atan2(dz, dx);
+  return wrapAngle(targetAngle - facingAngle(args.aiYaw));
+}
 
-  // ---- 4. WANDER (default) --------------------------------------------
-  // Pick (or refresh) a wander heading. The heading is an angle in the
-  // (x, z) atan2 frame, so we compare it to the ship's actual facing
-  // direction (facingAngle), not to `yaw` directly.
-  //
-  // When asteroids are within awareness range (2.5× targetDist), the
-  // heading is biased toward the nearest one. This makes the AI drift
-  // toward the action instead of rocketing off into empty space. The
-  // jitter (±72°) keeps the approach from being a dead-straight line.
-  //
-  // Thrust is only applied when the heading is roughly aligned
-  // (|diff| < 0.6 rad ≈ 34°). This prevents the ship from blasting
-  // past asteroids at full speed — it turns first, THEN accelerates.
-  // The result: more time in TARGET range, more shots fired.
-  let heading = wanderHeading;
-  let expiresAt = wanderHeadingExpiresAt;
-  if (heading === null || time >= expiresAt) {
-    // Bias toward nearest asteroid if one is within awareness range.
-    const awarenessDist = targetDist * 2.5;
-    if (nearest && nearest.dist < awarenessDist) {
-      const targetAngle = Math.atan2(nearest.dz, nearest.dx);
-      const jitter = (rng() * 2 - 1) * Math.PI * 0.4; // ±72°
-      heading = targetAngle + jitter;
-    } else {
-      // No nearby asteroids — fully random heading.
-      heading = (rng() * 2 - 1) * Math.PI;
-    }
-    expiresAt = time + wanderTurnPeriod;
-  }
-  const diff = wrapAngle(heading - facingAngle(aiYaw));
-  // Only thrust when roughly aligned with the heading. This is the
-  // key behavior change: the AI "turns then accelerates" instead of
-  // always thrusting. At high speed the ship would blow past the
-  // target zone; coasting while turning keeps the speed manageable.
-  const aligned = Math.abs(diff) < 0.6;
+/**
+ * Turn a heading error into a {-1, 0, +1} yaw command.
+ * Positive error = target is LEFT of ship's facing → yaw=-1 (turn right
+ * per ship.js convention).
+ */
+function yawCommandFromError(err, deadband) {
+  if (Math.abs(err) < deadband) return 0;
+  return err > 0 ? -1 : 1;
+}
+
+/**
+ * Universal steer helper. Returns `{ yaw, thrust, err }`.
+ * Thrust is ON when |err| < thrustHeadingGate, unless `forceThrust`.
+ */
+function steerTo(args, targetPos, { forceThrust = false } = {}) {
+  const err = headingError(args, targetPos);
+  const yaw = yawCommandFromError(err, args.yawDeadband);
+  const thrust = forceThrust || Math.abs(err) < args.thrustHeadingGate;
+  return { yaw, thrust, err };
+}
+
+/**
+ * The asteroid-specific prediction helper. Calls the universal
+ * `predictPosition` after extracting `pos + vel` from an
+ * asteroid-like duck-typed object (must have `getPosition()` and
+ * optionally `getVelocity()`).
+ */
+function predictAsteroidPosition(asteroid, aiPos, bulletSpeed) {
+  if (!asteroid || typeof asteroid.getPosition !== 'function') return null;
+  const pos = asteroid.getPosition();
+  if (!pos) return null;
+  return predictPosition(
+    { pos, vel: typeof asteroid.getVelocity === 'function' ? asteroid.getVelocity() : null },
+    aiPos,
+    bulletSpeed,
+  );
+}
+
+/**
+ * Ship-target prediction helper. Reads from a live ship object
+ * (ship.position, ship.velocity) instead of asteroid-like methods.
+ * Ships in this codebase don't expose `getPosition()` — position is
+ * a direct property on the ship object.
+ */
+function predictShipPosition(ship, aiPos, bulletSpeed) {
+  if (!ship || !ship.position || typeof ship.position.x !== 'number') return null;
+  return predictPosition(
+    { pos: ship.position, vel: ship.velocity || { x: 0, z: 0 } },
+    aiPos,
+    bulletSpeed,
+  );
+}
+
+// ------------------------------------------------------------------
+// Behavior registry (priority-ordered, future-extensible)
+// ------------------------------------------------------------------
+
+/**
+ * EVADE behavior: nearest asteroid within evadeDist → turn 90° perpendicular,
+ * thrust hard. Uses `forceThrust` because perpendicular is still the
+ * safest escape vector even when misaligned.
+ */
+function evadeBehavior(snap, args) {
+  const a = snap.nearestAst;
+  if (!a || a.dist >= args.evadeDist) return null;
+  const threatAngle = Math.atan2(a.dz, a.dx);
+  // 90° perpendicular, pick the +90° side (consistent).
+  const escapeAngle = threatAngle + Math.PI / 2;
+  const targetPos = {
+    x: args.aiPos.x + Math.cos(escapeAngle),
+    z: args.aiPos.z + Math.sin(escapeAngle),
+  };
+  const steer = steerTo(args, targetPos, { forceThrust: true });
   return {
-    yaw: diff > 0.1 ? -1 : diff < -0.1 ? 1 : 0,
-    thrust: aligned,
-    mode: 'wander',
-    fire: false,
-    // Side-channel: the factory reads these to maintain wander state.
-    _wanderHeading: heading,
-    _wanderHeadingExpiresAt: expiresAt,
+    yaw: steer.yaw,
+    thrust: steer.thrust,
+    mode: 'evade',
+    reason: `asteroid ${a.dist.toFixed(1)}u < ${args.evadeDist.toFixed(1)}u`,
   };
 }
 
 /**
- * Decide whether the AI has drifted too far and should be reset.
- * Pure — no side effects.
+ * PIRATE behavior (v0.56.0): nearest ship within aggroDist →
+ * predict at bullet flight + steer. The chase target type is 'ship',
+ * but the universal `predictPosition` + `steerTo` helpers handle
+ * every detail. Distinguishes from ENGAGE only by target type —
+ * visible in the AI debug overlay as `mode: 'pirate'`.
  *
- * @param {{x:number,z:number}} pos
- * @param {number} [resetDist=220]
- * @returns {boolean}
+ * Per-AI aggression is controlled by `aggroDist`:
+ *   - `aggroDist: 0` (demo AI default): never engages — the
+ *     predicate `a.dist >= args.aggroDist` is always true → null.
+ *   - `aggroDist: 300` (pirate default): chases + shoots any ship
+ *     within 300u.
  */
-export function shouldResetAi(pos, resetDist = DEFAULTS.resetDist) {
+function pirateBehavior(snap, args) {
+  if (!snap.nearestShip || snap.nearestShip.dist >= args.aggroDist) return null;
+  const s = snap.nearestShip;
+  const predicted = predictShipPosition(s.item, args.aiPos, args.bulletSpeed);
+  if (!predicted) return null;
+  const steer = steerTo(args, predicted);
+  return {
+    yaw: steer.yaw,
+    thrust: steer.thrust,
+    mode: 'pirate',
+    reason: `pirate target ${s.dist.toFixed(1)}u`,
+  };
+}
+
+/**
+ * COLLECT behavior: reachable powerup → predict + steer + coast-in.
+ * Stationary powerups collapse `predictPosition` to current pos, but
+ * the same code path handles a moving powerup if powerups ever drift.
+ */
+function collectBehavior(snap, args) {
+  if (!snap.nearestPw || snap.nearestPw.dist >= args.powerupMaxChaseDist) return null;
+  const pw = snap.nearestPw;
+  const predicted = predictPosition(pw, args.aiPos, args.bulletSpeed);
+  if (!predicted) return null;
+  const dist = pw.dist;
+  const coastIn = dist < POWERUP_COAST_DIST;
+  const steer = steerTo(args, predicted, { forceThrust: false });
+  return {
+    yaw: steer.yaw,
+    thrust: !coastIn && steer.thrust,
+    mode: 'powerup',
+    reason: `powerup ${dist.toFixed(1)}u${coastIn ? ' (coast)' : ''}`,
+  };
+}
+
+/**
+ * ENGAGE behavior: nearest asteroid → predict at bullet flight + steer.
+ * Same code path for moving and stationary asteroids.
+ */
+function engageBehavior(snap, args) {
+  if (!snap.nearestAst) return null;
+  const ast = snap.nearestAst;
+  const predicted = predictAsteroidPosition(ast.item, args.aiPos, args.bulletSpeed);
+  const targetPos = predicted || ast.pos;
+  const steer = steerTo(args, targetPos);
+  return {
+    yaw: steer.yaw,
+    thrust: steer.thrust,
+    mode: 'asteroid',
+    reason: `asteroid ${ast.dist.toFixed(1)}u`,
+  };
+}
+
+/**
+ * IDLE behavior: fallback when no target is in range.
+ */
+function idleBehavior() {
+  return { yaw: 0, thrust: false, mode: 'idle', reason: 'no targets in range' };
+}
+
+// Priority order:
+//   1. EVADE   — immediate threat to survival
+//   2. PIRATE  — aggressive ships target other ships
+//   3. COLLECT — per user spec, "priority to collect"
+//   4. ENGAGE  — fallback for asteroids
+//   5. IDLE    — no behavior matched
+const BEHAVIORS = [
+  { name: 'evade', run: evadeBehavior },
+  { name: 'pirate', run: pirateBehavior },
+  { name: 'collect', run: collectBehavior },
+  { name: 'engage', run: engageBehavior },
+  { name: 'idle', run: idleBehavior },
+];
+
+// ------------------------------------------------------------------
+// Perception (snapshot of the world for the behavior layer)
+// ------------------------------------------------------------------
+
+/**
+ * Evaluate perception — nearest asteroid, nearest powerup, nearest
+ * ship. Returns a snapshot the behaviors read. Ship duck-typing is
+ * live-property (`s.position` is an object ref) instead of the
+ * asteroid-style `getPosition()` method.
+ */
+function evaluatePerception(args) {
+  const nearestAst = findNearest(args.aiPos, args.asteroids || []);
+  const nearestPw = args.powerupPos
+    ? {
+        pos: args.powerupPos,
+        vel: args.powerupVel || { x: 0, z: 0 },
+        dist: Math.hypot(
+          args.powerupPos.x - args.aiPos.x,
+          args.powerupPos.z - args.aiPos.z,
+        ),
+      }
+    : null;
+  // Ships: live-property duck-typing (s.position is a ref, not a method).
+  const nearestShip = findNearest(args.aiPos, args.ships || [], (s) => s.position);
+  return { nearestAst, nearestPw, nearestShip };
+}
+
+// ------------------------------------------------------------------
+// Fire loop (independent of chase target, scans asteroids AND ships)
+// ------------------------------------------------------------------
+
+/**
+ * Decide whether the AI should fire this tick. Universal in-cone +
+ * in-range check across every target type (asteroids + ships).
+ * Independent of chase target so the ship can shoot while chasing.
+ */
+function evaluateFire(args) {
+  // Asteroids (asteroid-like duck typing: getPosition + getVelocity).
+  for (const a of args.asteroids || []) {
+    if (!a || typeof a.getPosition !== 'function') continue;
+    const predicted = predictAsteroidPosition(a, args.aiPos, args.bulletSpeed);
+    if (!predicted) continue;
+    const d = Math.hypot(predicted.x - args.aiPos.x, predicted.z - args.aiPos.z);
+    if (d < args.fireMinDist || d > args.fireMaxDist) continue;
+    if (isTargetInFront(args.aiPos, args.aiYaw, predicted, args.fireHeadingGate)) {
+      return true;
+    }
+  }
+  // Ships (live-property duck typing: position + velocity).
+  for (const s of args.ships || []) {
+    if (!s || !s.position) continue;
+    const predicted = predictShipPosition(s, args.aiPos, args.bulletSpeed);
+    if (!predicted) continue;
+    const d = Math.hypot(predicted.x - args.aiPos.x, predicted.z - args.aiPos.z);
+    if (d < args.fireMinDist || d > args.fireMaxDist) continue;
+    if (isTargetInFront(args.aiPos, args.aiYaw, predicted, args.fireHeadingGate)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ------------------------------------------------------------------
+// Public brain
+// ------------------------------------------------------------------
+
+/**
+ * Decide what the AI should do this tick. Pure function.
+ *
+ * @param {object} args
+ * @param {{x,y,z}} args.aiPos — required
+ * @param {number} args.aiYaw  — required (radians, ship.js convention)
+ * @param {Array}  args.asteroids — required (array of duck-typed entities)
+ * @param {Array?} args.ships     — optional, list of live ships (v0.56.0)
+ * @param {{x,z}?} args.powerupPos — optional
+ * @param {{x,z}?} args.powerupVel — optional
+ * @param {number} args.evadeDist, args.aggroDist, args.powerupMaxChaseDist,
+ *               args.thrustHeadingGate, args.yawDeadband,
+ *               args.fireHeadingGate, args.fireMinDist, args.fireMaxDist,
+ *               args.bulletSpeed — optional; fall through to AI_TUNABLES
+ * @returns {{ yaw, thrust, mode, fire, reason }}
+ */
+export function aiBrainTick({
+  aiPos,
+  aiYaw,
+  asteroids,
+  ships = [],
+  powerupPos = null,
+  powerupVel = null,
+  evadeDist = AI_TUNABLES.evadeDist,
+  aggroDist = AI_TUNABLES.aggroDist,
+  powerupMaxChaseDist = AI_TUNABLES.powerupMaxChaseDist,
+  thrustHeadingGate = AI_TUNABLES.thrustHeadingGate,
+  yawDeadband = AI_TUNABLES.yawDeadband,
+  fireHeadingGate = AI_TUNABLES.fireHeadingGate,
+  fireMinDist = AI_TUNABLES.fireMinDist,
+  fireMaxDist = AI_TUNABLES.fireMaxDist,
+  bulletSpeed = AI_TUNABLES.bulletSpeed,
+} = {}) {
+  if (!aiPos) throw new Error('aiBrainTick: aiPos is required');
+  if (typeof aiYaw !== 'number') throw new Error('aiBrainTick: aiYaw must be a number');
+  if (!Array.isArray(asteroids)) throw new Error('aiBrainTick: asteroids must be an array');
+  if (ships && !Array.isArray(ships)) {
+    throw new Error('aiBrainTick: ships must be an array');
+  }
+
+  const args = {
+    aiPos, aiYaw, asteroids, ships,
+    powerupPos, powerupVel,
+    evadeDist, aggroDist, powerupMaxChaseDist,
+    thrustHeadingGate, yawDeadband,
+    fireHeadingGate, fireMinDist, fireMaxDist,
+    bulletSpeed,
+  };
+  const snap = evaluatePerception(args);
+  for (const b of BEHAVIORS) {
+    const decision = b.run(snap, args);
+    if (decision) {
+      decision.fire = evaluateFire(args);
+      return decision;
+    }
+  }
+  return { yaw: 0, thrust: false, mode: 'idle', fire: false, reason: 'no behavior fired' };
+}
+
+// ------------------------------------------------------------------
+// Factory helpers (unchanged API surface)
+// ------------------------------------------------------------------
+
+export function shouldResetAi(pos, resetDist = FACTORY_DEFAULTS.resetDist) {
   if (!pos) return false;
   return Math.hypot(pos.x, pos.z) > resetDist;
 }
 
-/**
- * Build a random spawn position within `radius` of the origin (XZ plane).
- * Pure.
- *
- * @param {number} radius
- * @param {() => number} [rng]
- * @returns {{ position: {x:number,y:number,z:number}, yaw: number }}
- */
-export function pickAiSpawn(radius = DEFAULTS.spawnRadius, rng = Math.random) {
+export function pickAiSpawn(radius = FACTORY_DEFAULTS.spawnRadius, rng = Math.random) {
   const angle = rng() * Math.PI * 2;
-  const r = radius * (0.4 + rng() * 0.6); // 0.4–1.0 × radius, so the AI isn't always at the edge
+  const r = radius * (0.4 + rng() * 0.6);
   return {
     position: { x: Math.cos(angle) * r, y: 0, z: Math.sin(angle) * r },
     yaw: rng() * Math.PI * 2,
   };
 }
 
+// ------------------------------------------------------------------
+// Demo AI / Pirate AI factory (same API surface, pirate role via
+// `options.aggroDist > 0`)
+// ------------------------------------------------------------------
+
 /**
- * Create a demo AI ship. Wires the pure brain above to a live ship.
+ * Create an AI ship. The role (demo vs pirate) is selected via
+ * `options.aggroDist` — pirates set it to a positive value (300 by
+ * default in AI_TUNABLES) so the pirate behavior fires; demo AIs
+ * leave it at 0 (default) so pirate never activates.
  *
- * @param {{
- *   scene: import('three').Scene,
- *   asteroids: Array<{ getPosition: () => any }>,
- *   weapon?: { fire: (opts: any) => number | boolean } | null,  // duck-typed weapon
- *   getPowerupPos?: () => { x: number, z: number } | null,      // pending power-up position
- *   options?: {
- *     dodgeDist?: number,
- *     targetDist?: number,
- *     wanderTurnPeriod?: number,
- *     resetDist?: number,
- *     spawnRadius?: number,
- *     fireConeHalfAngle?: number,
- *     shipFactory?: (opts: { scene: import('three').Scene, position: {x:number,y:number,z:number} }) => any,
- *     rng?: () => number,
- *     brain?: { tick: (args: any) => { yaw: number, thrust: boolean, mode: string, fire: boolean } } | null,
- *   },
- * }} opts
+ * @param {object} cfg
+ * @param {THREE.Scene} cfg.scene — required.
+ * @param {Array}      cfg.asteroids — required.
+ * @param {object?}    cfg.weapon — duck-typed `{ fire(opts) }`.
+ * @param {function?}  cfg.getPowerupPos — () => { x, z } | null
+ * @param {function?}  cfg.getPowerupVel — () => { x, z }
+ * @param {function?}  cfg.getActiveWeapon — () => 'bullet' | 'laser'
+ * @param {function?}  cfg.getShips — () => ship[] (v0.56.0). Each ship
+ *                  must have live `.position` and `.velocity`.
+ * @param {object?}    cfg.options — per-AI overrides:
+ *     - resetDist, spawnRadius (factory-only, not in AI_TUNABLES)
+ *     - aggroDist (0 for demo, 300 for pirate — overrides AI_TUNABLES)
+ *     - shipFactory, rng (test seam)
+ *     - any brain tunable (overrides AI_TUNABLES for this AI)
  */
-export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = null, options = {} } = {}) {
+export function createDemoAi({
+  scene,
+  asteroids,
+  weapon = null,
+  getPowerupPos = null,
+  getPowerupVel = null,
+  getActiveWeapon = null,
+  getShips = null,
+  options = {},
+} = {}) {
   if (!scene) throw new Error('createDemoAi: `scene` is required');
   if (!Array.isArray(asteroids)) throw new Error('createDemoAi: `asteroids` must be an array');
 
-  const opts = { ...DEFAULTS, ...options };
+  const opts = { ...FACTORY_DEFAULTS, ...options };
   const rng = opts.rng || Math.random;
   const shipFactory = opts.shipFactory || createShip;
-  const brain = opts.brain || null;
 
-  // ---- Initial spawn ---------------------------------------------------
   const initial = pickAiSpawn(opts.spawnRadius, rng);
   const ship = shipFactory({ scene, position: initial.position });
-  ship.rotation.yaw = initial.yaw;
+  ship.rotation.yaw = opts.spawnYaw;
 
-  // ---- Wander state (mutable, private) --------------------------------
-  // `wanderHeading` is in the (x, z) atan2 frame, NOT the ship's yaw
-  // space. The brain's WANDER branch compares `heading - facingAngle(
-  // aiYaw)`, and `facingAngle` returns an atan2 angle. We start with
-  // `null` and let the brain pick a fresh heading in atan2 space on
-  // the first tick (the `time >= expiresAt` check below — time is 0
-  // before the first `update(dt)`, but the brain reads `time` after
-  // the factory's `time += dt`, so it's strictly > 0).
-  let wanderHeading = null;
-  let wanderHeadingExpiresAt = 0;
   let time = 0;
-  // Cached mode from the most recent brain decision. The HUD reads
-  // this via `getLastMode()` once per frame, so we don't pay the
-  // cost of re-running the brain (especially the trained network).
-  let lastMode = 'wander';
-
-  // ---- Per-tick --------------------------------------------------------
-  // When paused (enabled = false), the AI is a no-op — no movement,
-  // no shooting, no brain activity. Used to pause the AI outside of
-  // DEMO (see Phase 5: state-driven lifecycle).
   let enabled = true;
+  let disposed = false;
+  let lastMode = 'idle';
+  let lastDecision = {
+    mode: 'idle',
+    yaw: 0,
+    thrust: false,
+    fire: false,
+    reason: 'not yet ticked',
+    activeWeapon: 'bullet',
+    target: null,
+    predictedPos: null,
+    nearest: null,
+    threatsCount: 0,
+  };
+
+  function spawn() {
+    const sp = pickAiSpawn(opts.spawnRadius, rng);
+    ship.reset(sp.position);
+    ship.rotation.yaw = opts.spawnYaw;
+  }
+
+  function brainArgsFromShip() {
+    return {
+      aiPos: ship.position,
+      aiYaw: ship.rotation.yaw,
+      asteroids,
+      ships: getShips ? getShips() : [],
+      powerupPos: getPowerupPos ? getPowerupPos() : null,
+      powerupVel: getPowerupVel ? getPowerupVel() : { x: 0, z: 0 },
+      activeWeapon: getActiveWeapon ? getActiveWeapon() : 'bullet',
+      ...opts,
+    };
+  }
 
   function update(dt) {
     if (dt <= 0) return;
     if (!enabled) return;
     time += dt;
 
-    // Reset if too far from origin
     if (shouldResetAi(ship.position, opts.resetDist)) {
-      const spawn = pickAiSpawn(opts.spawnRadius, rng);
-      ship.reset(spawn.position);
-      ship.rotation.yaw = spawn.yaw;
-      // Clear the wander heading so the brain picks a fresh one in
-      // atan2 space on the next tick (see the init comment for why
-      // we don't seed it from the ship's yaw).
-      wanderHeading = null;
-      wanderHeadingExpiresAt = 0;
+      spawn();
     }
 
-    // Decide what to do
-    const brainArgs = {
-      aiPos: ship.position,
-      aiYaw: ship.rotation.yaw,
-      aiVel: ship.velocity,
-      asteroids,
-      time,
-      powerupPos: getPowerupPos ? getPowerupPos() : null,
-      dodgeDist: opts.dodgeDist,
-      targetDist: opts.targetDist,
-      wanderTurnPeriod: opts.wanderTurnPeriod,
-      fireConeHalfAngle: opts.fireConeHalfAngle,
-      wanderHeading,
-      wanderHeadingExpiresAt,
-      rng,
+    const args = brainArgsFromShip();
+    const decision = aiBrainTick(args);
+    lastMode = decision.mode;
+
+    // Build the debug-overlay-friendly snapshot.
+    const snap = evaluatePerception(args);
+    const nearest = snap.nearestAst;
+    let target = null;
+    if (decision.mode === 'powerup' && snap.nearestPw) {
+      target = { pos: snap.nearestPw.pos, mode: 'powerup', dist: snap.nearestPw.dist };
+    } else if ((decision.mode === 'asteroid' || decision.mode === 'evade') && nearest) {
+      target = { pos: nearest.pos, mode: 'asteroid', dist: nearest.dist };
+    } else if (decision.mode === 'pirate' && snap.nearestShip) {
+      const s = snap.nearestShip;
+      target = { pos: s.pos, mode: 'ship', dist: s.dist };
+    }
+    let predictedPos = null;
+    if (target && target.mode === 'asteroid') {
+      predictedPos = predictAsteroidPosition(nearest.item, args.aiPos, args.bulletSpeed);
+    } else if (target && target.mode === 'powerup') {
+      predictedPos = predictPosition(snap.nearestPw, args.aiPos, args.bulletSpeed);
+    } else if (target && target.mode === 'ship') {
+      predictedPos = predictShipPosition(snap.nearestShip.item, args.aiPos, args.bulletSpeed);
+    }
+    let threatsCount = 0;
+    for (const a of asteroids) {
+      if (!a || typeof a.getPosition !== 'function') continue;
+      const p = a.getPosition();
+      if (!p) continue;
+      const d = Math.hypot(p.x - ship.position.x, p.z - ship.position.z);
+      if (d < args.evadeDist) threatsCount += 1;
+    }
+
+    lastDecision = {
+      mode: decision.mode,
+      yaw: decision.yaw,
+      thrust: decision.thrust,
+      fire: decision.fire,
+      reason: decision.reason || '',
+      activeWeapon: getActiveWeapon ? getActiveWeapon() : 'bullet',
+      target: target ? { pos: { ...target.pos }, mode: target.mode, dist: target.dist } : null,
+      predictedPos: predictedPos ? { ...predictedPos } : null,
+      nearest: nearest
+        ? { pos: { x: nearest.dx + ship.position.x, z: nearest.dz + ship.position.z }, dist: nearest.dist }
+        : null,
+      threatsCount,
     };
-    const decision = brain ? brain.tick(brainArgs) : aiBrainTick(brainArgs);
-
-    // Cache the mode the brain actually decided on, for the HUD.
-    if (typeof decision.mode === 'string') {
-      lastMode = decision.mode;
-    }
-
-    // Commit wander state changes (side-channel from brain)
-    if (decision._wanderHeading !== undefined) {
-      wanderHeading = decision._wanderHeading;
-    }
-    if (decision._wanderHeadingExpiresAt !== undefined) {
-      wanderHeadingExpiresAt = decision._wanderHeadingExpiresAt;
-    }
 
     ship.setYaw(decision.yaw);
     ship.setThrust(decision.thrust);
     ship.update(dt);
 
-    // Fire when the brain says the target is in front. The `weapon`
-    // is duck-typed (just needs `.fire({ origin, direction, asteroids? })`)
-    // so the caller can route through a bullet pool, a laser weapon,
-    // or a smart "use laser if active else bullets" wrapper. The
-    // weapon / pool handles its own cooldown (most per-frame calls
-    // are rejected when the pool is on cooldown). The AI's effective
-    // fire rate matches the player's: ~5.5 shots/sec for bullets,
-    // 12.5 pulses/sec for the laser.
     if (decision.fire && weapon && typeof weapon.fire === 'function') {
       const yaw = ship.rotation.yaw;
       weapon.fire({
         origin: ship.position,
         direction: { x: -Math.sin(yaw), y: 0, z: -Math.cos(yaw) },
-        // The AI passes the asteroid list so the laser can raycast
-        // for piercing hits. The bullet pool ignores it.
         asteroids,
       });
     }
   }
 
   function dispose() {
-    // Reuse the ship's own dispose semantics if available; otherwise
-    // remove the mesh from the scene.
+    disposed = true;
     if (typeof ship.dispose === 'function') {
       ship.dispose();
     } else if (ship.mesh && scene.children.includes(ship.mesh)) {
@@ -558,40 +667,53 @@ export function createDemoAi({ scene, asteroids, weapon = null, getPowerupPos = 
     }
   }
 
+  /**
+   * v0.60.0: has this AI been disposed? Cross-targeting pirates
+   * (pirate1's `getShips` includes pirate2) need to filter out
+   * dead pirates so their bullets keep firing at the survivors.
+   * Without this guard a disposed pirate's stale ship object would
+   * still pass the `position` null-check (it's still a valid
+   * `{x,y,z}` reference, just no longer in the scene).
+   */
+  function isAlive() {
+    return !disposed;
+  }
+
   return {
     update,
     dispose,
     getShip: () => ship,
-    /** Pause or resume the AI. When paused, update() is a no-op. */
+    isAlive,
     setEnabled: (v) => { enabled = !!v; },
     isEnabled: () => enabled,
-    /** Exposed for tests / dev tooling. Re-runs the brain — cheap
-     * for the heuristic, but the trained net pays a forward pass. */
-    getMode: () => {
-      const modeArgs = {
-        aiPos: ship.position,
-        aiYaw: ship.rotation.yaw,
-        aiVel: ship.velocity,
-        asteroids,
-        time,
-        powerupPos: getPowerupPos ? getPowerupPos() : null,
-        dodgeDist: opts.dodgeDist,
-        targetDist: opts.targetDist,
-        wanderTurnPeriod: opts.wanderTurnPeriod,
-        fireConeHalfAngle: opts.fireConeHalfAngle,
-        wanderHeading,
-        wanderHeadingExpiresAt,
-        rng,
-      };
-      return brain ? brain.tick(modeArgs).mode : aiBrainTick(modeArgs).mode;
-    },
-    /**
-     * Read the mode the AI decided on its most recent update(). Cheap
-     * (closure read). Use this from per-frame consumers like the
-     * debug HUD — `getMode()` re-runs the brain, which is wasteful
-     * for the trained network.
-     * @returns {string}
-     */
+    getMode: () => aiBrainTick(brainArgsFromShip()).mode,
     getLastMode: () => lastMode,
+    getLastDecision: () => Object.freeze({
+      mode: lastDecision.mode,
+      yaw: lastDecision.yaw,
+      thrust: lastDecision.thrust,
+      fire: lastDecision.fire,
+      reason: lastDecision.reason,
+      activeWeapon: lastDecision.activeWeapon,
+      target: lastDecision.target
+        ? Object.freeze({
+            pos: Object.freeze({ ...lastDecision.target.pos }),
+            mode: lastDecision.target.mode,
+            dist: lastDecision.target.dist,
+          })
+        : null,
+      predictedPos: lastDecision.predictedPos
+        ? Object.freeze({ ...lastDecision.predictedPos })
+        : null,
+      nearest: lastDecision.nearest
+        ? Object.freeze({
+            pos: Object.freeze({ ...lastDecision.nearest.pos }),
+            dist: lastDecision.nearest.dist,
+          })
+        : null,
+      threatsCount: lastDecision.threatsCount,
+      lookaheadThreats: 0,
+      committedTargetSince: 0,
+    }),
   };
 }

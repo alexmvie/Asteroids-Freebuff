@@ -7,6 +7,10 @@ import {
   Color,
   Box3,
   Vector3,
+  TextureLoader,
+  SRGBColorSpace,
+  RepeatWrapping,
+  Texture,
 } from 'three';
 
 import {
@@ -16,10 +20,20 @@ import {
   YAW_SPEED,
   ROLL_MAX,
   ROLL_DAMP,
+  YAW_INERTIA_TAU,
+  MAX_ENERGY,
+  ENERGY_RECHARGE_PER_SEC,
+  BUFF_DEFAULT_DURATIONS_S,
+  SPAWN_SHIELD_DURATION_S,
 } from './ship-constants.js';
 // PLAY_PLANE_Y is owned by the world data-model layer (the play plane
 // is a world concept, not a ship concept). See ../world/chunk-constants.js.
 import { PLAY_PLANE_Y } from '../world/chunk-constants.js';
+// v0.49.0: live-tunable ship max-speed. The panel writes
+// `AI_TUNABLES.shipMaxSpeed`; the ship read falls back to the
+// frozen `MAX_SPEED` constant if the bag is absent or the value
+// is non-finite.
+import { AI_TUNABLES } from './ai-tunables.js';
 
 /**
  * Ship entity — a self-contained 3D ship with a 2DOF controller.
@@ -42,9 +56,9 @@ import { PLAY_PLANE_Y } from '../world/chunk-constants.js';
  *   - `ship.update(dt)`         advance physics; dt is seconds
  *   - `ship.reset(position?)`   snap back to a given world position
  *
- * @param {{ scene: import('three').Scene, position?: { x: number, y: number, z: number } }} opts
+ * @param {{ scene: import('three').Scene, position?: { x: number, y: number, z: number }, events?: import('../systems/events.js').EventBus }} opts
  */
-export function createShip({ scene, position = { x: 0, y: 0, z: 0 } } = {}) {
+export function createShip({ scene, position = { x: 0, y: 0, z: 0 }, events = null } = {}) {
   if (!scene) throw new Error('createShip: `scene` is required');
 
   // Tunables (THRUST_ACCEL, MAX_SPEED, LINEAR_DRAG, YAW_SPEED,
@@ -74,28 +88,67 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 } } = {}) {
   // is +Y; rotateX(-PI/2) maps +Y → -Z.
   const bodyGeom = new ConeGeometry(1.0, 2.5, 4, 1);
   bodyGeom.rotateX(-Math.PI / 2);
+  // v0.69.5 — brushed-metal body (was plastic-looking very-pale
+  // off-white with low metalness). Per user feedback "das ship sieht
+  // wie plastik aus": real spacecraft hulls are brushed-metal
+  // (aluminum alloy). The new values:
+  //   - color 0x9aa5b8 (slightly grayer, cooler than pale off-white)
+  //   - metalness 0.85 (high; reads as a metal baseline)
+  //   - roughness 0.45 (brushed surface finish, not mirror-polished)
+  // Combined with the high DirectionalLight intensity (5.2) + the
+  // lower HemisphereLight (0.20), the body's flat-shaded facets now
+  // have visible metal-side vs metal-shadow appearance — a hint of
+  // an industrial spaceship rather than ceramic plastic.
+  let hullTex;
+  try {
+    const loader = new TextureLoader();
+    hullTex = loader.load('/textures/ship-hull-albedo.png');
+    hullTex.colorSpace = SRGBColorSpace;
+    hullTex.wrapS = RepeatWrapping;
+    hullTex.wrapT = RepeatWrapping;
+  } catch (e) {
+    hullTex = new Texture();
+    hullTex.colorSpace = SRGBColorSpace;
+  }
+
   const bodyMat = new MeshStandardMaterial({
-    color: 0xe6ecff,
-    metalness: 0.3,
-    roughness: 0.55,
+    color: 0x9aa5b8,
+    metalness: 0.85,
+    roughness: 0.45,
     flatShading: true,
+    map: hullTex,
   });
   const bodyMesh = new Mesh(bodyGeom, bodyMat);
+  // v0.68.0 -- body casts a shadow under the sun. also receives
+  // shadows so other asteroids/projectiles project onto the hull.
+  bodyMesh.castShadow = true;
+  bodyMesh.receiveShadow = true;
   body.add(bodyMesh);
 
   // Wings: two small angled boxes.
+  // v0.69.5 — wings more metallic (was metalness 0.4 + roughness 0.5).
+  // Per user feedback "das ship sieht wie plastik aus" — the cyan
+  // wings should also read as painted metal (cyan accent paint over
+  // brushed metal substrate). metalness 0.85 + roughness 0.4 gives
+  // the wings a slightly shinier surface than the body, which the
+  // cyan paint color amplifies.
   const wingMat = new MeshStandardMaterial({
     color: 0x48dbfb,
-    metalness: 0.4,
-    roughness: 0.5,
+    metalness: 0.85,
+    roughness: 0.4,
     flatShading: true,
   });
   const wingGeom = new BoxGeometry(0.4, 0.2, 1.4);
   const wingL = new Mesh(wingGeom, wingMat);
+  // v0.68.0 -- each wing casts + receives shadows.
+  wingL.castShadow = true;
+  wingL.receiveShadow = true;
   wingL.position.set(-0.95, -0.05, 0.15);
   wingL.rotation.z = Math.PI / 7;
   body.add(wingL);
   const wingR = new Mesh(wingGeom, wingMat);
+  wingR.castShadow = true;
+  wingR.receiveShadow = true;
   wingR.position.set(0.95, -0.05, 0.15);
   wingR.rotation.z = -Math.PI / 7;
   body.add(wingR);
@@ -130,10 +183,28 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 } } = {}) {
   scene.add(group);
 
   // ---- Mutable state (also exposed to consumers) ----------------------
+  // v0.11.0: energy replaces the v0.10.x 3-lives mechanic. The ship
+  // starts at MAX_ENERGY; hits deplete it; passive recharge restores it.
+  // When `energy <= 0`, the ship dies (in GAME_OVER transition handler).
+  // Buffs are a Map<type, expiresAt> — each entry means "this buff is
+  // active until expiresAt seconds (game-time)". tickBuffs() decrements
+  // per frame; addBuff(type) inserts with the configured duration;
+  // removeBuff(type) drops the entry.
   const state = {
     position: { x: position.x, y: position.y, z: position.z },
     velocity: { x: 0, y: 0, z: 0 },
     rotation: { yaw: 0, pitch: 0, roll: 0 }, // radians
+    // Angular velocity (rad/s). Added in v0.8.0 to match the
+    // trainer's env physics. The heading is now the integral of
+    // this, not a direct command — the ship has actual angular
+    // momentum. See YAW_INERTIA_TAU in ship-constants.js.
+    angularVelocity: 0,
+    // Energy (0..MAX_ENERGY). The damage sum plus regen decides life
+    // or death.
+    energy: MAX_ENERGY,
+    // Active buffs (type → remaining seconds). Decayed each frame.
+    /** @type {Map<string, number>} */
+    buffs: new Map(),
   };
 
   // ---- Input (set by the input system; placeholder until it lands) ----
@@ -157,7 +228,149 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 } } = {}) {
       // Planned. Don't silently no-op — make it loud.
       throw new Error('createShip: 6DOF flight is not implemented yet');
     }
-    state._flightMode = mode; // eslint-disable-line no-unused-vars
+    // No-op for '2dof'; no state needed (the getter hardcodes '2dof').
+  }
+
+  // ---- v0.11.0 Energy API ---------------------------------------------
+
+  /**
+   * Read the ship's current energy (in [0, MAX_ENERGY]). Used by the
+   * HUD to draw the energy bar.
+   * @returns {number}
+   */
+  function getEnergy() {
+    return state.energy;
+  }
+
+  /**
+   * Apply damage to the ship. Clamped to [0, MAX_ENERGY]. Returns the
+   * new energy value. Callers may check isDead() after. Negative
+   * inputs are clamped to 0 (heal is intentional via `addBuff`).
+   * Emits `energy:changed` on the bus if `events` was supplied.
+   * @param {number} amount
+   * @returns {number} new energy
+   */
+  function takeDamage(amount) {
+    const prev = state.energy;
+    state.energy = Math.max(0, state.energy - Math.max(0, amount));
+    if (events && state.energy !== prev) {
+      events.emit('energy:changed', { value: state.energy, max: MAX_ENERGY });
+    }
+    return state.energy;
+  }
+
+  /**
+   * Add (or replace) an active buff by type. Duration defaults to
+   * BUFF_DEFAULT_DURATIONS_S[type] if not provided. The buff expires
+   * after `duration` seconds.
+   *
+   * v0.11.0 supported buffs:
+   *   - speed   — THRUST_ACCEL × 2
+   *   - energy  — energyRechargeRate × 2 (passive regen multiplier)
+   *   - credits — score × 2 (game-side multiplier for asteroid kills)
+   *   - hull    — damage taken × 0.5
+   *   - weapon  — fire rate × 2 (bullet cooldown halved)
+   *
+   * @param {'speed'|'energy'|'credits'|'hull'|'weapon'} type
+   * @param {number} [duration]
+   */
+  function addBuff(type, duration) {
+    const dur = typeof duration === 'number' && duration > 0
+      ? duration
+      : (BUFF_DEFAULT_DURATIONS_S[type] ?? 5);
+    state.buffs.set(type, dur);
+    if (events) {
+      events.emit('buff:added', { type, duration: dur });
+    }
+  }
+
+  /**
+   * Remove an active buff immediately.
+   * @param {string} type
+   */
+  function removeBuff(type) {
+    state.buffs.delete(type);
+  }
+
+  /**
+   * Read all currently active buffs as a plain { type, remaining }
+   * array — for HUD rendering.
+   * @returns {Array<{type:string, remaining:number}>}
+   */
+  function getActiveBuffs() {
+    const out = [];
+    for (const [type, remaining] of state.buffs.entries()) {
+      out.push({ type, remaining });
+    }
+    return out;
+  }
+
+  /**
+   * @returns {boolean} true iff the ship's energy has dropped to 0
+   * (caller is responsible for triggering GAME_OVER / respawning).
+   */
+  function isDead() {
+    return state.energy <= 0;
+  }
+
+  /**
+   * v0.61.0 — Returns true while the shield buff is active. While
+   * shielded, the player is invulnerable to all incoming damage
+   * (from asteroids AND from pirate bullets). The buff decays via
+   * the normal `update(dt)` tickbuffs path. Calling code in main.js
+   * gates `takeDamage` + GAME_OVER transitions on `!isShielded()`.
+   *
+   * Lives next to `isDead` because the two are dual-purpose health
+   * checks: isDead = energy fully depleted; isShielded = invulnerable
+   * to next damage. Both are read by render-loop branches that have
+   * to decide whether to apply a hit.
+   *
+   * @returns {boolean}
+   */
+  function isShielded() {
+    return state.buffs.has('shield');
+  }
+
+  /**
+   * v0.61.0 — Returns the shield buff's remaining duration in
+   * seconds, or 0 if no shield buff is active. Used by main.js
+   * to clip the HUD's `remaining` field when `activeType ===
+   * 'shield'` so the bar never fills with the 15s active window
+   * time after the 10s buff has expired (visually misleading).
+   * Returns 0 for non-shield pickups too — the getter is safe to
+   * call regardless of the active powerup type.
+   *
+   * @returns {number} seconds remaining (0 if no shield active)
+   */
+  function getShieldRemaining() {
+    const v = state.buffs.get('shield');
+    return typeof v === 'number' && v > 0 ? v : 0;
+  }
+
+  /**
+   * Read the hull-buff damage multiplier (1.0 if no hull buff;
+   * 0.5 if hull is active).
+   * @returns {number}
+   */
+  function getDamageMultiplier() {
+    return state.buffs.has('hull') ? 0.5 : 1.0;
+  }
+
+  /**
+   * Read the thrust multiplier (1.0 baseline; 2.0 if speed buff
+   * is active).
+   * @returns {number}
+   */
+  function getThrustMultiplier() {
+    return state.buffs.has('speed') ? 2.0 : 1.0;
+  }
+
+  /**
+   * Read the score multiplier (1.0 baseline; 2.0 if credits buff is active).
+   * @returns {number}
+   */
+  function getScoreMultiplier() {
+    return state.buffs.has('credits') ? 2.0 : 1.0;
   }
 
   /**
@@ -167,9 +380,45 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 } } = {}) {
   function update(dt) {
     if (dt <= 0) return;
 
+    // ---- v0.11.0: passive energy recharge -----------------------------
+    // Energy refills at ENERGY_RECHARGE_PER_SEC × (1 if no energy buff,
+    // 2 if energy buff active). Capped at MAX_ENERGY. Stops at 0 (death).
+    const energyBuffActive = state.buffs.has('energy');
+    const rechargePerSec = ENERGY_RECHARGE_PER_SEC * (energyBuffActive ? 2 : 1);
+    if (state.energy > 0 && state.energy < MAX_ENERGY) {
+      const prev = state.energy;
+      state.energy = Math.min(MAX_ENERGY, state.energy + rechargePerSec * dt);
+      if (events && state.energy !== prev) {
+        events.emit('energy:changed', { value: state.energy, max: MAX_ENERGY });
+      }
+    }
+
+    // ---- v0.11.0: tick buffs (decrement timers, drop expired) ---------
+    for (const [type, remaining] of state.buffs.entries()) {
+      const next = remaining - dt;
+      if (next <= 0) {
+        state.buffs.delete(type);
+        if (events) events.emit('buff:expired', { type });
+      } else {
+        state.buffs.set(type, next);
+      }
+    }
+
     // ---- 2DOF: yaw + XZ translation, Y locked -------------------------
-    // Yaw
-    state.rotation.yaw += yawInput * YAW_SPEED * dt;
+    // Yaw (with angular momentum, mirrors the trainer's env so
+    // trained brains feel identical to in-game ships). The angular
+    // velocity ramps toward `yawInput * YAW_SPEED` with a first-
+    // order time constant; the heading is the integral of
+    // `angularVelocity`. YAW_INERTIA_TAU=0 falls back to the legacy
+    // snap-to-target path.
+    const targetAngularVel = yawInput * YAW_SPEED;
+    if (YAW_INERTIA_TAU > 0) {
+      const aT = 1 - Math.exp(-dt / YAW_INERTIA_TAU);
+      state.angularVelocity += (targetAngularVel - state.angularVelocity) * aT;
+    } else {
+      state.angularVelocity = targetAngularVel;
+    }
+    state.rotation.yaw += state.angularVelocity * dt;
 
     // Roll (lean into the turn). The target roll is proportional to
     // the yaw input scaled to ROLL_MAX; the actual roll is damped
@@ -185,10 +434,11 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 } } = {}) {
     const fwdX = -Math.sin(state.rotation.yaw);
     const fwdZ = -Math.cos(state.rotation.yaw);
 
-    // Thrust
+    // Thrust (v0.11.0: speed buff doubles acceleration)
+    const thrustMul = getThrustMultiplier();
     if (thrustOn) {
-      state.velocity.x += fwdX * THRUST_ACCEL * dt;
-      state.velocity.z += fwdZ * THRUST_ACCEL * dt;
+      state.velocity.x += fwdX * THRUST_ACCEL * thrustMul * dt;
+      state.velocity.z += fwdZ * THRUST_ACCEL * thrustMul * dt;
     }
 
     // Drag (exponential decay, framerate-independent)
@@ -196,10 +446,19 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 } } = {}) {
     state.velocity.x *= dragFactor;
     state.velocity.z *= dragFactor;
 
-    // Speed cap (XZ plane only)
+    // Speed cap (XZ plane only). v0.49.0: live-tunable via the
+    // `AI_TUNABLES.shipMaxSpeed` slider in the tuner panel —
+    // immediate per-frame effect with no app reload. The frozen
+    // `MAX_SPEED` constant from ship-constants.js is the canonical
+    // fallback used when the bag is missing or its value is
+    // non-finite (defensive: a stale number from a buggy caller
+    // would silently neuter the cap).
     const speed = Math.hypot(state.velocity.x, state.velocity.z);
-    if (speed > MAX_SPEED) {
-      const k = MAX_SPEED / speed;
+    const liveMaxSpeed = (AI_TUNABLES && Number.isFinite(AI_TUNABLES.shipMaxSpeed))
+      ? AI_TUNABLES.shipMaxSpeed
+      : MAX_SPEED;
+    if (speed > liveMaxSpeed) {
+      const k = liveMaxSpeed / speed;
       state.velocity.x *= k;
       state.velocity.z *= k;
     }
@@ -243,6 +502,46 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 } } = {}) {
     state.rotation.yaw = 0;
     state.rotation.pitch = 0;
     state.rotation.roll = 0;
+    state.angularVelocity = 0; // v0.8.0: clear angular momentum on reset
+    // v0.11.0: reset energy + buffs. (lives are gone) Emit
+    // `buff:expired` for each cleared buff so bus listeners
+    // (HUD/widgets) don't see buffs vanish silently; the buff
+    // timers didn't tick down to 0 themselves, we cleared them.
+    const clearedBuffs = Array.from(state.buffs.keys());
+    // v0.69.1: capture any in-progress shield BEFORE state.buffs.clear().
+    // v0.69.0 read AFTER clear(); Map was always empty so max(5, 0) = 5
+    // silently shortened any 30s pickup shield to 5s on every respawn.
+    const existingShield = state.buffs.get('shield');
+    const preservedShieldS =
+      Number.isFinite(existingShield) && existingShield > 0 ? existingShield : 0;
+    state.energy = MAX_ENERGY;
+    state.buffs.clear();
+    if (events) {
+      events.emit('energy:changed', { value: state.energy, max: MAX_ENERGY });
+      for (const type of clearedBuffs) {
+        events.emit('buff:expired', { type, reason: 'reset' });
+      }
+    }
+    // v0.69.0 + v0.69.1 -- spawn-shield on every respawn. Closes the
+    // "ich werde sofort wieder abgeschossen" gap. Applies to ALL reset
+    // invocations (GAME_OVER, hit-survival, run-restart).
+    //
+    // **Honors any in-progress pickup shield** (v0.69.1 fix):
+    // Math.max picks the larger of {SPAWN_SHIELD_DURATION_S=5, preservedShieldS}.
+    // `existingShield` was captured BEFORE state.buffs.clear() above; preservedShieldS
+    // is that captured value (or 0 if no shield was active). Net result:
+    //   - fresh respawn (no shield active) -> 5s spawn shield,
+    //   - mid-PLAYING respawn with 28s of 30s pickup still ticking -> still 28s,
+    //   - respawn with 1s-expiring pickup -> bumped up to 5s.
+    const spawnShieldDur = Math.max(SPAWN_SHIELD_DURATION_S, preservedShieldS);
+    state.buffs.set('shield', spawnShieldDur);
+    if (events) {
+      events.emit('buff:added', {
+        type: 'shield',
+        duration: spawnShieldDur,
+        reason: 'spawn',
+      });
+    }
     group.position.set(p.x, p.y, p.z);
     group.rotation.set(0, 0, 0);
     body.rotation.set(0, 0, 0);
@@ -291,6 +590,23 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 } } = {}) {
     position: state.position, // shared reference; live
     velocity: state.velocity, // shared reference; live
     rotation: state.rotation, // shared reference; live
+    // Angular velocity (rad/s). Exposed as a getter in v0.11.0
+    // so the trained brain's tick can see its own inertia live
+    // (the brain's input feature 13 reads from this). Consumers
+    // (main.js, ai.js) should pass `ship.angularVelocity` as
+    // `aiAngularVelocity` to `brain.tick(args)`. The trainer's env
+    // (`environment.js`) already exposes the same field via
+    // `getState()` via a getter — same shape on both sides.
+    // Previously a primitive snapshot, which silently went stale
+    // on every `update(dt)` call.
+    get angularVelocity() { return state.angularVelocity; },
+    // v0.11.0: direct read-only handle on the energy level (avoids
+    // forcing callers to call `getEnergy()`). Exposed via getter
+    // so mutations from `takeDamage()` / `update(dt)` propagate
+    // live — HUD polling reads the post-damage value, not a
+    // frozen snapshot from object construction.
+    get energy() { return state.energy; },
+    buffs: state.buffs,
     get flightMode() { return '2dof'; }, // current implementation is 2DOF-only
     setThrust,
     setYaw,
@@ -298,6 +614,19 @@ export function createShip({ scene, position = { x: 0, y: 0, z: 0 } } = {}) {
     update,
     reset,
     dispose,
+    // v0.11.0 energy + buff API
+    getEnergy,
+    takeDamage,
+    addBuff,
+    removeBuff,
+    getActiveBuffs,
+    isDead,
+    // v0.61.0
+    isShielded,
+    getShieldRemaining,
+    getDamageMultiplier,
+    getThrustMultiplier,
+    getScoreMultiplier,
   };
 }
 
@@ -412,7 +741,20 @@ export async function loadShipModel(ship, modelUrl, opts = {}) {
         }
       }
     }
-    ship.body.add(glbRoot);
+    // v0.68.0 -- walk the loaded GLB root and tag every Mesh
+  // with castShadow + receiveShadow so the sun's DirectionalLight
+  // also projects the GLB-ship onto nearby asteroids. Without
+  // this, only the procedural ship would cast; the GLB ship (what
+  // the player actually sees once the load completes) would float
+  // shadowlessly.
+  glbRoot.traverse((obj) => {
+    if (obj.isMesh) {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+    }
+  });
+
+  ship.body.add(glbRoot);
 
     return { success: true, glbRoot, scale, rotated: nosePointsPositiveZ };
   } catch (e) {

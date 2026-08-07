@@ -346,3 +346,180 @@ World tunables were previously consolidated in `src/world/constants.js`. They ar
 `PLAY_PLANE_Y` is owned by the world data-model layer (`src/world/chunk-constants.js`) — the play plane is a world concept, not a ship concept. The ship imports it from the world layer (cross-layer import, one-way: entities → world, no cycle).
 
 `src/scene/index.js` is a barrel re-export for the scene subdirectory (currently just the camera tunables). Other directory barrels follow the same pattern: `src/geometry/index.js`, `src/systems/index.js`, `src/entities/index.js`, `src/ui/index.js`, `src/world/index.js`.
+
+## 14. AI Training (neuroevolution, v0.8.0)
+
+The AI ship is trained via neuroevolution: a population of small feed-forward neural networks (genomes = flat weight arrays) is evaluated per generation on the same `createTrainingEnvironment` headless physics used by the game, scored by a fitness function, and bred via tournament selection + Gaussian mutation + uniform crossover. See `src/training/` for the 12 modules. The single source of truth for trainer tunables is `src/training/defaults.js` (`TRAINER_DEFAULTS`, frozen).
+
+### Architecture (fixed, baked into every saved genome)
+
+- **Inputs**: 13 (speed, yaw sin/cos, nearest asteroid dx/dz/dist/radius, nearest power-up dx/dz/dist, laser active, velocity vx/vz). The velocity inputs (added v0.7.0) are the key invariant: without them the brain can't distinguish "flying right" from "spinning right" and converges to the "spin in place and shoot" local minimum.
+- **Hidden**: 12 (small but capable; `hiddenSize` is one of the 4–64 the trainer can sweep).
+- **Outputs**: 3 (yaw, thrust, fire), each in `[-1, +1]`, discretized to `{-1, 0, +1}` for yaw and `{true, false}` for thrust/fire. Thresholds: yaw `±0.33` matches the hand-coded AI's discretization.
+
+### Fitness formula (v0.8.0)
+
+```
+fitness = score
+        + survival * survivalReward         (was hardcoded 10 in v0.7.x)
+        + powerups * 100
+        + distance * movementReward
+        - rotation * rotationPenalty        (NEW v0.8.0)
+        + stableFrames * headingStabilityBonus  (NEW v0.8.0)
+```
+
+| Term | Default | Sign | Purpose |
+|---|---|---|---|
+| `score` | (sum) | + | +20/+50/+100 per large/medium/small asteroid destroyed |
+| `survival * survivalReward` | `survivalReward: 3.0` | + | +3.0 per second alive. Was 10 in v0.7.x — lowered so sitting still isn't almost as good as playing |
+| `powerups * 100` | (sum) | + | +100 per laser power-up collected |
+| `distance * movementReward` | `movementReward: 1.0` | + | +1.0 per world unit traveled. Punishes "just spin in place" |
+| `rotation * rotationPenalty` | `rotationPenalty: 2.0` | − | −2.0 per radian of total angular distance. **Breaks the "wiggle and shoot" local minimum** |
+| `stableFrames * headingStabilityBonus` | `headingStabilityBonus: 0.1` | + | +0.1 per frame the brain asks for `yaw=0`. Rewards commit-to-heading |
+
+The rotation penalty math: 60s episode × 2 rad/s sustained wiggle ≈ 120 rad × 2.0 = 240 fitness cost. The stability bonus math: 60s × 60fps × 0.1 = 360 max fitness for perfect straight flight. The two terms are paired — one penalizes rotation, the other rewards not-rotating — so the brain learns ship-like maneuvers (commit to a heading, then thrust; turn deliberately; commit again).
+
+### Ship physics (v0.8.0: yaw inertia)
+
+The legacy trainer (`yawInertiaTau: 0`) set the heading directly: `state.rotation.yaw += yawInput * YAW_SPEED * dt`. The brain could exploit this by oscillating its yaw output near the discretization threshold (output 0.32 → 0 → 0.34 → 1 → 0.32 → ...) for "free" rotation. v0.8.0 adds angular momentum: `state.angularVelocity` is a state variable that ramps toward `yawInput * YAW_SPEED` with a first-order time constant, and the heading is the integral of `angularVelocity`. With `yawInertiaTau: 0.2` the ship takes ~0.2s to start/stop rotating — matching the feel of a real spaceship and making the wiggle strategy useless (the rotation now costs time).
+
+| Param | Default | Effect |
+|---|---|---|
+| `YAW_SPEED` | 4.0 rad/s (from `src/entities/ship-constants.js`) | Target angular velocity when `yawInput` is ±1 |
+| `yawInertiaTau` | 0.2 s | Time constant for the angular-velocity ramp. 0 = legacy snap-to-target, 0.2 = real-ship |
+| `ROLL_DAMP` | 8.0 (from `src/entities/ship-constants.js`) | Visual bank tracks the *command* (not the smoothed velocity) so the ship leans into the turn the moment the brain requests it, even though the heading change lags slightly |
+
+Roll tracks the command (not the smoothed velocity) on purpose — the brain sees its visual bank match its intent, not the lagging physics. The brain still gets penalized for the actual rotation via the `angularAccumulator`.
+
+### Per-episode state (new in v0.8.0)
+
+- `state.angularVelocity` (rad/s) — closure var on the ship, reset every episode. The integral of this is the heading.
+- `angularAccumulator` (radians) — sum of `|dYaw|` per step. Read by the trainer's `rotationPenalty`.
+- `stableFrames` (count) — frames where the brain asked for `yaw=0` (counts the command, not the smoothed velocity). Read by the trainer's `headingStabilityBonus`.
+
+Exposed via `env.getAngularAccumulator()` and `env.getStableFrames()`. All three reset on every `env.reset()` call.
+
+### Migration from a v0.7.x brain
+
+Any genome trained under the v0.7.x formula (survival × 10, no rotation penalty, no stability bonus, no yaw inertia) is **incompatible** with v0.8.0 — the input architecture hasn't changed (so the genome size is still `13*hidden + hidden + hidden*3 + 3`), but the trained weights are optimized for the old fitness landscape and will score poorly under the new one. **Restart from zero is required** when upgrading. The current champion (gen 6872, fitness 32783) was confirmed to be in this state — it collected the power-up but rotated constantly, the classic "wiggle and shoot" local minimum the new params are designed to break.
+
+### Why the changes ship together
+
+The four changes are co-dependent:
+
+- **`survivalReward` lowered** (3.0) makes the "free" passive-reward component of the old formula less dominant.
+- **`rotationPenalty`** directly penalizes the wiggle pattern that was the local minimum under the old formula.
+- **`headingStabilityBonus`** rewards the alternative (commit-to-heading) so the brain has a clear gradient to escape the wiggle.
+- **`yawInertiaTau`** makes the wiggle physically cost time, not just abstract fitness — by the time the brain's yaw command reaches the ship, half a second of "doing nothing useful" has elapsed.
+
+Drop any one of the four and the brain will re-discover a degenerate local minimum that exploits the remaining loophole.
+
+
+## 15. v0.18.0 -- Predictive DODGE (hand-coded demo AI)
+
+The v0.12.x DODGE fired only when an asteroid was already within the 14u `dodgeDist` shell -- often too late for fast-drifting rocks (the AI had < 500ms to start escaping). v0.18.0 projects each asteroid's relative motion against the ship using 2-body kinematics, triggers DODGE 1-2s earlier when the projected CLOSEST approach (within `dodgeLookaheadS` seconds) is < `dodgeMarginU`.
+
+### Math (lives in `computeClosestApproach` in `src/entities/ai.js`)
+
+Relative motion `R(t) = pRel + vRel * t` traces a line in the XZ plane. The squared distance is a convex parabola in `t`. The unconstrained minimum is at `tStar = -pRel.vRel / |vRel|^2`; the closed-form minimum squared distance is `|pRel|^2 - (pRel.vRel)^2 / |vRel|^2`. Two fallacies the closed form hides:
+
+- **Receding asteroid** (`tStarFree < 0`): the unconstrained minimum is at `t < 0` (the asteroid was closest 0.2s ago). The formula returns the parabolic distance at that PAST minimum, often 0. The windowed minimum over `[0, lookaheadS]` is the boundary value `|pRel|`. Closed-form firing on a receding asteroid = false alarm.
+- **Slow approach** (`tStarFree > lookaheadS`): the unconstrained minimum is at `t > lookaheadS` (the asteroid WILL hit in 5s but our window is 1s). The formula returns 0 even though the asteroid is still 100u+ away. Closed-form firing on a slow approach = far-future panic.
+
+The fix: walk `|pRel + vRel * tStar|` AFTER clamping `tStar = [0, lookaheadS]` (clamp the parabolic minimum to the window endpoints). The walked value is the WINDOWED minimum uniformly across all three cases (in-window, receding, slow-approach). Mathematically equivalent to closed-form when tStar is in-window; correctly returns boundary distances when tStar is out-of-window. No division-by-zero (vRelMagSq=0 is the early-return path); no floating-point negatives (we sum squares, not subtract). Validation: `thinker-with-files-gemini` confirmed the math.
+
+### DODGE branch in `aiBrainTick`
+
+Loop ALL asteroids. For each: compute relative position and velocity (with `lookupAsteroidVel()` + defensive null guards), call `computeClosestApproach({pRel, vRel, lookaheadS: dodgeLookaheadS})`. If `closestDist < dodgeMarginU AND closestDist < worstDist_so_far`, this asteroid is the current worst threat. When the loop finds at least one threat, commit to escape: thrust 90° CCW from the threat's CURRENT position (escape direction unchanged from v0.12.x). When no threat is found OR `dodgeLookaheadS=0`, fall through to the legacy `dodgeDist` shell (instant trigger when the asteroid is already inside the 14u raw shell, regardless of velocity).
+
+### Defaults
+
+- `dodgeLookaheadS: 1.0` (seconds) -- the AI's forward-prediction horizon. A pilot won't commit to dodging based on an event > 1s away; aligns with the existing `interceptLookaheadS=0.5` cognitive cap (DODGE gets a wider horizon because survival is immediate). Set to 0 to disable predictive entirely; legacy shell still fires.
+- `dodgeMarginU: 2.5` (world units) -- the projected miss-distance threshold. 2.5u ~= max small-chunk radius; triggering DODGE on rocks that would graze > 2.5u away is wasteful. Higher = more aggressive DODGE (sooner, tighter pass); lower = more aggressive flight (let grazing passes if they really graze).
+
+### Visual impact
+
+Small in MVP because asteroid ambient drift is < 0.5 u/s (no closing speed means closeDist = |pRel|, so predictive only fires when the asteroid is already within `dodgeMarginU` -- same as legacy). The API is forward-compatible with Elite-class velocities (5+ u/s enemy drift); the predictive layer fires 1s BEFORE the legacy shell, the difference between "reactive panic" and "threading the needle".
+
+### Wiring parity
+
+`argsFromObs` (production brain call from `update()`) and `brainArgsFromShip` (getMode() call from the dashboard) BOTH forward `dodgeLookaheadS` + `dodgeMarginU`. The chip/dashboard reading therefore agrees with the actual ship behavior. Without the getMode() parity, the HUD would show `'target'` while the ship silently dodges -- a passive-aggressive UI bug. 14 regression tests pin the contract.
+
+
+## 16. Build identity via Vite `define` globals (v0.18.0)
+
+The bottom-right HUD chip + dev-console banner read three values: **BRANCH** (from `git rev-parse --abbrev-ref HEAD`), **VERSION** (manual SSOT, semantic), and **COMMIT** (from `git rev-parse --short HEAD`). The two auto values are resolved at Vite config-load time and substituted globally into the source; the manual one is human-curated.
+
+### Architecture (why a `define`?)
+
+A naive approach is to bake all three into a committed `src/version-constants.js` and have the chip import them. But baking the SHA into a committed file is a chicken-and-egg: the amend that bakes the SHA changes the commit's content, which changes the SHA, which means the file is always one SHA behind HEAD. Marker-based anti-recursion guards prevent infinite amend chains but don't fix the off-by-one.
+
+The shipped solution sidesteps this entirely: Vite's `define` plugin in `vite.config.js` resolves the two auto values at config-load time (once per `npm run dev` / `npm run build`) via `execSync('git ...')` and substitutes them as global identifiers (`__BRANCH__`, `__COMMIT__`) into the source. The SHA never appears in any committed file's content, so no amend cycle is needed and the chip renders the actual committed SHA at boot.
+
+### Mechanics
+
+- `vite.config.js` reads `git rev-parse --abbrev-ref HEAD` + `git rev-parse --short HEAD` once via `execSync('utf-8')`, `JSON.stringify`s each (required for Vite's literal source substitution), and passes them to Vite via `define: { __BRANCH__: "...", __COMMIT__: "..." }`.
+- `src/main.js` reads `__BRANCH__` + `__COMMIT__` as plain identifiers + imports `VERSION` from `src/version-constants.js`. No special marker syntax for the chip.
+- `src/version-constants.js` exports just `VERSION` (the only manual SSOT). The file is precisely what the human controls.
+- `safeExec(cmd)` defensive wrapper falls back to `'unknown'` if `git` is unavailable or the working copy is not a git repo (e.g. building from a tarball in CI without the `.git` folder, or running on a tag-less detached HEAD where `git rev-parse --abbrev-ref HEAD` returns `'HEAD'` literally — still useful, will not hard-crash the dev server).
+
+### Tested invariants
+
+- All 475 unit tests pass (pure-Node `node --test` runs do not import `src/main.js`, so `__COMMIT__` / `__BRANCH__` are not defined in test context — no false-failure risk).
+- `npm run build` succeeds; `grep -E '"<short_sha>"|"<branch_name>"' dist/assets/*.js` confirms both values were substituted into the production bundle at build time.
+
+### Caveats / accepted limitations
+
+- **HMR staleness**: `__BRANCH__` and `__COMMIT__` are baked at Vite config-load. They do not refresh across HMR updates. Branch / SHA changes are infrequent enough that a server restart is acceptable (`npm run dev` cold-starts in < 2 s).
+- **`'unknown'` fallback is visible**: a clone without `.git/` would render `? @ unknown` in the chip. Better than crashing the dev server; the user knows the working copy is in an unusual state.
+
+### Update policy (split between manual + auto)
+
+- `VERSION` (manual SSOT in `src/version-constants.js`): semantic version label, bumped by the human per project policy. Distinct from commit count — a feature branch's commits do not auto-inflate it.
+- `BRANCH` (auto-resolved via Vite `define`): the lowercase branch name; reflects current `git rev-parse --abbrev-ref HEAD`.
+- `COMMIT` (auto-resolved via Vite `define`): build identity (short SHA); reflects current `git rev-parse --short HEAD`.
+
+The three-update split mirrors the three concerns a build has: semantic intent (manual VERSION), source location (auto BRANCH), and build identity (auto COMMIT).
+
+### History (superseded approaches in the same wave)
+
+The v0.18.0 wave shipped three intermediate attempts before settling on Vite `define`:
+
+1. **Committed SSOT file**: bake BRANCH + COMMIT into `src/version-constants.js` + import in `src/main.js`. Worked for VERSION but introduced the chicken-and-egg for COMMIT — file's COMMIT line always lagged HEAD by one amend.
+2. **Post-commit hook + amend cycle**: `.githooks/post-commit` rewrites the COMMIT line on each commit + `git commit --amend --no-verify`. Required a marker-file anti-recursion guard + try/except marker cleanup (the amend's post-commit fires recursively because `--no-verify` only skips pre-commit / commit-msg, not post-commit). Terminated correctly but the file's `COMMIT` line was always the PRE-amend value, so the chip rendered yesterday's SHA.
+3. **`scripts/install-hooks.sh` convenience one-liner**: bandaid for approach #2 — made installing the broken hook faster, did not fix the design flaw.
+
+The Vite `define` approach obsoletes all three: zero file amends, zero hooks, zero markers, zero scripts. Chip reads actual HEAD at config-load, forever. The `.githooks/` directory and `scripts/install-hooks.sh` are deleted; `git config core.hooksPath` reverts to default `.git/hooks`.
+
+## 17. Auto-publish on commit (v0.18.0)
+
+Standing rule updated 2026-07-04 (after §16's Vite `define` shipped) at the user's explicit request to remove the "ask before push" friction on the `refine-coded-ai` branch. **Every commit on this branch auto-pushes to `origin/refine-coded-ai`.** The user never has to type `git push` again.
+
+### Mechanics
+
+- **`.githooks/post-commit`** (Python3, ~15 lines incl. docstring + comments): single responsibility -- `git push`. Additive operation (pushes any upstream-missing commits + the current HEAD; idempotent on the receiving side). Zero recursion risk because `git push` to a remote never re-fires the source-side post-commit hook -- only the receiving-side hooks fire, and there are none on origin. **No marker file required.** Rebase guard via `os.environ.get('GIT_REBASE_REFLOG_ACTION')` (bails cleanly during `git rebase` so replayed commits don't bombard origin with non-fast-forward push attempts; user runs one `git push --force-with-lease` after rebase instead).
+- **Not involved in build identity**: VERSION/BRANCH/COMMIT resolution is Vite `define`'s job at config-load (§16). The hook's only concern is the `git push` step.
+- **Install** (one-time per fresh clone): `git config core.hooksPath .githooks` (project-local). Convenience wrapper: `./scripts/install-hooks.sh`.
+
+### Failure handling
+
+If `git push` returns non-zero (network down, auth expired, remote removed, etc.):
+- The COMMIT STAYS committed locally (this hook fires AFTER the commit lands; the local state is intact).
+- A stderr line + `exit 1` surfaces the failure to the terminal right after the user typed `git commit`.
+- The NEXT commit's hook re-attempts `git push`, which is additive -- picks up the stray commit from last time PLUS the new HEAD.
+
+### Why no anti-recursion marker?
+
+Unlike §16's predecessor (which amended the just-created commit and could re-fire its own post-commit hook, requiring a `/tmp/asteroids-post-commit-running` sentinel + `try/except` cleanup), this hook does NOT modify the commit's content. `git push` to a remote NEVER re-fires the source-side post-commit hook -- only the receiving-side hooks fire, and there are none on origin. Zero recursion risk, zero marker file required. The hook is shorter, the failure mode is simpler, the install is one line.
+
+### Standing rule update (AGENTS.md Rule 6)
+
+Previously: "Do not run effectful shell commands (push, commit, install global packages) without explicit approval." Now (on `refine-coded-ai` branch only): commit + push + install local tools are sanctioned without approval. Specifically: `git commit`, `git push`, `npm install`, `pip install --user`, `./scripts/install-hooks.sh` are all fine. Push is the most-impactful (effectful on a remote) but it is automated by the post-commit hook, so there is no friction to remove.
+
+The full end-to-end chain after the user types `git commit -m "..."`:
+1. Git records the commit locally.
+2. `.githooks/post-commit` fires; calls `git push`.
+3. `git push` sends the commit to `origin/refine-coded-ai`.
+4. The next dev-server boot reads the new HEAD via Vite `define` (§16), so the chip renders the new SHA + branch.
+
+One keystroke (the `git commit`) touches the entire pipeline: local → origin → chip.

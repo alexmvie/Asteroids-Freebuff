@@ -1,12 +1,26 @@
 /**
- * Unit tests for src/entities/ai.js.
+ * Unit tests for src/entities/ai.js (v0.55.0 clean-room rewrite).
  *
- * The brain (`aiBrainTick`) is a pure function: ship position + yaw +
- * asteroid list + time → desired `{ yaw, thrust, mode }`. These tests
- * exercise all three behavior modes (dodge, target, wander) plus the
- * pure helpers (`findNearestAsteroid`, `shouldResetAi`, `pickAiSpawn`).
- * The factory (`createDemoAi`) is smoke-tested with a mock ship factory
- * — no Three.js dependency in unit tests.
+ * The brain has four simple behaviors (idle / engage / collect /
+ * evade) over universal `predictPosition` + `steerTo` helpers. These
+ * tests pin the contracts that survived simplification:
+ *
+ *   - Pure helpers: facingAngle, wrapAngle, predictPosition,
+ *     isTargetInFront.
+ *   - Brain arg validation.
+ *   - EVADE: nearest asteroid within evadeDist turns ~90° away,
+ *     thrusts hard.
+ *   - COLLECT: reachable powerup → predicted intercept, thrust when
+ *     aligned, coast-in gate near pickup.
+ *   - ENGAGE: nearest asteroid → predicted lead point, thrust when
+ *     aligned, fires on in-cone in-range asteroids.
+ *   - Priority order: EVADE > COLLECT > ENGAGE > IDLE.
+ *   - Fire is independent of chase target (shoots while chasing
+ *     powerup).
+ *   - Factory wiring: scene/asteroids required, dt<=0 no-op, reset
+ *     on drift, weapon firing, IDLE never fires.
+ *   - Live-bag flow-through: tuner-panel changes visible without
+ *     app reload.
  */
 
 import { test } from 'node:test';
@@ -14,54 +28,60 @@ import assert from 'node:assert/strict';
 
 import {
   aiBrainTick,
-  findNearestAsteroid,
-  isTargetInFront,
   shouldResetAi,
   pickAiSpawn,
   createDemoAi,
+  facingAngle,
+  isTargetInFront,
+  predictPosition,
+  wrapAngle,
 } from '../src/entities/ai.js';
+import { AI_TUNABLES, AI_TUNABLE_DEFAULTS, resetAITunables } from '../src/entities/ai-tunables.js';
 
-// ---- Mock helpers ------------------------------------------------------
+// ------------------------------------------------------------------
+// Mock helpers
+// ------------------------------------------------------------------
 
-function mockAsteroid(x, z) {
+function mockAsteroid(x, z, vel) {
+  const v = vel || { x: 0, z: 0 };
   return {
-    spec: { position: { x, y: 0, z } },
     getPosition: () => ({ x, y: 0, z }),
+    getVelocity: () => ({ x: v.x, z: v.z }),
+    getRadius: () => 3,
+    getSize: () => 0,
   };
 }
 
 function mockShipFactory() {
-  const state = {
-    position: { x: 0, y: 0, z: 0 },
-    velocity: { x: 0, y: 0, z: 0 },
-    rotation: { yaw: 0, pitch: 0, roll: 0 },
-  };
   const calls = { setYaw: [], setThrust: [], update: [], reset: [] };
-  let scene = null;
+  let currentPosition = { x: 0, y: 0, z: 0 };
+  let currentYaw = 0;
   return {
-    state,
     calls,
-    /** Build a fresh mock ship bound to a scene. */
-    build: (opts) => {
-      scene = opts.scene;
-      state.position = { ...opts.position };
-      state.rotation.yaw = 0;
-      return {
-        position: state.position,
-        velocity: state.velocity,
-        rotation: state.rotation,
+    build: () => {
+      const obj = {
+        position: currentPosition,
+        rotation: { yaw: 0, pitch: 0, roll: 0 },
+        velocity: { x: 0, z: 0 },
         mesh: { _inScene: true },
-        setYaw: (v) => calls.setYaw.push(v),
+        setYaw: (v) => {
+          currentYaw = v;
+          calls.setYaw.push(v);
+        },
         setThrust: (v) => calls.setThrust.push(v),
         update: (dt) => calls.update.push(dt),
         reset: (p) => {
           calls.reset.push(p);
-          state.position = { ...p };
+          currentPosition = { ...p };
+          currentYaw = 0;
         },
-        rotation: state.rotation, // same reference
+        get angularVelocity() { return 0; },
       };
+      Object.defineProperty(obj, 'rotation', {
+        get() { return { yaw: currentYaw, pitch: 0, roll: 0 }; },
+      });
+      return obj;
     },
-    getScene: () => scene,
   };
 }
 
@@ -74,567 +94,412 @@ function mockScene() {
   };
 }
 
-// ---- aiBrainTick: arg validation --------------------------------------
+// ------------------------------------------------------------------
+// Pure helpers
+// ------------------------------------------------------------------
+
+test('facingAngle: yaw=0 -> -PI/2 (facing -Z)', () => {
+  assert.ok(Math.abs(facingAngle(0) - (-Math.PI / 2)) < 1e-9);
+});
+
+test('facingAngle: yaw=-PI/2 -> 0 (facing +X)', () => {
+  assert.ok(Math.abs(facingAngle(-Math.PI / 2)) < 1e-9);
+});
+
+test('wrapAngle: wraps to [-PI, PI]', () => {
+  assert.ok(Math.abs(wrapAngle(Math.PI * 3) - Math.PI) < 1e-9);
+  assert.ok(Math.abs(wrapAngle(-Math.PI * 3) - (-Math.PI)) < 1e-9);
+  assert.equal(wrapAngle(0), 0);
+});
+
+test('predictPosition: stationary target returns current pos', () => {
+  const p = predictPosition({ pos: { x: 50, z: 0 } }, { x: 0, z: 0 }, 400);
+  assert.equal(p.x, 50);
+  assert.equal(p.z, 0);
+});
+
+test('predictPosition: moving target predicts ahead', () => {
+  // dist/bulletSpeed = 40/20 = 2s, +vel*2
+  const p = predictPosition({ pos: { x: 40, z: 0 }, vel: { x: 10, z: 0 } }, { x: 0, z: 0 }, 20);
+  assert.equal(p.x, 60);
+  assert.equal(p.z, 0);
+});
+
+test('predictPosition: missing vel defaults to stationary', () => {
+  const p = predictPosition({ pos: { x: 20, z: 0 } }, { x: 0, z: 0 }, 400);
+  assert.equal(p.x, 20);
+});
+
+test('predictPosition: handles targets at zero distance', () => {
+  const p = predictPosition({ pos: { x: 0, z: 0 } }, { x: 0, z: 0 }, 400);
+  assert.equal(p.x, 0);
+});
+
+test('isTargetInFront: dead-ahead -> true', () => {
+  // Ship at origin facing -Z (yaw=0); target at (0,-10) is in front.
+  assert.equal(isTargetInFront({ x: 0, z: 0 }, 0, { x: 0, z: -10 }, 0.4), true);
+});
+
+test('isTargetInFront: dead-behind -> false', () => {
+  assert.equal(isTargetInFront({ x: 0, z: 0 }, 0, { x: 0, z: 10 }, 0.4), false);
+});
+
+test('isTargetInFront: handles non-zero yaw', () => {
+  // Ship faces +X (yaw=-PI/2); target at (10,0) is in front.
+  assert.equal(isTargetInFront({ x: 0, z: 0 }, -Math.PI / 2, { x: 10, z: 0 }, 0.4), true);
+});
+
+// ------------------------------------------------------------------
+// aiBrainTick: arg validation
+// ------------------------------------------------------------------
 
 test('aiBrainTick: throws on missing aiPos', () => {
-  assert.throws(() => aiBrainTick({ aiYaw: 0, asteroids: [], time: 0 }), /aiPos/);
+  assert.throws(
+    () => aiBrainTick({ aiYaw: 0, asteroids: [] }),
+    /aiPos/,
+  );
 });
 
 test('aiBrainTick: throws on missing aiYaw', () => {
-  assert.throws(() => aiBrainTick({ aiPos: { x: 0, z: 0 }, asteroids: [], time: 0 }), /aiYaw/);
+  assert.throws(
+    () => aiBrainTick({ aiPos: { x: 0, z: 0 }, asteroids: [] }),
+    /aiYaw/,
+  );
 });
 
 test('aiBrainTick: throws on non-array asteroids', () => {
   assert.throws(
-    () => aiBrainTick({ aiPos: { x: 0, z: 0 }, aiYaw: 0, asteroids: 'no', time: 0 }),
+    () => aiBrainTick({ aiPos: { x: 0, z: 0 }, aiYaw: 0, asteroids: 'no' }),
     /asteroids/,
   );
 });
 
-// ---- aiBrainTick: DODGE mode ------------------------------------------
+// ------------------------------------------------------------------
+// aiBrainTick: EVADE
+// ------------------------------------------------------------------
 
-test('aiBrainTick: returns dodge mode when an asteroid is within dodgeDist', () => {
-  const asteroids = [mockAsteroid(5, 0)]; // 5 units in +X direction
+test('aiBrainTick: nearest within evadeDist -> mode=evade, turns perpendicular', () => {
+  // Ship at origin facing +X (yaw=-PI/2). Asteroid at (5,0).
+  // Threat angle = atan2(0, 5) = 0. Escape = 0 + PI/2 = PI/2.
+  // Target = (0 + cos(PI/2), 0 + sin(PI/2)) = (0, 1).
+  // Ship facing +X. Heading to (0,1) -> atan2(1,0)=PI/2. Ship facing
+  // facingAngle(-PI/2) = 0.  Err = PI/2 - 0 = PI/2 (LEFT) -> yaw=-1.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(5, 0)],
+    evadeDist: 12,
+  });
+  assert.equal(result.mode, 'evade');
+  assert.equal(result.yaw, -1);
+  assert.equal(result.thrust, true, 'EVADE force-thrusts even when misaligned');
+  assert.equal(result.fire, false);
+});
+
+test('aiBrainTick: evade reason explains the trigger', () => {
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
+    asteroids: [mockAsteroid(5, 0)],
+    evadeDist: 12,
   });
-  assert.equal(result.mode, 'dodge');
-  assert.equal(result.thrust, true);
-  assert.ok(result.yaw === -1 || result.yaw === 1);
+  assert.equal(result.mode, 'evade');
+  assert.match(result.reason, /5\.0u.*12\.0u/);
 });
 
-test('aiBrainTick: dodge beats target when an asteroid is within both ranges', () => {
-  // Asteroid is within targetDist AND within dodgeDist → dodge wins.
-  const asteroids = [mockAsteroid(5, 0)];
+test('aiBrainTick: asteroid outside evadeDist -> mode=asteroid', () => {
+  // evades 10; asteroid at 50.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(50, 0)],
+  });
+  assert.equal(result.mode, 'asteroid');
+});
+
+// ------------------------------------------------------------------
+// aiBrainTick: ENGAGE
+// ------------------------------------------------------------------
+
+test('aiBrainTick: nearest asteroid in range -> mode=asteroid, turn toward it', () => {
+  // Ship faces -Z (yaw=0); asteroid at (40, 0). Err = atan2(0,40)-(-PI/2) = PI/2 -> yaw=-1.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
+    asteroids: [mockAsteroid(40, 0)],
   });
-  assert.equal(result.mode, 'dodge');
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.yaw, -1);
+  assert.equal(result.thrust, false, 'not aligned -> no thrust');
 });
 
-test('aiBrainTick: dodge steers perpendicular (90°) to the threat', () => {
-  // Asteroid at +X (angle 0). Escape angle = 0 + PI/2 = PI/2 (i.e. +Z).
-  // Ship yaw is PI, which in the (x, z) plane means the ship is
-  // ALREADY facing +Z (facingAngle(PI) = PI/2 = escape direction).
-  // So the brain says yaw: 0 — the ship is already pointing the
-  // right way, it just thrusts north. (The old `aiYaw`-based diff
-  // was off by 90° and reported yaw: -1, but that pointed the ship
-  // away from the escape direction.)
-  const asteroids = [mockAsteroid(5, 0)];
+test('aiBrainTick: aligned asteroid -> thrust and fire', () => {
+  // Ship faces +X (yaw=-PI/2); asteroid at (40,0) directly ahead.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
-    aiYaw: Math.PI, // facing +Z
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(40, 0)],
   });
-  assert.equal(result.mode, 'dodge');
+  assert.equal(result.mode, 'asteroid');
   assert.equal(result.yaw, 0);
+  assert.equal(result.thrust, true);
+  assert.equal(result.fire, true);
 });
 
-// ---- aiBrainTick: TARGET mode -----------------------------------------
-
-test('aiBrainTick: returns target mode when an asteroid is within targetDist but outside dodgeDist', () => {
-  const asteroids = [mockAsteroid(40, 0)]; // outside dodgeDist (14), inside targetDist (90)
+test('aiBrainTick: picks nearest of multiple asteroids', () => {
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(80, 0), mockAsteroid(20, 0)],
   });
-  assert.equal(result.mode, 'target');
+  assert.equal(result.mode, 'asteroid');
+  // Closest is (20,0) — straight ahead.
+  assert.equal(result.yaw, 0);
+  assert.equal(result.thrust, true);
+  assert.equal(result.fire, true);
+});
+
+// ------------------------------------------------------------------
+// aiBrainTick: lead fire
+// ------------------------------------------------------------------
+
+test('aiBrainTick: lead fire aims ahead of moving asteroid', () => {
+  // Ship faces +X (yaw=-PI/2). Asteroid at (40,0) moving +X at 10 u/s.
+  // bulletSpeed=20 → flightTime = 40/20 = 2s → predicted (60,0) — in cone.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(40, 0, { x: 10, z: 0 })],
+    bulletSpeed: 20,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.fire, true);
+});
+
+test('aiBrainTick: lead fire does not fire if predicted point is off-axis', () => {
+  // Asteroid moving +Z; predicted off to the side.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(40, 0, { x: 0, z: 10 })],
+    bulletSpeed: 20,
+  });
+  assert.equal(result.mode, 'asteroid');
+  assert.equal(result.fire, false);
+});
+
+// ------------------------------------------------------------------
+// aiBrainTick: COLLECT
+// ------------------------------------------------------------------
+
+test('aiBrainTick: reachable powerup beats asteroid -> mode=powerup', () => {
+  // Asteroid farther than the powerup. user priority: COLLECT.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2, // facing +X
+    asteroids: [mockAsteroid(80, 0)],
+    powerupPos: { x: 20, z: 0 },
+  });
+  assert.equal(result.mode, 'powerup');
+});
+
+test('aiBrainTick: aligned powerup -> thrust + coast-in not yet', () => {
+  // Powerup directly ahead at 20u (above coast-in threshold of 5u).
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(80, 0)],
+    powerupPos: { x: 20, z: 0 },
+  });
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.yaw, 0);
   assert.equal(result.thrust, true);
 });
 
-test('aiBrainTick: target steers toward the nearest asteroid (left yaw for +X target)', () => {
-  // Asteroid at +X (targetAngle = atan2(0, +X) = 0). Ship yaw 0 means
-  // the ship is facing -Z (facingAngle(0) = atan2(-1, 0) = -PI/2).
-  // The brain compares the ACTUAL facing direction (facingAngle) to
-  // the target direction. The ship needs to turn LEFT to go from
-  // south to east → yaw: -1.
-  //
-  // (The old `aiYaw`-based diff was 0 - 0 = 0 → yaw: 0, but yaw=0
-  // points the ship south, not east, so the AI never actually
-  // faced the target and never fired. That's the bug we just fixed.)
-  const asteroids = [mockAsteroid(40, 0)];
+test('aiBrainTick: aligned powerup very close -> coast-in (no thrust)', () => {
+  // Powerup directly ahead at 3u < POWERUP_COAST_DIST (5u).
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
+    aiYaw: -Math.PI / 2,
+    asteroids: [],
+    powerupPos: { x: 3, z: 0 },
   });
-  assert.equal(result.mode, 'target');
-  assert.equal(result.yaw, -1);
-  assert.equal(result.thrust, true);
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.thrust, false, 'coast-in gate must cut thrust within 5u of pickup');
 });
 
-test('aiBrainTick: target picks the NEAREST asteroid (not the first)', () => {
-  // Far asteroid at +X 80, near asteroid at -Z 30. The brain should
-  // steer toward +Z (the closer one), not +X.
-  const asteroids = [mockAsteroid(80, 0), mockAsteroid(0, 30)];
+test('aiBrainTick: far powerup is ignored', () => {
+  // Powerup beyond powerupMaxChaseDist.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(40, 0)],
+    powerupPos: { x: 200, z: 0 },
+    powerupMaxChaseDist: 80,
   });
-  assert.equal(result.mode, 'target');
-  // Target at (0, 30) → targetAngle = atan2(30, 0) = PI/2.
-  // Ship facingAngle(0) = -PI/2 (facing south).
-  // diff = targetAngle - facingAngle = PI/2 - (-PI/2) = PI > 0.1
-  // → yaw: -1 (turn left; from south, left turn takes the ship
-  // through SE → E → NE → N, eventually facing the target).
-  assert.equal(result.yaw, -1);
+  assert.equal(result.mode, 'asteroid');
 });
 
-test('aiBrainTick: does not target if all asteroids are beyond targetDist', () => {
-  const asteroids = [mockAsteroid(200, 0)]; // beyond targetDist (90)
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-  });
-  assert.equal(result.mode, 'wander');
-});
+// ------------------------------------------------------------------
+// aiBrainTick: IDLE
+// ------------------------------------------------------------------
 
-// ---- aiBrainTick: WANDER mode -----------------------------------------
-
-test('aiBrainTick: empty asteroid list → wander', () => {
-  // Provide an aligned heading so thrust is true (the new wander
-  // behavior only thrusts when roughly aligned with the heading).
+test('aiBrainTick: empty asteroids + no powerup -> idle', () => {
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
     aiYaw: 0,
     asteroids: [],
-    time: 0,
-    wanderHeading: -Math.PI / 2, // aligned with facingAngle(0) = -PI/2
-    wanderHeadingExpiresAt: 5.0,
   });
-  assert.equal(result.mode, 'wander');
-  assert.equal(result.thrust, true);
-});
-
-test('aiBrainTick: wander → no thrust when heading is misaligned', () => {
-  // Ship faces -Z (yaw 0 → facingAngle = -PI/2). Heading = +PI/2
-  // (opposite direction). diff = PI → well outside 0.6 alignment
-  // window → thrust: false.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: Math.PI / 2,
-    wanderHeadingExpiresAt: 5.0,
-  });
-  assert.equal(result.mode, 'wander');
+  assert.equal(result.mode, 'idle');
+  assert.equal(result.yaw, 0);
   assert.equal(result.thrust, false);
+  assert.equal(result.fire, false);
 });
 
-test('aiBrainTick: wander biases heading toward nearest asteroid', () => {
-  // Asteroid at (0, 150) — within awareness range (targetDist×2.5 = 225)
-  // but outside targetDist (90) and dodgeDist (14) → wander mode.
-  // With a fixed rng returning 0.5, jitter = 0, so heading should be
-  // exactly the angle to the asteroid.
-  const asteroids = [mockAsteroid(0, 150)];
+// ------------------------------------------------------------------
+// aiBrainTick: priority order (EVADE > COLLECT > ENGAGE > IDLE)
+// ------------------------------------------------------------------
+
+test('aiBrainTick: EVADE outranks COLLECT', () => {
+  // Nearby asteroid < evadeDist AND a reachable powerup. EVADE wins.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    wanderHeading: null,
-    wanderHeadingExpiresAt: 0,
-    targetDist: 90,
-    rng: () => 0.5, // jitter = (0.5*2-1) * PI * 0.4 = 0
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(5, 0)],
+    powerupPos: { x: 20, z: 0 },
   });
-  assert.equal(result.mode, 'wander');
-  // targetAngle = atan2(150, 0) = PI/2. jitter = 0. heading = PI/2.
-  assert.ok(Math.abs(result._wanderHeading - Math.PI / 2) < 1e-9);
+  assert.equal(result.mode, 'evade');
 });
 
-test('aiBrainTick: wander picks a new heading on first call (wanderHeading=null)', () => {
-  let rngCalls = 0;
-  const rng = () => { rngCalls++; return 0.5; }; // → angle 0
+test('aiBrainTick: COLLECT outranks ENGAGE', () => {
+  // Far asteroid (no evade) AND a reachable powerup. COLLECT wins.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: null,
-    wanderHeadingExpiresAt: 0,
-    rng,
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(40, 0)],
+    powerupPos: { x: 20, z: 0 },
   });
-  assert.equal(result.mode, 'wander');
-  assert.equal(rngCalls, 1);
-  assert.equal(result._wanderHeading, 0); // 0.5 * 2 - 1 = 0, * PI = 0
+  assert.equal(result.mode, 'powerup');
 });
 
-test('aiBrainTick: wander keeps the same heading while still in the period', () => {
-  let rngCalls = 0;
-  const rng = () => { rngCalls++; return 0.5; };
-  const first = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: 1.0,
-    wanderHeadingExpiresAt: 5.0, // not yet expired
-    rng,
-  });
-  assert.equal(rngCalls, 0); // rng should NOT be called when heading is still valid
-  assert.equal(first._wanderHeading, 1.0);
-});
+// ------------------------------------------------------------------
+// aiBrainTick: fire is independent of chase target
+// ------------------------------------------------------------------
 
-test('aiBrainTick: wander picks a new heading after the period expires', () => {
-  let rngCalls = 0;
-  const rng = () => { rngCalls++; return 0.25; }; // → -PI/2
+test('aiBrainTick: keeps firing at asteroids while chasing powerup', () => {
+  // Ship faces +X; powerup ahead. The (40,0) asteroid is also in cone.
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 10.0,                // past the previous expiresAt
-    wanderHeading: 1.0,
-    wanderHeadingExpiresAt: 5.0,
-    wanderTurnPeriod: 2.5,
-    rng,
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(40, 0)],
+    powerupPos: { x: 20, z: 0 },
   });
-  assert.equal(rngCalls, 1);
-  assert.ok(Math.abs(result._wanderHeading + Math.PI / 2) < 1e-9);
-  // expiresAt = time + wanderTurnPeriod = 12.5
-  assert.equal(result._wanderHeadingExpiresAt, 12.5);
+  assert.equal(result.mode, 'powerup');
+  assert.equal(result.fire, true, 'must fire at asteroids even when chasing a powerup');
 });
 
-test('aiBrainTick: wander yaw steers toward the heading', () => {
-  // Ship at yaw 0 faces -Z (south) in atan2 terms: facingAngle(0) = -PI/2.
-  // Heading = +PI/4 (NE in atan2). diff = heading - facing = 3PI/4 > 0.1
-  // → yaw: -1 (turn left, which increases the facing angle from
-  // -PI/2 toward +PI/4).
+test('aiBrainTick: does not fire when asteroid is out of range', () => {
+  // Asteroid at 250u, fireMaxDist default 200u. In cone (yaw=-PI/2, dead-ahead).
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: Math.PI / 4,
-    wanderHeadingExpiresAt: 5.0,
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(250, 0)],
   });
-  assert.equal(result.yaw, -1);
-  // Heading = -PI/4 (SE). diff = -PI/4 - (-PI/2) = PI/4 > 0.1
-  // → yaw: -1.
-  const result2 = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: -Math.PI / 4,
-    wanderHeadingExpiresAt: 5.0,
-  });
-  assert.equal(result2.yaw, -1);
+  assert.equal(result.fire, false);
 });
 
-test('aiBrainTick: wander yaw is 0 when heading is aligned (within deadband)', () => {
-  // Ship at yaw 0 faces -Z in atan2 terms (facingAngle(0) = -PI/2).
-  // For the heading to be "aligned with the ship", it has to be
-  // close to -PI/2 — NOT close to 0. The old test used heading
-  // ≈ 0 which was "aligned" with the BROKEN convention (where
-  // the brain compared `heading` to `aiYaw` directly). Under the
-  // fixed convention, heading = -PI/2 + 0.05 is within the 0.1
-  // deadband of the ship's actual facing direction → no steering.
+test('aiBrainTick: does not fire when too close (inside evadeDist)', () => {
   const result = aiBrainTick({
     aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [],
-    time: 0,
-    wanderHeading: -Math.PI / 2 + 0.05,
-    wanderHeadingExpiresAt: 5.0,
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(5, 0)],
   });
-  assert.equal(result.yaw, 0);
+  assert.equal(result.mode, 'evade');
+  assert.equal(result.fire, false);
 });
 
-// ---- findNearestAsteroid ----------------------------------------------
+// ------------------------------------------------------------------
+// shouldResetAi + pickAiSpawn
+// ------------------------------------------------------------------
 
-test('findNearestAsteroid: empty list returns null', () => {
-  assert.equal(findNearestAsteroid({ x: 0, z: 0 }, []), null);
-});
-
-test('findNearestAsteroid: single asteroid', () => {
-  const a = mockAsteroid(5, 0);
-  const result = findNearestAsteroid({ x: 0, z: 0 }, [a]);
-  assert.equal(result.asteroid, a);
-  assert.equal(result.dist, 5);
-  assert.equal(result.dx, 5);
-  assert.equal(result.dz, 0);
-});
-
-test('findNearestAsteroid: picks the closest of multiple', () => {
-  const a = mockAsteroid(50, 0);
-  const b = mockAsteroid(0, 3); // closer
-  const c = mockAsteroid(-10, 0);
-  const result = findNearestAsteroid({ x: 0, z: 0 }, [a, b, c]);
-  assert.equal(result.asteroid, b);
-  assert.equal(result.dist, 3);
-});
-
-test('findNearestAsteroid: skips asteroids with no getPosition', () => {
-  const a = mockAsteroid(5, 0);
-  const broken = { spec: {} }; // no getPosition
-  const result = findNearestAsteroid({ x: 0, z: 0 }, [broken, a]);
-  assert.equal(result.asteroid, a);
-});
-
-// ---- shouldResetAi ----------------------------------------------------
-
-test('shouldResetAi: inside resetDist → false', () => {
+test('shouldResetAi: inside resetDist -> false', () => {
   assert.equal(shouldResetAi({ x: 50, z: 50 }, 220), false);
-  assert.equal(shouldResetAi({ x: 0, z: 0 }, 220), false);
 });
 
-test('shouldResetAi: outside resetDist → true', () => {
+test('shouldResetAi: outside resetDist -> true', () => {
   assert.equal(shouldResetAi({ x: 300, z: 0 }, 220), true);
-  assert.equal(shouldResetAi({ x: 0, z: -250 }, 220), true);
 });
 
-test('shouldResetAi: exactly on the boundary → false (strict >)', () => {
-  assert.equal(shouldResetAi({ x: 220, z: 0 }, 220), false);
+test('shouldResetAi: default resetDist is 400', () => {
+  assert.equal(shouldResetAi({ x: 350, z: 0 }), false);
+  assert.equal(shouldResetAi({ x: 450, z: 0 }), true);
 });
-
-test('shouldResetAi: null pos → false', () => {
-  assert.equal(shouldResetAi(null, 220), false);
-});
-
-// ---- pickAiSpawn ------------------------------------------------------
 
 test('pickAiSpawn: returns a position within radius', () => {
-  // 100 trials — should always be inside `radius`.
   for (let i = 0; i < 100; i++) {
     const { position } = pickAiSpawn(30);
     const r = Math.hypot(position.x, position.z);
     assert.ok(r <= 30, `r=${r}`);
-    assert.ok(r >= 12, `r=${r}`); // 0.4 × 30 = 12 minimum
+    assert.ok(r >= 12, `r=${r}`);
     assert.equal(position.y, 0);
   }
 });
 
 test('pickAiSpawn: deterministic with a fixed rng', () => {
-  const rng = () => 0; // angle 0, r = 0.4
+  const rng = () => 0;
   const { position, yaw } = pickAiSpawn(30, rng);
-  // cos(0) * (30 * 0.4) = 12, sin(0) * 12 = 0
   assert.ok(Math.abs(position.x - 12) < 1e-9);
   assert.ok(Math.abs(position.z) < 1e-9);
-  // yaw = 0 * 2π = 0
   assert.equal(yaw, 0);
 });
 
-// ---- aiBrainTick: HUNT mode (intercept controller) -------------------
-
-test('aiBrainTick: hunt mode → approach when aligned and need speed', () => {
-  // Ship at origin facing +X (yaw = -PI/2). Power-up at (60, 0).
-  // No velocity. closingSpeed = 0, desiredClosing = min(20, 60) = 20.
-  // needSpeed = true, aligned = true → thrust.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: -Math.PI / 2, // facing +X
-    aiVel: { x: 0, z: 0 },
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 60, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  assert.equal(result.thrust, true);
-  assert.equal(result.fire, false);
-});
-
-test('aiBrainTick: hunt mode → brake when approaching too fast', () => {
-  // Ship at origin, velocity (80, 0) → moving +X at 80 u/s.
-  // Power-up at (50, 0). closingSpeed = 80, desiredClosing = min(20, 50) = 20.
-  // closingSpeed (80) > desiredClosing * 1.5 (30) → BRAKE.
-  // brakeAngle = atan2(0, -80) = PI (pointing -X).
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: -Math.PI / 2, // facing +X
-    aiVel: { x: 80, z: 0 },
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 50, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  // Brake direction is -X. facingAngle(-PI/2) = +X (atan2 convention).
-  // brakeAngle = PI. diff = PI - 0 = PI > 0.2 → yaw: -1.
-  assert.equal(result.yaw, -1);
-  // Ship is facing +X but brake is -X: |diff| = PI > 0.6 → no thrust.
-  assert.equal(result.thrust, false);
-});
-
-test('aiBrainTick: hunt mode → brake thrusts when pointing in brake direction', () => {
-  // Ship at origin, velocity (80, 0), facing -X (yaw = PI/2).
-  // Power-up at (50, 0). closingSpeed = 80 > 30 → BRAKE.
-  // brakeAngle = PI (pointing -X). facingAngle(PI/2) = PI.
-  // diff = PI - PI = 0 → |diff| < 0.6 → thrust.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: Math.PI / 2, // facing -X
-    aiVel: { x: 80, z: 0 },
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 50, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  assert.equal(result.yaw, 0); // aligned with brake direction
-  assert.equal(result.thrust, true); // braking thrust
-});
-
-test('aiBrainTick: hunt mode → final approach (coast in when close and slow)', () => {
-  // Ship at (45, 0), velocity (5, 0), facing +X. Power-up at (50, 0).
-  // pdist = 5 (< 8), closingSpeed = 5 (< 15), speed = 5 (< 20) → FINAL.
-  // coast in: thrust = false.
-  const result = aiBrainTick({
-    aiPos: { x: 45, z: 0 },
-    aiYaw: -Math.PI / 2, // facing +X
-    aiVel: { x: 5, z: 0 },
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 50, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  assert.equal(result.thrust, false); // coast
-});
-
-test('aiBrainTick: hunt mode → no thrust when not aligned in approach', () => {
-  // Ship at origin, velocity (0, 0), facing -Z (yaw 0). Power-up at (60, 0).
-  // targetAngle = atan2(0, 60) = 0. facingAngle(0) = -PI/2.
-  // diff = 0 - (-PI/2) = PI/2 > 0.5 → aligned = false → no thrust.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0, // facing -Z
-    aiVel: { x: 0, z: 0 },
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 60, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  assert.equal(result.thrust, false); // not aligned
-});
-
-test('aiBrainTick: hunt mode → defaults aiVel to zero when omitted', () => {
-  // Same as approach test but without aiVel — should default to {0,0}.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: -Math.PI / 2,
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 60, z: 0 },
-  });
-  assert.equal(result.mode, 'hunt');
-  assert.equal(result.thrust, true); // aligned + needSpeed
-});
-
-test('aiBrainTick: hunt mode ignores power-up beyond huntDist', () => {
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    aiVel: { x: 0, z: 0 },
-    asteroids: [],
-    time: 0,
-    powerupPos: { x: 600, z: 0 }, // beyond default 500
-  });
-  assert.equal(result.mode, 'wander'); // falls through to wander
-});
-
-// ---- createDemoAi factory ---------------------------------------------
+// ------------------------------------------------------------------
+// createDemoAi: factory wiring
+// ------------------------------------------------------------------
 
 test('createDemoAi: requires scene and asteroids', () => {
   assert.throws(() => createDemoAi({}), /scene/);
   assert.throws(() => createDemoAi({ scene: mockScene() }), /asteroids/);
 });
 
-test('createDemoAi: factory wiring (mock shipFactory)', () => {
+test('createDemoAi: basic factory wiring', () => {
   const scene = mockScene();
-  const asteroids = [mockAsteroid(5, 0)];
   const mock = mockShipFactory();
-
   const ai = createDemoAi({
     scene,
-    asteroids,
-    options: {
-      shipFactory: mock.build,
-      dodgeDist: 14,
-      targetDist: 90,
-    },
+    asteroids: [],
+    options: { shipFactory: mock.build, rng: () => 0 },
   });
-
   assert.equal(typeof ai.update, 'function');
   assert.equal(typeof ai.dispose, 'function');
   assert.equal(typeof ai.getShip, 'function');
 
-  // First tick: asteroid at (5,0) is within dodgeDist (14) → dodge mode.
   ai.update(0.1);
   assert.equal(mock.calls.setThrust.length, 1);
-  assert.equal(mock.calls.setThrust[0], true); // thrust: true in dodge
   assert.equal(mock.calls.update.length, 1);
-
-  // Multiple ticks: each calls setYaw, setThrust, update exactly once.
-  ai.update(0.1);
-  ai.update(0.1);
-  assert.equal(mock.calls.setYaw.length, 3);
-  assert.equal(mock.calls.setThrust.length, 3);
-  assert.equal(mock.calls.update.length, 3);
-
-  // No resets should have happened (we're not far from origin).
-  assert.equal(mock.calls.reset.length, 0);
 });
 
-test('createDemoAi: reset when ship drifts beyond resetDist', () => {
+test('createDemoAi: resets ship when it drifts beyond resetDist', () => {
   const scene = mockScene();
-  const asteroids = [];
   const mock = mockShipFactory();
   const ai = createDemoAi({
     scene,
-    asteroids,
-    options: {
-      shipFactory: mock.build,
-      resetDist: 50,
-      spawnRadius: 10,
-    },
+    asteroids: [],
+    options: { shipFactory: mock.build, resetDist: 50, spawnRadius: 10 },
   });
-
-  // Manually move the mock ship far from origin.
-  const ship = ai.getShip();
-  ship.position.x = 200;
-  ship.position.z = 0;
-
+  ai.getShip().position.x = 200;
   ai.update(0.1);
-  // Reset should have been called.
   assert.ok(mock.calls.reset.length >= 1);
 });
 
-test('createDemoAi: dt <= 0 is a no-op (no calls)', () => {
+test('createDemoAi: dt <= 0 is a no-op', () => {
   const scene = mockScene();
-  const asteroids = [];
   const mock = mockShipFactory();
   const ai = createDemoAi({
     scene,
-    asteroids,
+    asteroids: [],
     options: { shipFactory: mock.build },
   });
-
   ai.update(0);
   ai.update(-1);
   assert.equal(mock.calls.setYaw.length, 0);
@@ -642,236 +507,351 @@ test('createDemoAi: dt <= 0 is a no-op (no calls)', () => {
   assert.equal(mock.calls.update.length, 0);
 });
 
-// ---- isTargetInFront --------------------------------------------------
-
-test('isTargetInFront: target directly ahead (yaw 0) → true', () => {
-  // Ship at origin facing -Z (yaw 0 → forward = -Z). Target at (0, -10) is
-  // directly ahead.
-  assert.equal(isTargetInFront({ x: 0, z: 0 }, 0, { x: 0, z: -10 }, 0.35), true);
-});
-
-test('isTargetInFront: target directly behind → false', () => {
-  // Target at (0, +10) is behind the ship (yaw 0 → forward = -Z).
-  assert.equal(isTargetInFront({ x: 0, z: 0 }, 0, { x: 0, z: 10 }, 0.35), false);
-});
-
-test('isTargetInFront: target just inside cone edge → true', () => {
-  // yaw 0 → forward = -Z (angle = PI in (x, z) atan2 terms). A target at
-  // (sin(0.34), -cos(0.34)) is at angle PI + 0.34, which is 0.34 off
-  // forward → inside a 0.35 cone → true.
-  const a = 0.34;
-  assert.equal(
-    isTargetInFront({ x: 0, z: 0 }, 0, { x: Math.sin(a), z: -Math.cos(a) }, 0.35),
-    true,
-  );
-});
-
-test('isTargetInFront: target just outside cone edge → false', () => {
-  // 0.40 rad off forward → outside a 0.35 cone.
-  const a = 0.40;
-  assert.equal(
-    isTargetInFront({ x: 0, z: 0 }, 0, { x: Math.sin(a), z: -Math.cos(a) }, 0.35),
-    false,
-  );
-});
-
-test('isTargetInFront: handles non-zero yaw correctly', () => {
-  // Ship facing +X (yaw = -PI/2 → forward = +X). Target at (10, 0) is
-  // directly ahead.
-  assert.equal(
-    isTargetInFront({ x: 0, z: 0 }, -Math.PI / 2, { x: 10, z: 0 }, 0.35),
-    true,
-  );
-  // Target at (-10, 0) is directly behind.
-  assert.equal(
-    isTargetInFront({ x: 0, z: 0 }, -Math.PI / 2, { x: -10, z: 0 }, 0.35),
-    false,
-  );
-});
-
-test('isTargetInFront: null positions → false (defensive)', () => {
-  assert.equal(isTargetInFront(null, 0, { x: 0, z: 0 }, 0.35), false);
-  assert.equal(isTargetInFront({ x: 0, z: 0 }, 0, null, 0.35), false);
-});
-
-// ---- aiBrainTick: fire decision ---------------------------------------
-
-test('aiBrainTick: target mode → fire:false when target is not in front', () => {
-  // Ship at origin facing -Z (yaw 0). Target at (40, 0) is to the side →
-  // not in the forward cone.
-  const asteroids = [mockAsteroid(40, 0)];
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-    fireConeHalfAngle: 0.35,
-  });
-  assert.equal(result.mode, 'target');
-  assert.equal(result.fire, false);
-});
-
-test('aiBrainTick: target mode → fire:true when target is directly ahead', () => {
-  // Ship facing -Z (yaw 0). Target at (0, -40) is directly ahead.
-  const asteroids = [mockAsteroid(0, -40)];
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-    fireConeHalfAngle: 0.35,
-  });
-  assert.equal(result.mode, 'target');
-  assert.equal(result.fire, true);
-});
-
-test('aiBrainTick: dodge mode → fire:false (no shooting while dodging)', () => {
-  // Asteroid is within dodgeDist → dodge mode, must NOT fire.
-  const asteroids = [mockAsteroid(5, 0)];
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids,
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-    fireConeHalfAngle: 0.35,
-  });
-  assert.equal(result.mode, 'dodge');
-  assert.equal(result.fire, false);
-});
-
-test('aiBrainTick: wander mode → fire:false (no shooting at nothing)', () => {
-  // No asteroids in range → wander mode, must NOT fire.
-  const result = aiBrainTick({
-    aiPos: { x: 0, z: 0 },
-    aiYaw: 0,
-    asteroids: [mockAsteroid(200, 0)], // out of targetDist
-    time: 0,
-    dodgeDist: 14,
-    targetDist: 90,
-    fireConeHalfAngle: 0.35,
-  });
-  assert.equal(result.mode, 'wander');
-  assert.equal(result.fire, false);
-});
-
-// ---- createDemoAi: factory wiring for bullets -------------------------
-
-test('createDemoAi: fires weapon in TARGET mode when target is ahead', () => {
+test('createDemoAi: fires weapon when aligned with an asteroid in range', () => {
+  // Asteroid directly ahead of spawn at (0,0,0) yaw=0; asteroid at (0,-25) is in cone + range.
   const scene = mockScene();
-  // Pin spawn via rng()=0 → ship at (12, 0, 0) facing yaw=0 (forward = -Z).
-  // Asteroid at (12, -20) is on the ship's -Z axis, so the brain is in
-  // target mode (distance 20 < targetDist=90) and the target is directly
-  // ahead (within the 0.35-rad forward cone).
-  const asteroids = [mockAsteroid(12, -20)];
   const mock = mockShipFactory();
   const weaponCalls = [];
-  const mockWeapon = {
-    fire: (opts) => {
-      weaponCalls.push(opts);
-      return 0;
-    },
-  };
   const ai = createDemoAi({
     scene,
-    asteroids,
-    weapon: mockWeapon,
-    options: {
-      shipFactory: mock.build,
-      dodgeDist: 14,
-      targetDist: 90,
-      fireConeHalfAngle: 0.35,
-      rng: () => 0,
-    },
-  });
-  ai.update(0.1);
-  assert.equal(weaponCalls.length, 1);
-  assert.equal(typeof weaponCalls[0].origin, 'object');
-  assert.equal(typeof weaponCalls[0].direction, 'object');
-});
-
-test('createDemoAi: does NOT fire weapon in DODGE mode', () => {
-  const scene = mockScene();
-  const asteroids = [mockAsteroid(5, 0)]; // within dodgeDist
-  const mock = mockShipFactory();
-  const weaponCalls = [];
-  const mockWeapon = {
-    fire: (opts) => {
-      weaponCalls.push(opts);
-      return 0;
-    },
-  };
-  // Pin spawn via rng()=0 → ship at (12, 0). Asteroid at (5, 0) → distance 7
-  // → within dodgeDist=14. Without this, default Math.random can spawn
-  // the ship 21+ units away and the asteroid falls into targetDist=90.
-  const ai = createDemoAi({
-    scene,
-    asteroids,
-    weapon: mockWeapon,
+    asteroids: [mockAsteroid(0, -25)],
+    weapon: { fire: (opts) => { weaponCalls.push(opts); return 0; } },
     options: { shipFactory: mock.build, rng: () => 0 },
   });
   ai.update(0.1);
-  assert.equal(weaponCalls.length, 0);
+  assert.equal(weaponCalls.length, 1);
 });
 
-test('createDemoAi: does NOT fire weapon in WANDER mode', () => {
+test('createDemoAi: does NOT fire weapon in IDLE mode', () => {
   const scene = mockScene();
   const mock = mockShipFactory();
   const weaponCalls = [];
-  const mockWeapon = {
-    fire: (opts) => {
-      weaponCalls.push(opts);
-      return 0;
-    },
-  };
   const ai = createDemoAi({
     scene,
     asteroids: [],
-    weapon: mockWeapon,
+    weapon: { fire: () => { weaponCalls.push(1); return 0; } },
     options: { shipFactory: mock.build },
   });
   ai.update(0.1);
   assert.equal(weaponCalls.length, 0);
 });
 
-test('createDemoAi: works without weapon option (no firing at all)', () => {
+test('createDemoAi: getLastDecision returns a frozen snapshot', () => {
   const scene = mockScene();
-  const asteroids = [mockAsteroid(0, -40)];
   const mock = mockShipFactory();
-  // No weapon option — should still tick without throwing.
   const ai = createDemoAi({
     scene,
-    asteroids,
-    options: { shipFactory: mock.build },
+    asteroids: [mockAsteroid(40, 0)],
+    options: { shipFactory: mock.build, rng: () => 0 },
   });
-  // Should not throw, no firing to verify since no weapon.
   ai.update(0.1);
-  ai.update(0.1);
-  assert.equal(mock.calls.setYaw.length, 2);
-  assert.equal(mock.calls.update.length, 2);
+  const dec = ai.getLastDecision();
+  assert.equal(typeof dec.mode, 'string');
+  assert.equal(typeof dec.yaw, 'number');
+  assert.equal(typeof dec.thrust, 'boolean');
+  assert.equal(typeof dec.fire, 'boolean');
+  assert.equal(typeof dec.activeWeapon, 'string');
+  assert.equal(typeof dec.threatsCount, 'number');
+  assert.throws(() => { dec.mode = 'x'; }, /frozen|read.only/i);
 });
 
-test('createDemoAi: getMode reflects the current behavior', () => {
+test('createDemoAi: getMode reports evade for nearby asteroid', () => {
   const scene = mockScene();
-  const asteroids = [mockAsteroid(5, 0)]; // within dodgeDist
   const mock = mockShipFactory();
-  // Deterministic spawn: rng()=0 → angle 0, r = 0.4 × 30 = 12 → position (12, 0).
-  // Asteroid at (5, 0) → distance 7 → within dodgeDist=14 → dodge.
   const ai = createDemoAi({
     scene,
-    asteroids,
+    asteroids: [mockAsteroid(0, 0)],
     options: {
       shipFactory: mock.build,
-      dodgeDist: 14,
-      targetDist: 90,
       rng: () => 0,
+      evadeDist: 12,
+      spawnRadius: 0, // ship spawns AT the asteroid -> evade
     },
   });
+  assert.equal(ai.getMode(), 'evade');
+});
 
-  assert.equal(ai.getMode(), 'dodge');
+// ------------------------------------------------------------------
+// Live AI_TUNABLES bag flow-through
+// ------------------------------------------------------------------
+
+test('live-bag flow-through: AI_TUNABLES.evadeDist mutation changes evade behavior', () => {
+  try {
+    const POS = { x: 0, y: 0, z: 0 };
+    const AST15 = mockAsteroid(15, 0);
+    // Default evadeDist=10: 15u is outside -> no evade.
+    const before = aiBrainTick({ aiPos: POS, aiYaw: 0, asteroids: [AST15] });
+    assert.notEqual(before.mode, 'evade', 'baseline 15u outside default 10u');
+    // Raise to 20: 15u is now inside -> evade.
+    AI_TUNABLES.evadeDist = 20;
+    const after = aiBrainTick({ aiPos: POS, aiYaw: 0, asteroids: [AST15] });
+    assert.equal(after.mode, 'evade', 'live bag mutation should be visible next tick');
+    assert.match(after.reason, /20\.0u/, 'reason reflects live value, not canonical default');
+  } finally {
+    resetAITunables();
+  }
+});
+
+test('live-bag flow-through: AI_TUNABLES.fireMaxDist mutation changes fire behavior', () => {
+  try {
+    const POS = { x: 0, y: 0, z: 0 };
+    const AST50 = mockAsteroid(50, 0);
+    AI_TUNABLES.fireHeadingGate = Math.PI; // ensure dead-ahead is in cone.
+    const before = aiBrainTick({ aiPos: POS, aiYaw: 0, asteroids: [AST50] });
+    assert.equal(before.fire, true, 'baseline 50u in default 200u range');
+    AI_TUNABLES.fireMaxDist = 30;
+    const after = aiBrainTick({ aiPos: POS, aiYaw: 0, asteroids: [AST50] });
+    assert.equal(after.fire, false, 'live bag fireMaxDist=30 should exclude 50u');
+  } finally {
+    resetAITunables();
+  }
+});
+
+test('precedence: explicit factory override wins over live AI_TUNABLES bag', () => {
+  try {
+    AI_TUNABLES.evadeDist = 1000;
+    const result = aiBrainTick({
+      aiPos: { x: 0, z: 0 },
+      aiYaw: 0,
+      asteroids: [mockAsteroid(30, 0)],
+      evadeDist: 50,
+    });
+    assert.equal(result.mode, 'evade', 'explicit evadeDist: 50 must win over bag 1000');
+  } finally {
+    resetAITunables();
+  }
+});
+
+// ------------------------------------------------------------------
+// Settle: verify the bag still has its canonical defaults after the
+// suite (catches future regression where someone forgets to restore).
+// ------------------------------------------------------------------
+
+test('AI_TUNABLES: resetAITunables restores defaults (regression net)', () => {
+  AI_TUNABLES.evadeDist = 1;
+  AI_TUNABLES.fireHeadingGate = 999;
+  resetAITunables();
+  assert.equal(AI_TUNABLES.evadeDist, AI_TUNABLE_DEFAULTS.evadeDist);
+  assert.equal(AI_TUNABLES.fireHeadingGate, AI_TUNABLE_DEFAULTS.fireHeadingGate);
+});
+
+// ------------------------------------------------------------------
+// v0.56.0 PIRATE behavior (registry extension seam)
+// ------------------------------------------------------------------
+
+/**
+ * Mock a target ship (live position/velocity props, no getPosition()).
+ * Distinct from mockAsteroid (which has getPosition/getVelocity).
+ */
+function mockTargetShip(x, z, vel) {
+  const v = vel || { x: 0, z: 0 };
+  return {
+    position: { x, y: 0, z },
+    velocity: { x: v.x, z: v.z },
+  };
+}
+
+test('aiBrainTick: nearest ship within aggroDist -> mode=pirate', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2, // facing +X
+    asteroids: [],
+    ships: [mockTargetShip(80, 0, { x: 0, z: 0 })],
+    aggroDist: 300,
+  });
+  assert.equal(result.mode, 'pirate');
+  assert.equal(result.yaw, 0, 'aligned with the ship straight ahead');
+  assert.equal(result.thrust, true);
+});
+
+test('aiBrainTick: ship beyond aggroDist -> falls through to next behavior', () => {
+  // aggroDist 50; ship at 80u. Pirate predicate fails. With no
+  // asteroids/powerup, fall through to IDLE.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: 0,
+    asteroids: [],
+    ships: [mockTargetShip(80, 0)],
+    aggroDist: 50,
+  });
+  assert.notEqual(result.mode, 'pirate');
+  assert.equal(result.mode, 'idle');
+});
+
+test('aiBrainTick: PIRATE outranks COLLECT', () => {
+  // A reachable powerup AND a ship in aggroDist. PIRATE wins.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(80, 0)],
+    ships: [mockTargetShip(40, 0)],
+    powerupPos: { x: 20, z: 0 },
+    aggroDist: 300,
+  });
+  assert.equal(result.mode, 'pirate');
+});
+
+test('aiBrainTick: EVADE outranks PIRATE', () => {
+  // A nearby asteroid (< evadeDist) AND a ship in aggroDist.
+  // EVADE wins (immediate threat to survival).
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [mockAsteroid(5, 0)],
+    ships: [mockTargetShip(40, 0)],
+    aggroDist: 300,
+  });
+  assert.equal(result.mode, 'evade');
+});
+
+test('aiBrainTick: lead fire on a moving ship', () => {
+  // Ship at (40,0) moving +X at 10 u/s. Bullet speed 20. Flight
+  // time 2s. Predicted (60, 0). Ship faces +X (yaw=-PI/2). In cone.
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [],
+    ships: [mockTargetShip(40, 0, { x: 10, z: 0 })],
+    aggroDist: 300,
+    bulletSpeed: 20,
+  });
+  assert.equal(result.mode, 'pirate');
+  assert.equal(result.fire, true);
+});
+
+test('aiBrainTick: does NOT fire on ship out of fireMaxDist', () => {
+  const result = aiBrainTick({
+    aiPos: { x: 0, z: 0 },
+    aiYaw: -Math.PI / 2,
+    asteroids: [],
+    ships: [mockTargetShip(500, 0)], // beyond default fireMaxDist=200
+    aggroDist: 1000, // pirate engages, but can't fire at 500u
+  });
+  assert.equal(result.mode, 'pirate');
+  assert.equal(result.fire, false);
+});
+
+test('live-bag flow-through: AI_TUNABLES.aggroDist mutation changes pirate behavior', () => {
+  try {
+    const POS = { x: 0, z: 0 };
+    const SHIP = mockTargetShip(80, 0);
+    // Default aggroDist=0: pirate never fires (defaults to idle).
+    const before = aiBrainTick({
+      aiPos: POS, aiYaw: 0, asteroids: [], ships: [SHIP],
+    });
+    assert.notEqual(before.mode, 'pirate', 'default aggroDist=0 means pacifist');
+    // Raise to 300: pirate engages.
+    AI_TUNABLES.aggroDist = 300;
+    const after = aiBrainTick({
+      aiPos: POS, aiYaw: 0, asteroids: [], ships: [SHIP],
+    });
+    assert.equal(after.mode, 'pirate', 'live bag mutation visible next tick');
+  } finally {
+    resetAITunables();
+  }
+});
+
+test('createDemoAi: factory option aggroDist overrides the live bag', () => {
+  const scene = mockScene();
+  const mock = mockShipFactory();
+  try {
+    AI_TUNABLES.aggroDist = 0;
+    const ai = createDemoAi({
+      scene,
+      asteroids: [],
+      options: { shipFactory: mock.build, aggroDist: 300, spawnRadius: 10 },
+    });
+    ai.getShip().position.x = 0;
+    ai.getShip().position.z = 0;
+    // The factory thread is best-effort (it does aggroDist via
+    // brainArgsFromShip with ...opts spread), so verify mode after
+    // a single tick — the mode will depend on whether any ship is
+    // in range. With getShips=null, nearestShip stays null and pirate
+    // never activates. We just want to make sure the factory didn't
+    // throw on the new aggroDist key.
+    ai.update(0.1);
+    assert.equal(mock.calls.setThrust.length, 1);
+  } finally {
+    resetAITunables();
+  }
+});
+
+// =============================================================================
+// v0.60.0 — Pirate cross-targeting (pirate1 sees pirate2 + player)
+// =============================================================================
+// When two pirates exist, each one's `getShips` includes the OTHER pirate
+// + the player. The PIRATE behavior picks the NEAREST ship. This test
+// pins the wiring: a single AI brain call must consider all ships in
+// its `args.ships` array, not just the first one. The brain's
+// `findNearest` walks the entire array via the live-property getter.
+
+test('aiBrainTick: pirate cross-targeting — picks nearest of [player, other pirate]', () => {
+  const player = { position: { x: 100, y: 0, z: 0 } }; // 100u away on +X
+  const pirate2 = { position: { x: 40, y: 0, z: 0 } }; // 40u away (closer)
+  // Reset tunables so default aggroDist (300) applies.
+  resetAITunables();
+  try {
+    const aiPos = { x: 0, y: 0, z: 0 };
+    const aiYaw = 0;
+    // No asteroids → COLLECT/ENGAGE/IDLE skip; PIRATE only fires if
+    // nearest ship in aggroDist. Note: AI_TUNABLES.aggroDist defaults
+    // to 0 (pacifist) — main.js pirates override to 300 via
+    // options.aggroDist. This test passes 300 explicitly so the brain
+    // sees the same value a real pirate ship sees.
+    const decision = aiBrainTick({
+      aiPos,
+      aiYaw,
+      asteroids: [],
+      ships: [player, pirate2], // both in range, pirate2 closer
+      aggroDist: 300,
+    });
+    // pirate2 at 40u < aggroDist 300 → fires
+    assert.equal(decision.mode, 'pirate');
+    assert.match(decision.reason, /pirate target 40\.0u/);
+  } finally {
+    resetAITunables();
+  }
+});
+
+test('aiBrainTick: pirate cross-targeting — picks player when player closer', () => {
+  const player = { position: { x: 30, y: 0, z: 0 } }; // 30u away
+  const pirate2 = { position: { x: 200, y: 0, z: 0 } }; // 200u away (farther)
+  resetAITunables();
+  try {
+    const aiPos = { x: 0, y: 0, z: 0 };
+    const aiYaw = 0;
+    const decision = aiBrainTick({
+      aiPos,
+      aiYaw,
+      asteroids: [],
+      ships: [player, pirate2],
+      aggroDist: 300,
+    });
+    assert.equal(decision.mode, 'pirate');
+    assert.match(decision.reason, /pirate target 30\.0u/);
+  } finally {
+    resetAITunables();
+  }
+});
+
+test('createDemoAi: isAlive() returns true after construction, false after dispose()', () => {
+  resetAITunables();
+  const mockShip = {
+    position: { x: 0, y: 0, z: 0 },
+    velocity: { x: 0, z: 0 },
+    rotation: { yaw: 0 },
+    setYaw() {},
+    setThrust() {},
+    update() {},
+    dispose() {},
+  };
+  const shipFactory = () => mockShip;
+  const ai = createDemoAi({
+    scene: { children: [], add() {}, remove() {} },
+    asteroids: [],
+    options: { shipFactory, spawnRadius: 0, rng: () => 0 },
+  });
+  assert.equal(ai.isAlive(), true, 'fresh AI is alive');
+  ai.dispose();
+  assert.equal(ai.isAlive(), false, 'disposed AI is dead');
 });

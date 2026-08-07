@@ -4,9 +4,11 @@
  *
  * Visual:
  *   - A glTF model loaded from /models/powerup-laser.glb (set in
- *     POWERUP_GLB_URL). Loaded asynchronously; the factory initially shows a
- *     procedural fallback mesh (cyan emissive cone) and swaps in the GLB
- *     once it loads.
+ *     POWERUP_GLB_URLS by type). Loaded asynchronously; the factory
+ *     initially shows a procedural fallback mesh (per-type shape + tint)
+ *     and swaps in the GLB once it loads. Types WITHOUT a registered
+ *     URL stay on the procedural fallback mesh (the shield stays on
+ *     its mint-green icosahedron until the user supplies the GLB).
  *   - Spins slowly around Y and bobs up/down.
  *   - An emissive "halo" ring under the entity (cosmetic — the actual
  *     collision uses a sphere of POWERUP_RADIUS).
@@ -25,7 +27,7 @@
  * @param {{
  *   scene: import('three').Scene,
  *   spec: {
- *     type: string,                         // e.g. 'laser'
+ *     type: string,                         // e.g. 'shield'
  *     position: { x:number, y:number, z:number },
  *     lifetime?: number,                    // seconds; default POWERUP_LIFETIME_S
  *     spawnTime?: number,                   // seconds since boot; offsets the bob phase
@@ -39,6 +41,11 @@ import {
   ConeGeometry,
   RingGeometry,
   CylinderGeometry,
+  BoxGeometry,
+  IcosahedronGeometry,
+  CapsuleGeometry,
+  TorusGeometry,
+  OctahedronGeometry,
   MeshStandardMaterial,
   MeshBasicMaterial,
   Color,
@@ -46,8 +53,120 @@ import {
   Vector3,
 } from 'three';
 
-const POWERUP_GLB_URL = '/models/powerup-laser.glb';
+/**
+ * v0.69.0 — per-type GLB URLs. Each powerup type that has a real
+ * GLB asset registers here; types not listed stay on the procedural
+ * fallback mesh (the colored shape per POWERUP_TYPE_VARIANTS). The
+ * 'shield' type intentionally has no URL until the user supplies
+ * the real mesh + PBR — its mint-green icosahedron is the
+ * placeholder shape for now.
+ *
+ * Compared to v0.68.0: previously a single `POWERUP_GLB_URL` was
+ * loaded for ALL types. After the laser GLB loaded, every powerup
+ * (including shield, speed, energy, ...) had its colored fallback
+ * replaced by the laser mesh — visually wrong. v0.69.0 splits the
+ * cache per-type so each type only swaps when its own GLB is
+ * present.
+ *
+ * Users adding a new GLB: just append `type: '/models/powerup-NAME.glb'`.
+ * Until then, the procedural fallback is permanent.
+ */
+const POWERUP_GLB_URLS = Object.freeze({
+  // Add entries here when you have a GLB for a powerup type:
+  //   shield: '/models/powerup-shield.glb',
+  //   laser:  '/models/powerup-laser.glb',
+});
+
 const POWERUP_RADIUS = 1.5;
+
+/**
+ * Exponential drag applied to push velocity each frame.
+ * `v(t+dt) = v(t) * exp(-POWERUP_PUSH_DRAG * dt)`.
+ * Exported so the AI can predict how far a pushed powerup will drift.
+ */
+export const POWERUP_PUSH_DRAG = 3.0;
+
+/**
+ * v0.11.0 powerup type registry — selects the procedural fallback
+ * mesh + halo tint per powerup type. Bump this map when adding a new
+ * type; add to POWERUP_SPAWN_WEIGHTS in src/systems/powerup-system.js and
+ * `src/world/types.js PowerupType`. Each entry provides:
+ *   - shape(): a Three.js Mesh to use as the visual body
+ *   - color(): hex int for the halo ring + beacon
+ *   - label(): short uppercase string for HUD readout
+ *
+ * The 6 entries below mirrors the trainer's POWERUP_TYPE_INDEX
+ * exactly — same keys, same indices. The legacy '/laser' type
+ * string was dropped in v0.11.0: powerup-system.js now emits
+ * `spec.type = 'shield'` (the new first pickup), matching the
+ * trainer's index. No silent fallback — unknown types render as
+ * 'UNKNOWN' via the helper functions below.
+ */
+const POWERUP_TYPE_VARIANTS = {
+  shield: {
+    shape: 'icosahedron',
+    color: 0x6effa8, // mint green
+    label: 'SHIELD',
+  },
+  speed: {
+    shape: 'capsule',
+    color: 0xff8844, // orange
+    label: 'SPEED',
+  },
+  energy: {
+    shape: 'torus',
+    color: 0xffe066, // gold-yellow
+    label: 'ENERGY',
+  },
+  credits: {
+    shape: 'cylinder',
+    color: 0xffd166, // gold
+    label: 'CREDITS',
+  },
+  hull: {
+    shape: 'cube',
+    color: 0xff5566, // danger red
+    label: 'HULL',
+  },
+  weapon: {
+    shape: 'octahedron',
+    color: 0xcc66ff, // purple
+    label: 'WEAPON',
+  },
+};
+
+/**
+ * Build the v0.11.0 procedural fallback body mesh for the given
+ * powerup type. Pure helper — no GLB, no shared state. Each shape
+ * is ~10–20 vertices so cheap to allocate per powerup. Tint via the
+ * specified color so the player can tell at a glance whether to chase
+ * the mint-green shield or the purple weapon.
+ */
+function buildTypeShapeMesh(typeStr) {
+  const variant = POWERUP_TYPE_VARIANTS[typeStr] ?? POWERUP_TYPE_VARIANTS.shield;
+  const { shape, color } = variant;
+  let geom;
+  switch (shape) {
+    case 'icosahedron': geom = new IcosahedronGeometry(0.8, 0); break;
+    case 'capsule':     geom = new CapsuleGeometry(0.5, 1.0, 4, 8); break;
+    case 'torus':       geom = new TorusGeometry(0.7, 0.25, 8, 24); break;
+    case 'cylinder':    geom = new CylinderGeometry(0.6, 0.6, 0.2, 16, 1); break;
+    case 'cube':        geom = new BoxGeometry(1.0, 1.0, 1.0); break;
+    case 'octahedron':  geom = new OctahedronGeometry(0.9, 0); break;
+    case 'cone':
+    default:            geom = new ConeGeometry(0.7, 1.8, 8, 1);
+  }
+  const mat = new MeshStandardMaterial({
+    color,
+    emissive: new Color(color),
+    emissiveIntensity: 0.9,
+    metalness: 0.3,
+    roughness: 0.4,
+  });
+  const mesh = new Mesh(geom, mat);
+  return mesh;
+}
+
 /**
  * Default power-up lifetime in seconds. The power-up despawns if
  * not collected within this window. Exported so the power-up system
@@ -60,36 +179,45 @@ const BOB_AMPLITUDE = 0.35; // world units
 const BOB_FREQUENCY = 0.9; // Hz
 const FALLBACK_COLOR = 0x4dabf7; // sky blue (slightly more blue than the game's primary cyan)
 
-// ---- GLB cache (loaded once, shared across all power-ups of this type) --
-// Module-scoped promise so multiple concurrent `createPowerUp` calls all
-// await the same load. The resolved value is the normalized GLB root
-// (centered on origin, longest axis ≈ POWERUP_GLB_TARGET_SIZE units) or
-// `null` if the load failed.
-let _glbRoot = null;
-let _glbLoading = null;
+// ---- Per-type GLB cache (v0.69.0) --------------------------------------
+// Each type with a registered URL gets its own shared normalized
+// root. Types without a URL have no entry; `loadPowerUpGlb(type)`
+// returns null for them so `createPowerUp` keeps the procedural
+// fallback. The previous single-cache implementation loaded one
+// URL and applied it to all types — visually wrong.
+const _glbCache = new Map(); // type string → THREE.Group | null
+const _glbLoadingMap = new Map(); // type string → in-flight Promise
 const POWERUP_GLB_TARGET_SIZE = 3.0;
 
 /**
- * Lazily load (and normalize) the power-up GLB. The mesh is centered on
- * origin and uniformly scaled so the longest bbox axis is
- * POWERUP_GLB_TARGET_SIZE units. No forward-axis auto-rotation: the GLB
- * is meant to be viewed from all sides (it's a static prop, not a ship).
+ * Lazily load (and normalize) the GLB registered for `type`. If the
+ * type has no URL in POWERUP_GLB_URLS, returns null (caller keeps
+ * the procedural fallback). If the load fails, returns null too.
  *
+ * The mesh is centered on origin and uniformly scaled so the longest
+ * bbox axis is POWERUP_GLB_TARGET_SIZE units. No forward-axis
+ * auto-rotation: power-up GLBs are global prop meshes.
+ *
+ * @param {string} type  one of POWERUP_TYPE_VARIANTS keys
  * @returns {Promise<import('three').Group | null>}
  */
-function loadPowerUpGlb() {
-  if (_glbRoot !== null) return Promise.resolve(_glbRoot);
-  if (_glbLoading) return _glbLoading;
-  _glbLoading = (async () => {
+function loadPowerUpGlb(type) {
+  const url = POWERUP_GLB_URLS[type];
+  if (!url) return Promise.resolve(null);
+  if (_glbCache.has(type)) return Promise.resolve(_glbCache.get(type));
+  if (_glbLoadingMap.has(type)) return _glbLoadingMap.get(type);
+
+  const loading = (async () => {
     let GLTFLoader;
     try {
       ({ GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js'));
     } catch (_) {
+      _glbCache.set(type, null);
       return null;
     }
     try {
       const loader = new GLTFLoader();
-      const gltf = await loader.loadAsync(POWERUP_GLB_URL);
+      const gltf = await loader.loadAsync(url);
       const root = gltf.scene;
       if (!root) throw new Error('GLB has no scene');
 
@@ -103,36 +231,28 @@ function loadPowerUpGlb() {
       const scale = maxDim > 0 ? POWERUP_GLB_TARGET_SIZE / maxDim : 1;
       root.scale.setScalar(scale);
       root.position.sub(center.multiplyScalar(scale));
-      _glbRoot = root;
+      _glbCache.set(type, root);
       return root;
     } catch (_) {
+      _glbCache.set(type, null);
       return null;
     } finally {
-      _glbLoading = null;
+      _glbLoadingMap.delete(type);
     }
   })();
-  return _glbLoading;
+  _glbLoadingMap.set(type, loading);
+  return loading;
 }
 
 /**
- * Build the procedural fallback mesh (used until the GLB loads, or forever
- * if the GLB load fails). A short upright cone with a strong emissive
- * glow so the power-up reads as "pick me up!" even without the model.
+ * Build the procedural fallback mesh (used until the GLB loads, or
+ * forever if the GLB load fails or the type has no GLB registration —
+ * e.g. shield per v0.69.0).
  *
  * @returns {Mesh}
  */
-function buildFallbackMesh() {
-  const geom = new ConeGeometry(0.7, 1.8, 8, 1);
-  // Default cone tip is +Y; leave as-is (the power-up is meant to be
-  // viewed from the side, and the engine cone is the same way).
-  const mat = new MeshStandardMaterial({
-    color: FALLBACK_COLOR,
-    emissive: new Color(FALLBACK_COLOR),
-    emissiveIntensity: 0.9,
-    metalness: 0.3,
-    roughness: 0.4,
-  });
-  return new Mesh(geom, mat);
+function buildFallbackMesh(type = 'shield') {
+  return buildTypeShapeMesh(type);
 }
 
 /**
@@ -143,10 +263,11 @@ function buildFallbackMesh() {
  *
  * @returns {Mesh}
  */
-function buildHaloRing() {
+function buildHaloRing(type = 'shield') {
+  const variant = POWERUP_TYPE_VARIANTS[type] ?? POWERUP_TYPE_VARIANTS.shield;
   const geom = new RingGeometry(POWERUP_RADIUS * 1.1, POWERUP_RADIUS * 1.5, 36);
   const mat = new MeshBasicMaterial({
-    color: FALLBACK_COLOR,
+    color: variant.color,
     transparent: true,
     opacity: 0.45,
     side: 2, // DoubleSide
@@ -167,10 +288,11 @@ function buildHaloRing() {
  *
  * @returns {Mesh}
  */
-function buildBeacon() {
+function buildBeacon(type = 'shield') {
+  const variant = POWERUP_TYPE_VARIANTS[type] ?? POWERUP_TYPE_VARIANTS.shield;
   const geom = new CylinderGeometry(0.05, 0.05, 2.6, 6, 1, true);
   const mat = new MeshBasicMaterial({
-    color: FALLBACK_COLOR,
+    color: variant.color,
     transparent: true,
     opacity: 0.6,
     side: 2, // DoubleSide
@@ -180,9 +302,23 @@ function buildBeacon() {
   return new Mesh(geom, mat);
 }
 
+/** Public helper: the short uppercase label for a powerup type (e.g.
+ *  'SHIELD'). Used by the HUD to show what was just picked up. */
+export function powerupLabelFor(type) {
+  const v = POWERUP_TYPE_VARIANTS[type];
+  return v ? v.label : 'PICKUP';
+}
+
+/** Public helper: hex color tint for a powerup type. Used by the
+ *  HUD buff-chip CSS to recolor per type. */
+export function powerupColorFor(type) {
+  const v = POWERUP_TYPE_VARIANTS[type];
+  return v ? v.color : 0x4dabf7;
+}
+
 export function createPowerUp({ scene, spec } = {}) {
   if (!scene) throw new Error('createPowerUp: `scene` is required');
-  if (!spec) throw new Error('createPowerUp: `spec` is required');
+  if (!spec) throw new Error('createPowerUp: `spec.type` is required');
   if (!spec.position || typeof spec.position.x !== 'number') {
     throw new Error('createPowerUp: `spec.position` must have numeric x/y/z');
   }
@@ -194,17 +330,22 @@ export function createPowerUp({ scene, spec } = {}) {
   const group = new Group();
   group.position.set(spec.position.x, spec.position.y, spec.position.z);
 
-  // ---- Initial visual: procedural fallback ---------------------------
-  const fallback = buildFallbackMesh();
+  // ---- Initial visual: procedural fallback (per-type shape + tint) --
+  const fallback = buildFallbackMesh(spec.type);
   group.add(fallback);
-  group.add(buildHaloRing());
-  group.add(buildBeacon());
+  group.add(buildHaloRing(spec.type));
+  group.add(buildBeacon(spec.type));
   group.userData.visual = fallback;
 
   scene.add(group);
 
-  // ---- Async: swap in the GLB if it loads -----------------------------
-  loadPowerUpGlb().then((glbRoot) => {
+  // ---- Async: swap in the GLB if THIS TYPE has one registered --------
+  // v0.69.0 -- per-type GLB lookup. `loadPowerUpGlb(spec.type)`
+  // returns null when the type has no URL registered (e.g. shield
+  // in v0.69.0). The procedural fallback is then permanent — the
+  // mint icosahedron stays visible until the user supplies a real
+  // mesh + PBR.
+  loadPowerUpGlb(spec.type).then((glbRoot) => {
     if (!glbRoot) return; // keep the fallback
     group.remove(fallback);
     if (fallback.geometry) fallback.geometry.dispose();
@@ -216,15 +357,31 @@ export function createPowerUp({ scene, spec } = {}) {
   // ---- Per-frame state -----------------------------------------------
   let age = 0;
   let rotation = 0;
+  let _pushVx = 0;
+  let _pushVz = 0;
   // Bob phase offset so two power-ups spawned at the same moment don't
   // bob in lockstep. `spec.spawnTime` is optional; default 0.
   const phase = ((spec.spawnTime ?? 0) * BOB_FREQUENCY * Math.PI * 2) % (Math.PI * 2);
-  const baseY = spec.position.y;
+  // Powerups live on the play plane (y = 0) so they can be collected
+  // reliably and collide with asteroids on the same plane as the ship.
+  const baseY = 0;
 
   /**
    * Advance the spin + bob animation. `dt` in seconds.
    * @param {number} dt
    */
+  /**
+   * Push the power-up away from a point (e.g. an asteroid collision).
+   * The push velocity decays exponentially each frame so the power-up
+   * drifts to a stop after a second or two.
+   * @param {number} vx
+   * @param {number} vz
+   */
+  function pushAway(vx, vz) {
+    _pushVx += vx;
+    _pushVz += vz;
+  }
+
   function update(dt) {
     if (dt <= 0) return;
     age += dt;
@@ -232,6 +389,14 @@ export function createPowerUp({ scene, spec } = {}) {
     group.rotation.y = rotation;
     const bob = Math.sin(age * Math.PI * 2 * BOB_FREQUENCY + phase) * BOB_AMPLITUDE;
     group.position.y = baseY + bob;
+    // Apply push velocity with exponential decay (asteroid collisions).
+    if (_pushVx !== 0 || _pushVz !== 0) {
+      group.position.x += _pushVx * dt;
+      group.position.z += _pushVz * dt;
+      const drag = Math.exp(-POWERUP_PUSH_DRAG * dt);
+      _pushVx *= drag;
+      _pushVz *= drag;
+    }
   }
 
   /** True if the power-up has been in the world for >= its lifetime. */
@@ -256,16 +421,20 @@ export function createPowerUp({ scene, spec } = {}) {
     getRadius() { return POWERUP_RADIUS; },
     /** @returns {{x:number,y:number,z:number}} live world position (mutated) */
     getPosition() { return group.position; },
+    /** @returns {{x:number,z:number}} current XZ velocity (push velocity, decays over time) */
+    getVelocity() { return { x: _pushVx, z: _pushVz }; },
     isExpired,
+    /** Push the power-up away (e.g. from an asteroid collision). */
+    pushAway,
   };
 }
 
 /**
  * Module-scope test seam: drop the GLB cache so the next `createPowerUp`
- * call re-loads the GLB from scratch. Tests don't use this; it's a safety
- * hatch for hot-reload during development.
+ * call re-loads any per-type GLB from scratch. Tests don't use this;
+ * it's a safety hatch for hot-reload during development.
  */
 export function _resetGlbCache() {
-  _glbRoot = null;
-  _glbLoading = null;
+  _glbCache.clear();
+  _glbLoadingMap.clear();
 }

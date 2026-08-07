@@ -9,3 +9,6 @@ export { createHud, formatScore } from './hud.js';
 
 // Debug HUD (FPS, state, score, scene geometry stats).
 export { createDebugHud } from './debug-hud.js';
+
+// Column toggle (shared by the debug column + the AI tuners column).
+export { createColumnToggle } from './column-toggle.js';

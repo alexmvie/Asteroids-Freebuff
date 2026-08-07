@@ -2,6 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Scene, Group } from 'three';
 import { createShip } from '../src/entities/ship.js';
+import { AI_TUNABLES } from '../src/entities/ai-tunables.js';
+// v0.49.0 regression tests reference stubScene (no THREE renderer
+// needed; ship.js only calls scene.add once in createShip).
+const stubScene = { add: () => {} };
 
 function newShip() {
   return createShip({ scene: new Scene() });
@@ -112,4 +116,163 @@ test('Ship: setYaw clamps out-of-range inputs to [-1, +1]', () => {
   // happen if setYaw(5) somehow leaked through).
   assert.equal(ship.rotation.roll, 0,
     `setYaw(5) should have been clamped to 0; roll is ${ship.rotation.roll}`);
+});
+
+test('Ship: credits buff doubles score gain', () => {
+  const ship = newShip();
+  assert.equal(ship.getScoreMultiplier(), 1);
+  ship.addBuff('credits', 5);
+  assert.equal(ship.getScoreMultiplier(), 2);
+  ship.removeBuff('credits');
+  assert.equal(ship.getScoreMultiplier(), 1);
+});
+
+// ===========================================================================
+// v0.49.0 Bug 2 regression test — ship respects live AI_TUNABLES.shipMaxSpeed
+// ===========================================================================
+// v0.48.0 shipped the live tuner panel without a slider for the ship's
+// own max-speed. The frozen MAX_SPEED constant (200u/s) lived in
+// ship-constants.js with no way for the user to feel the difference.
+// v0.49.0 makes ship max-speed live-tunable by reading
+// AI_TUNABLES.shipMaxSpeed per tick (?? MAX_SPEED fallback).
+//
+// This test pins the contract: with the live bag at 60u/s, a velocity
+// pre-seeded above the cap clamps to 60u/s on the next update.
+
+test('v0.49.0: ship respects AI_TUNABLES.shipMaxSpeed during update()', () => {
+  const ship = createShip({ scene: stubScene });
+  // Force the velocity above any plausible cap.
+  ship.velocity.x = 1000;
+  ship.velocity.z = 0;
+
+  const ORIGINAL = AI_TUNABLES.shipMaxSpeed;
+  AI_TUNABLES.shipMaxSpeed = 60;
+  try {
+    // 0.1s tick; thrust is off so the cap is the only speed-affecting layer.
+    ship.update(0.1);
+    const finalSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
+    assert.ok(
+      finalSpeed <= 60 + 0.001,
+      `expected final speed ≤ 60u/s (live cap), got ${finalSpeed}u/s`,
+    );
+    // Sanity: the cap clamped magnitude, did not NaN or overshoot.
+    assert.ok(Number.isFinite(finalSpeed), 'final speed should be finite');
+  } finally {
+    AI_TUNABLES.shipMaxSpeed = ORIGINAL;
+  }
+});
+
+test('v0.49.0: ship falls back to MAX_SPEED when AI_TUNABLES.shipMaxSpeed is invalid', () => {
+  const ship = createShip({ scene: stubScene });
+  ship.velocity.x = 500;
+  ship.velocity.z = 0;
+
+  const ORIGINAL = AI_TUNABLES.shipMaxSpeed;
+  // Simulate a bug / corrupt value. MAX_SPEED = 200 (canonical).
+  AI_TUNABLES.shipMaxSpeed = NaN;
+  try {
+    ship.update(0.1);
+    const finalSpeed = Math.hypot(ship.velocity.x, ship.velocity.z);
+    assert.ok(
+      finalSpeed <= 200 + 0.001,
+      `expected fallback MAX_SPEED (200u/s), got ${finalSpeed}u/s`,
+    );
+  } finally {
+    AI_TUNABLES.shipMaxSpeed = ORIGINAL;
+  }
+});
+
+// ===========================================================================
+// v0.61.0 — Shield buff test suite
+// ===========================================================================
+// The shield powerup adds a 'shield' buff to the player on pickup.
+// The buff makes `ship.isShielded()` return true, which the render-
+// loop collision paths in main.js gate on (no damage + no GAME_OVER
+// while shielded). The ship's existing buff timer ticks down the
+// duration via `update(dt)`. The contract under test:
+//
+//   1. isShielded() is false immediately after createShip()
+//   2. addBuff('shield', N) flips isShielded() to true
+//   3. update(dt) past the buff's duration flips isShielded() to false
+//   4. removeBuff('shield') flips isShielded() to false immediately
+//   5. The shield buff is INDEPENDENT of the hull buff (both can be
+//      active at the same time; their state is tracked in the same
+//      Map but the methods read distinct keys).
+
+test('v0.61.0: isShielded returns false on a fresh ship', () => {
+  const ship = newShip();
+  assert.equal(ship.isShielded(), false);
+});
+
+test('v0.61.0: addBuff("shield", N) flips isShielded() to true', () => {
+  const ship = newShip();
+  ship.addBuff('shield', 10);
+  assert.equal(ship.isShielded(), true);
+});
+
+test('v0.61.0: isShielded returns false after the buff duration elapses', () => {
+  const ship = newShip();
+  ship.addBuff('shield', 0.5);
+  assert.equal(ship.isShielded(), true);
+  // Tick past the duration — 0.6s > 0.5s triggers the tickBuffs cleanup.
+  ship.update(0.6);
+  assert.equal(ship.isShielded(), false,
+    'buff should have expired after the 0.5s duration');
+});
+
+test('v0.61.0: removeBuff("shield") instantly clears the shield', () => {
+  const ship = newShip();
+  ship.addBuff('shield', 10);
+  assert.equal(ship.isShielded(), true);
+  ship.removeBuff('shield');
+  assert.equal(ship.isShielded(), false);
+});
+
+test('v0.61.0: shield buff is independent of hull buff', () => {
+  const ship = newShip();
+  ship.addBuff('hull', 10);
+  assert.equal(ship.isShielded(), false, 'hull buff is not shield');
+  ship.addBuff('shield', 10);
+  assert.equal(ship.isShielded(), true, 'shield adds on top of hull');
+  ship.removeBuff('hull');
+  assert.equal(ship.isShielded(), true, 'shield unaffected by hull removal');
+  ship.removeBuff('shield');
+  assert.equal(ship.isShielded(), false);
+});
+
+test('v0.69.1: reset() preserves pickup shield longer than 5s (Math.max wins; not shortened to SPAWN_SHIELD_DURATION_S)', () => {
+  // v0.69.0 contract: addBuff('shield', 30) -> reset() -> getShieldRemaining() === 5.
+  // That was a deliberate (but wrong) part of v0.69.0's spawn-shield logic.
+  // v0.69.1 hot-fix: capture existingShield BEFORE state.buffs.clear() and
+  // use Math.max(SPAWN_SHIELD_DURATION_S, preservedShieldS). Net result: a
+  // 30s pickup shield mid-PLAYING is now PRESERVED across the respawn (30s,
+  // not 5s). A 1s-expiring pickup gets bumped up to 5s (Math.max wins).
+  // A fresh respawn grants the 5s spawn shield (pinned by a separate test).
+  const ship = newShip();
+  ship.addBuff('shield', 30);
+  ship.reset({ x: 0, y: 0, z: 0 });
+  assert.equal(ship.isShielded(), true);
+  assert.equal(ship.getShieldRemaining(), 30, 'pickup shield must NOT be shortened to 5s on respawn');
+});
+
+test('v0.69.1: reset() preserves long pickup shield (30s survives, not shortened to 5s)', () => {
+  const ship = newShip();
+  ship.addBuff('shield', 30);
+  ship.reset({ x: 0, y: 0, z: 0 });
+  assert.equal(ship.isShielded(), true);
+  assert.equal(ship.getShieldRemaining(), 30, 'pickup shield must NOT be shortened to 5s on respawn');
+});
+
+test('v0.69.1: reset() with no active shield grants exactly SPAWN_SHIELD_DURATION_S (5s)', () => {
+  const ship = newShip();
+  ship.reset({ x: 0, y: 0, z: 0 });
+  assert.equal(ship.isShielded(), true);
+  assert.equal(ship.getShieldRemaining(), 5);
+});
+
+test('v0.69.1: reset() with remaining shield < SPAWN_SHIELD_DURATION_S boosts to 5s (Math.max wins)', () => {
+  const ship = newShip();
+  ship.addBuff('shield', 1);
+  ship.reset({ x: 0, y: 0, z: 0 });
+  assert.equal(ship.getShieldRemaining(), 5, 'max(5, 1) -> 5');
 });

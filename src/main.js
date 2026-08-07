@@ -2,7 +2,7 @@ import { Clock } from 'three';
 import './styles.css';
 import { createScene } from './scene.js';
 import { createShip, loadShipModel } from './entities/ship.js';
-import { CAPSULE_UV_PLANE, createAsteroidFromSpec } from './entities/asteroid.js';
+import { createAsteroidFromSpec } from './entities/asteroid.js';
 import { createBulletPool } from './entities/bullet.js';
 import { createLaser } from './entities/laser.js';
 import {
@@ -12,27 +12,104 @@ import {
   NEBULA_MAX_OPACITY,
   worldToChunk,
   getActiveChunks,
+  CHUNK_SIZE,
+  BUBBLE_RADIUS_CHUNKS,
 } from './world/index.js';
 import { createInputSystem } from './systems/input.js';
 import {
   findBulletHits,
   findShipHit,
   scoreForSize,
+  findAsteroidPairs,
+  resolveAsteroidCollision,
+  findAsteroidPowerupIndex,
+  resolveAsteroidPowerupCollision,
+  findBulletShipHits,
+  SHIP_RADIUS,
+  BULLET_RADIUS,
 } from './systems/collision.js';
+import { createSpatialHash } from './systems/spatial-hash.js';
 import { createEventBus } from './systems/events.js';
 import { createStateMachine, State } from './systems/state.js';
 import { createHud } from './ui/hud.js';
 import { createDebugHud } from './ui/debug-hud.js';
+import { createAiDebugOverlay } from './ui/ai-debug-overlay.js';
+import {
+  AI_TUNABLES,
+  resetAITunables,
+  exportAITunables,
+} from './entities/ai-tunables.js';
+import { createAiTunersPanel } from './ui/ai-tuners-panel.js';
+import { createColumnToggle } from './ui/column-toggle.js';
+import { VERSION } from './version-constants.js';
+// __BRANCH__ + __COMMIT__ are Vite-define globals, populated from git at
+// config-load time in vite.config.js. See that file for the rationale
+// (chicken-and-egg-free alternative to baking the SHA into a committed
+// file).
 import { createDemoAi } from './entities/ai.js';
-import { createTrainedAiBrain } from './training/ai-brain.js';
-import { TRAINER_DEFAULTS } from './training/defaults.js';
-import { deserializeGenome, genomeSize } from './training/network.js';
 import { createAsteroidField } from './systems/asteroid-field.js';
-import { createAsteroidUvDebugOverlay } from './systems/asteroid-uv-debug-overlay.js';
-import { createUvUnwrapViewer } from './systems/uv-unwrap-viewer.js';
-import { createEditObjectScreen } from './systems/edit-object-screen.js';
 import { createPowerUpSystem } from './systems/powerup-system.js';
+import { createPirateTexture, applyPirateTexture } from './systems/pirate-texture.js';
 import { createParticleSystem } from './systems/particles.js';
+import { createCaptureMarkers } from './systems/capture-markers.js';
+import { createAiFlightDebug } from './systems/ai-flight-debug.js';
+
+// ---- Radar radius (v0.59.0 + v0.62.0) -----------------------------------
+// Multiplier on the streaming bubble radius (= CHUNK_SIZE ×
+// BUBBLE_RADIUS_CHUNKS) used as the AI Debug Overlay's radar scope.
+// Per the user's request ("the radar should be ~3× the ship sight"),
+// 3× gives a generous outer ring beyond the streamed chunks.
+//
+// **v0.62.0 — now live-tunable.** The "tunable" storage is
+// `AI_TUNABLES.radarBubbleMultiplier` (added in
+// src/entities/ai-tunables.js). The AI Live Tuners panel hosts the
+// slider; the radar's `getWorldRadius` closure re-reads the value
+// every frame so a slider drag is visible on the next render loop
+// tick. The literal here is kept as the FALLBACK only (used when
+// the tuners bag is missing or unreachable in tests). The named
+// constant stays useful for grep-discoverability —
+// RADAR_BUBBLE_MULTIPLIER_DEFAULT is a "what's the canonical
+// multiplier" SSOT, not a per-frame read.
+const RADAR_BUBBLE_MULTIPLIER_DEFAULT = 3;
+
+// ---- Pirate HP (v0.60.0 — pirate combat loop) ---------------------------
+// Pirates need HP to die. Tracked externally rather than as a ship
+// property because (a) the player ship has its own energy system and
+// (b) the AI brain is generic — pirate-specific combat state would
+// pollute the universal ship.js API. The map is keyed by ship
+// object (live reference); dead pirates have their entry removed
+// on the same frame as their dispose() call.
+const PIRATE_MAX_HP = 3; // bullets to kill a pirate
+const pirateHps = new Map(); // ship -> hp remaining (1..PIRATE_MAX_HP)
+
+function killPirate(ai) {
+  const s = ai.getShip();
+  pirateHps.delete(s);
+  // Spawn an explosion at the kill site so the death feels like
+  // asteroid destruction (consistent particle effect for any
+  // entity kill in the game). SHIP_RADIUS scales the puff size.
+  const pos = s.position;
+  particles.emitExplosion({ x: pos.x, y: pos.y, z: pos.z }, SHIP_RADIUS);
+  // Hide the engine glow BEFORE dispose — ship.dispose() preserves
+  // glows (so GLB-swapped ships keep their thrust glow), but a
+  // destroyed pirate would otherwise leave a small floating glow.
+  s.mesh.traverse((obj) => {
+    if (obj.userData && obj.userData.isEngineGlow) obj.visible = false;
+  });
+  ai.dispose();
+  bus.emit('pirate:died', { ship: s });
+}
+
+function damagePirate(ai) {
+  const s = ai.getShip();
+  const hp = (pirateHps.get(s) ?? PIRATE_MAX_HP) - 1;
+  if (hp <= 0) {
+    killPirate(ai);
+  } else {
+    pirateHps.set(s, hp);
+    bus.emit('pirate:hit', { ship: s, hp });
+  }
+}
 
 // ---- Power-up drop frequency -------------------------------------------
 // Probability (0.0–1.0) that an asteroid destroy spawns a laser
@@ -47,18 +124,29 @@ import { createParticleSystem } from './systems/particles.js';
 // new power-up: with 1.0 every gap does, with 0.5 half do, with
 // 0.0 none do.
 //
+// **Type rotation (v0.11.x):** the type is no longer hardcoded as
+// 'shield' — powerup-system.js draws from
+// `POWERUP_SPAWN_WEIGHTS (in src/systems/powerup-system.js)` on every spawn. With the
+// default equal weights (each type = 1.0) the player sees ~1/6
+// chance per type per drop. The 6 types come from `POWERUP_SPAWN_WEIGHTS` in `src/systems/powerup-system.js`: shield (mint, instant
+// energy refill), speed (orange, thrust ×2), energy (yellow,
+// recharge ×2), credits (gold, score ×2), hull (red, damage
+// ×0.5), weapon (purple, fire rate ×2).
+//
 // **Tuning history:**
-//   - 2026-06-13: bumped to 0.95 (user asked for "almost every
-//     destroy" — 5% chance to miss keeps it from feeling 100%
-//     deterministic, the user can dial this back later for
-//     difficulty).
+//   - 2026-06-16: bumped to 1.0 (user asked for "every destroy
+//     drops a powerup"; trainer has 6 powerup types now so
+//     variety is the goal, not scarcity).
+//   - 2026-06-13: was 0.95 (user asked for "almost every
+//     destroy" — 5% chance to miss kept it from feeling 100%
+//     deterministic).
 //   - 2026-06-12: was 0.10 (10% per kill, "fair spawn rate").
 //   - 2026-06-11: was a literal `Math.random() < 0.10` guard,
 //     no constant.
 //
 // Adjust this single number to retune the drop rate. Range is
 // 0.0–1.0; values > 1.0 are treated as 1.0 (always drop).
-const POWERUP_DROP_CHANCE = 0.95;
+const POWERUP_DROP_CHANCE = 1.0;
 
 // ---- Boot ----------------------------------------------------------------
 const {
@@ -69,17 +157,9 @@ const {
   nebulaDebug,
   setChaseTarget,
   updateCamera,
+  updateLighting,
 } = createScene();
 const clock = new Clock();
-
-// ---- Asteroid UV debug overlay -----------------------------------------
-// One shared material, one per-asteroid debug mesh (sharing the
-// body's geometry). Toggled by `window.ASTEROID_UV_DEBUG`; the
-// plane projection on the capsule body is toggled by
-// `window.ASTEROID_UV_PLANE` (one of 'xy' | 'xz' | 'yz').
-// See `src/systems/asteroid-uv-debug-overlay.js`.
-const asteroidUvDebug = createAsteroidUvDebugOverlay();
-asteroidUvDebug.setCapsulePlane(CAPSULE_UV_PLANE); // sync with the constant
 
 // ---- NEBULA_DEBUG runtime toggle ---------------------------------------
 // The default is the compile-time constant NEBULA_DEBUG_DEFAULT
@@ -95,207 +175,16 @@ if (typeof window !== 'undefined') {
     get() { return nebulaDebug.isEnabled(); },
     set(v) { nebulaDebug.setEnabled(!!v); },
   });
-
-  // ASTEROID_UV_DEBUG — show / hide the per-asteroid UV grid
-  // overlay. Each asteroid body has a child mesh (sharing its
-  // geometry) that renders a 10×10 rainbow-tinted wireframe UV
-  // grid, useful for tuning the unwrap live in the browser.
-  Object.defineProperty(window, 'ASTEROID_UV_DEBUG', {
-    configurable: true,
-    enumerable: true,
-    get() { return asteroidUvDebug.isEnabled(); },
-    set(v) { asteroidUvDebug.setEnabled(!!v); },
-  });
-
-  // ASTEROID_UV_PLANE — change the planar projection used by the
-  // capsule body. Triggers a UV recompute on every attached capsule
-  // (no rebuild). Accepts 'xy' | 'xz' | 'yz' (mirrors the
-  // CAPSULE_UV_PLANE compile-time constant). Invalid values are
-  // rejected with a console warning and the state is unchanged.
-  Object.defineProperty(window, 'ASTEROID_UV_PLANE', {
-    configurable: true,
-    enumerable: true,
-    get() { return asteroidUvDebug.getCapsulePlane(); },
-    set(v) { asteroidUvDebug.setCapsulePlane(v); },
-  });
 }
 
-// ---- UV unwrap viewer --------------------------------------------------
-// 3ds-Max-style 2D editor in a side panel. Toggle with the
-// `UV UNWRAP` button in the debug HUD (or via the
-// `window.UV_UNWRAP_DEBUG` runtime setter). When enabled, hover
-// an asteroid in the 3D view to highlight it, click to display
-// its UV layout. Pan / zoom in the panel with drag / wheel. The
-// panel's `BG: CHECKER` / `BG: TEXTURE` button toggles between
-// the background modes; `RESET` restores the default view.
-const uvUnwrapViewer = createUvUnwrapViewer({
-  canvas: renderer.domElement,
-  camera,
-  getAsteroids: () => field.getEntities(),
-});
-
-if (typeof window !== 'undefined') {
-  Object.defineProperty(window, 'UV_UNWRAP_DEBUG', {
-    configurable: true,
-    enumerable: true,
-    get() { return uvUnwrapViewer.isEnabled(); },
-    set(v) { uvUnwrapViewer.setEnabled(!!v); },
-  });
-}
-
-// ---- Debug HUD: UV grid toggle button ---------------------------------
-// The debug overlay (#debug-hud) is non-interactive by default
-// (`pointer-events: none` on the container, so the canvas stays
-// clickable). The toggle button is the one exception — it has
-// `pointer-events: auto` in the CSS and a click handler here.
-// Clicking the button flips `asteroidUvDebug.setEnabled(...)` and
-// updates the label / `.debug-hud-toggle--on` class to match.
-// Setting `window.ASTEROID_UV_DEBUG` from the console also
-// updates the button label (the setter below listens for the
-// overlay's state change via the same `updateBtn()` closure).
-const uvToggleBtn = document.getElementById('debug-toggle-uv');
-if (uvToggleBtn) {
-  const updateUvToggleBtn = () => {
-    const on = asteroidUvDebug.isEnabled();
-    uvToggleBtn.textContent = `UV GRID: ${on ? 'ON' : 'OFF'}`;
-    uvToggleBtn.classList.toggle('debug-hud-toggle--on', on);
-  };
-  uvToggleBtn.addEventListener('click', () => {
-    asteroidUvDebug.setEnabled(!asteroidUvDebug.isEnabled());
-    updateUvToggleBtn();
-  });
-  // Wrap the overlay's setEnabled so the button stays in sync
-  // when the user toggles via the console (`window.ASTEROID_UV_DEBUG
-  // = true` in devtools). Without this wrap, the button would only
-  // update on click — out-of-band changes would be invisible.
-  const originalSetEnabled = asteroidUvDebug.setEnabled;
-  asteroidUvDebug.setEnabled = (v) => {
-    originalSetEnabled(v);
-    updateUvToggleBtn();
-  };
-  updateUvToggleBtn(); // initial label (OFF by default)
-}
-
-// ---- Debug HUD: UV unwrap viewer toggle button ------------------------
-// Same pattern as the UV grid button: `pointer-events: auto` on the
-// button overrides the container's `pointer-events: none`, the
-// click handler flips the viewer's enabled state, and the
-// `setEnabled` wrap on the viewer keeps the label in sync when
-// the user toggles via the console setter or the panel's own
-// close button. The panel's close button calls
-// `uvUnwrapViewer.setEnabled(false)`, which (via the wrap below)
-// also flips this button back to OFF.
-const uvViewerBtn = document.getElementById('debug-toggle-uv-viewer');
-if (uvViewerBtn) {
-  const updateUvViewerBtn = () => {
-    const on = uvUnwrapViewer.isEnabled();
-    uvViewerBtn.textContent = `UV UNWRAP: ${on ? 'ON' : 'OFF'}`;
-    uvViewerBtn.classList.toggle('debug-hud-toggle--on', on);
-  };
-  uvViewerBtn.addEventListener('click', () => {
-    uvUnwrapViewer.setEnabled(!uvUnwrapViewer.isEnabled());
-    updateUvViewerBtn();
-  });
-  // Wrap setEnabled so the button stays in sync with
-  // out-of-band changes (console setter, panel close button).
-  const originalViewerSetEnabled = uvUnwrapViewer.setEnabled;
-  uvUnwrapViewer.setEnabled = (v) => {
-    originalViewerSetEnabled(v);
-    updateUvViewerBtn();
-  };
-  updateUvViewerBtn(); // initial label (OFF by default)
-}
-
-// ---- Game-halt flag ----------------------------------------------------
-// When the edit-object screen is open OR in pick mode, the game
-// entities (ship, asteroids, AI, collisions) are paused. When the
-// screen is in 'edit' state, the main 3D scene stops rendering
-// entirely (the modal's mini viewport is the only thing drawing).
-// The edit screen calls onPause(true) on beginPick/openFor and
-// onPause(false) on close/cancelPick; the render loop checks the
-// resulting flags.
-let gameHalted = false;
-// `cameraFocused` is set to true when the user presses FOCUS
-// inside the edit screen. While true, the chase camera (the
-// `updateCamera` lerp that follows the player ship) is paused
-// so the manually-positioned FOCUS camera isn't immediately
-// reverted. Cleared on screen close.
-let cameraFocused = false;
 
 
-// ---- Edit-object screen -----------------------------------------------
-// Full-screen modal that shows an isolated 3D viewport of the
-// selected asteroid (a dedicated lightweight renderer — no full
-// game scene rendered behind it), an embedded UV editor, and an
-// info box. The flow is:
-//
-//   1. User clicks EDIT OBJECT → `beginPick()` pauses the game
-//      and shows a small "EDIT MODE" hint. The main 3D view
-//      stays active with a crosshair cursor.
-//   2. User clicks an asteroid → `openFor(entity)` opens the
-//      full screen. The main 3D scene stops rendering.
-//   3. User clicks X (or Esc) → `close()` resumes the game.
-//
-// The modal is OPAQUE (no transparency, no backdrop-filter) so
-// the GPU doesn't waste fill-rate on a see-through layer.
-const editScreen = createEditObjectScreen({
-  renderer,
-  camera,
-  scene,
-  getAsteroids: () => field.getEntities(),
-  onPause: (paused) => {
-    gameHalted = !!paused;
-    // Resuming the game clears the FOCUS hold so the chase
-    // camera re-engages on the next frame.
-    if (!paused) cameraFocused = false;
-  },
-});
 
-// ---- Debug HUD: EDIT OBJECT toggle button -----------------------------
-// Cycles the edit screen through three states:
-//   closed → pick   (click 1: begin pick mode)
-//   pick   → closed (click 2 in pick: cancel)
-//   pick   → edit   (after user clicks an asteroid)
-//   edit   → closed (click 3: close screen)
-const editBtn = document.getElementById('debug-toggle-edit');
-if (editBtn) {
-  const updateEditBtn = () => {
-    const isOpen = editScreen.isOpen();
-    const isPicking = editScreen.isPicking();
-    // Caption stays plain "EDIT OBJECT" — the state is conveyed
-    // visually by the `.debug-hud__toggle--on` modifier (background
-    // + border change), not by the text. The old "EDIT OBJECT:
-    // OFF" label read as "off is off" which was confusing.
-    editBtn.textContent = 'EDIT OBJECT';
-    editBtn.classList.toggle('debug-hud__toggle--on', isOpen || isPicking);
-  };
-  editBtn.addEventListener('click', () => {
-    if (editScreen.isOpen()) editScreen.close();
-    else if (editScreen.isPicking()) editScreen.cancelPick();
-    else editScreen.beginPick();
-    updateEditBtn();
-  });
-  if (typeof window !== 'undefined') {
-    Object.defineProperty(window, 'EDIT_OBJECT', {
-      configurable: true,
-      enumerable: true,
-      get() { return editScreen.isOpen() || editScreen.isPicking(); },
-      set(v) {
-        if (v) editScreen.beginPick();
-        else {
-          if (editScreen.isOpen()) editScreen.close();
-          else if (editScreen.isPicking()) editScreen.cancelPick();
-        }
-      },
-    });
-  }
-  updateEditBtn();
-}
 const bus = createEventBus();
 const stateMachine = createStateMachine({ initial: State.DEMO, events: bus });
 
 // ---- Ship ---------------------------------------------------------------
-const ship = createShip({ scene });
+const ship = createShip({ scene, events: bus });
 // (Initial chase target is set after demoAi is created, below.)
 // Async: try to load skyfighter.glb and swap it in. If it fails,
 // the procedural ship stays (loadShipModel never throws; it logs a
@@ -333,13 +222,78 @@ const laser = createLaser({ scene });
 //   field.clearAll()                     — wipe on game restart
 //   field.getEntities()                  — read-only entity array
 //   field.getWorld()                     — world object (for powerupSystem)
-const field = createAsteroidField({ scene, uvDebugOverlay: asteroidUvDebug });
+const field = createAsteroidField({ scene });
 
 // ---- Particle system ---------------------------------------------------
 // Smoke puffs + stone debris on asteroid destruction. Updated every
 // frame in the render loop; emits on each asteroid kill in
 // processCollisions. See src/systems/particles.js.
 const particles = createParticleSystem({ scene });
+
+// ---- Collision cage debugger -------------------------------------------
+// Wireframe spheres around every collision hull (ship, asteroids,
+// power-up, bullets). Toggled via the left debug HUD. Useful for
+// verifying that visual overlap matches the collision spheres.
+
+// ---- Capture markers ---------------------------------------------------
+// High-contrast overlays (green ship ring, red asteroid wireframes,
+// yellow powerup ring) for video analysis. Toggled via the left
+// debug HUD and via `window.CAPTURE_MARKERS`.
+const captureMarkers = createCaptureMarkers({ scene });
+
+// ---- AI flight debug (3D overlay) --------------------------------------
+// Visualises the AI's velocity vector, desired heading, and chase
+// target so bad maneuvers are obvious at a glance. Toggled via the
+// left debug HUD and via `window.AI_FLIGHT_DEBUG`.
+const aiFlightDebug = createAiFlightDebug({ scene });
+if (typeof window !== 'undefined') {
+  Object.defineProperty(window, 'AI_FLIGHT_DEBUG', {
+    configurable: true,
+    enumerable: true,
+    get() { return aiFlightDebug.isEnabled(); },
+    set(v) { aiFlightDebug.setEnabled(!!v); },
+  });
+}
+
+// ---- Debug HUD: Capture markers toggle button -------------------------
+const captureBtn = document.getElementById('debug-toggle-capture');
+if (captureBtn) {
+  const updateCaptureBtn = () => {
+    const on = captureMarkers.isEnabled();
+    captureBtn.textContent = `CAPTURE: ${on ? 'ON' : 'OFF'}`;
+    captureBtn.classList.toggle('debug-hud__toggle--on', on);
+  };
+  captureBtn.addEventListener('click', () => {
+    captureMarkers.setEnabled(!captureMarkers.isEnabled());
+    updateCaptureBtn();
+  });
+  const originalSetEnabled = captureMarkers.setEnabled;
+  captureMarkers.setEnabled = (v) => {
+    originalSetEnabled(v);
+    updateCaptureBtn();
+  };
+  updateCaptureBtn();
+}
+
+// ---- Debug HUD: AI flight debug toggle button --------------------------
+const aiFlightBtn = document.getElementById('debug-toggle-ai-flight');
+if (aiFlightBtn) {
+  const updateAiFlightBtn = () => {
+    const on = aiFlightDebug.isEnabled();
+    aiFlightBtn.textContent = `AI FLIGHT: ${on ? 'ON' : 'OFF'}`;
+    aiFlightBtn.classList.toggle('debug-hud__toggle--on', on);
+  };
+  aiFlightBtn.addEventListener('click', () => {
+    aiFlightDebug.setEnabled(!aiFlightDebug.isEnabled());
+    updateAiFlightBtn();
+  });
+  const originalSetEnabled = aiFlightDebug.setEnabled;
+  aiFlightDebug.setEnabled = (v) => {
+    originalSetEnabled(v);
+    updateAiFlightBtn();
+  };
+  updateAiFlightBtn();
+}
 
 // ---- Demo AI -----------------------------------------------------------
 // NPC ship that hunts the nearest asteroid and shoots at it when the
@@ -364,51 +318,6 @@ const aiWeapon = {
   },
 };
 
-/**
- * Try to load a trained genome from `/trained-genome.json` (served by
- * Vite from the public/ folder). If found, create a neural-network
- * brain and pass it to the AI. If not found, the AI falls back to
- * the hand-coded rule-based brain.
- */
-// Captured by the brain-swap closure so the HUD can read
-// generation/fitness from the loaded payload.
-let trainedGenomePayload = null;
-
-async function loadTrainedBrain() {
-  try {
-    const res = await fetch('/trained-genome.json');
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (!data || !Array.isArray(data.genome)) return null;
-    trainedGenomePayload = data;
-    const genome = deserializeGenome(data.genome);
-    // Validate input size match: a saved genome from a previous (pre-velocity) training
-    // run will have a different length and throw at networkFromGenome. Skip it cleanly.
-    // Use TRAINER_DEFAULTS (not aiBrain) because aiBrain is the hand-coded closure and
-    // does not expose inputSize/hiddenSize/outputSize as plain properties.
-    const { inputSize, hiddenSize, outputSize } = TRAINER_DEFAULTS;
-    const expected = genomeSize(inputSize, hiddenSize, outputSize);
-    if (genome.length !== expected) {
-      console.warn(
-        `[loadTrainedBrain] Stale genome (length ${genome.length} ≠ expected ${expected} ` +
-        `for inputSize=${inputSize}, hiddenSize=${hiddenSize}, outputSize=${outputSize}). ` +
-        `Skipping — train a new champion.`,
-      );
-      return null;
-    }
-    const brain = createTrainedAiBrain({ genome, inputSize, hiddenSize, outputSize });
-    if (typeof console !== 'undefined') {
-      console.log(`[main] Loaded trained brain (gen ${data.generation}, fitness=${data.fitness.toFixed(1)})`);
-    }
-    return brain;
-  } catch (e) {
-    if (typeof console !== 'undefined') {
-      console.log('[main] No trained genome found — using hand-coded AI');
-    }
-    return null;
-  }
-}
-
 const demoAi = createDemoAi({
   scene,
   asteroids: field.getEntities(),
@@ -420,62 +329,115 @@ const demoAi = createDemoAi({
     const p = powerupSystem.getPendingSpawn();
     return p ? p.getPosition() : null;
   },
-  // Trained brain is loaded asynchronously and swapped in once ready.
-  // Until then the AI uses the hand-coded rule-based brain.
+  // Power-ups can be pushed by asteroid collisions (pushAway). The AI
+  // needs the velocity to predict where the power-up will be when the
+  // ship arrives; without it the ship chases the current position and
+  // misses moving pickups.
+  getPowerupVel: () => {
+    const p = powerupSystem.getPendingSpawn();
+    return p && typeof p.getVelocity === 'function' ? p.getVelocity() : { x: 0, z: 0 };
+  },
+  // v0.22.x Step 4 (Laser-Awareness): tell the brain whether the
+  // laser power-up is currently active. aiBrainTick branches its
+  // fire-loop on this: 'bullet' → distance-gated wide-cone fire
+  // (Step 3), 'laser' → tight ~3° cone lock-on the chase target
+  // with no dist gate. The brain re-reads this every tick (the
+  // hook is a closure), so the AI automatically switches its aim
+  // style the moment the laser power-up is picked up or expires.
+  getActiveWeapon: () => (powerupSystem.isLaserActive() ? 'laser' : 'bullet'),
+  // No `options` override needed — the factory uses the hand-coded
+  // rule-based brain by default (see createDemoAi in src/entities/ai.js).
+});
+
+// ---- v0.56.0: 2 pirate ships foundation -------------------------
+// Same factory, pirate role via `options.aggroDist: 300` (the live
+// `AI_TUNABLES.aggroDist` is `0` by default; the per-factory override
+// turns the pirate behavior ON for these two ships only). Shared
+// `aiWeapon` bullet pool. Always visible (no state-dependent toggle
+// for v0.56.0 — future work for pirate-mode combat). Tinted red AND
+// textured with the v0.57.0 procedural hazard pattern so the pirates
+// look visibly distinct from the smooth white/cyan player + demo AI.
+const PIRATE_RED = 0xff3333;
+
+// v0.57.0: generate the shared pirate texture ONCE. Browser-only:
+// `createPirateTexture` throws in Node because it uses
+// `document.createElement('canvas')`. In production this only runs
+// in the page-load path (the bottom of main.js after Vite has set
+// up the DOM). Pixel content: charcoal base + 6 diagonal hazard
+// stripes (dark-red alternating with base) + 4 amber warning
+// triangles at deterministic positions (seed=1337). Tiled 2x2
+// across each ship mesh via `texture.repeat`.
+const pirateTexture = createPirateTexture({ size: 256, seed: 1337, repeat: 2 });
+
+/**
+ * Walk a ship's mesh tree and recolor every material to `colorHex`.
+ * Applied AFTER `createDemoAi` calls `createShip` inside its factory.
+ * The engine glow (tagged `isEngineGlow`) is recolored too — the
+ * procedural glow's emissive is set to match the body so the pirate
+ * glow looks red during thrust instead of the default cyan.
+ */
+function tintShipAs(ship, colorHex) {
+  ship.mesh.traverse((obj) => {
+    if (obj.isMesh && obj.material) {
+      obj.material.color.setHex(colorHex);
+      if (obj.material.emissive) obj.material.emissive.setHex(colorHex);
+    }
+  });
+}
+
+// Pirate 1 — spawns at (+100, +80) facing toward origin.
+// v0.60.0: getShips now includes BOTH the player AND pirate2 so the
+// pirate attacks other pirates too (the foundation for pirate-mode
+// combat).
+//
+// **Forward-reference pattern (TIMING NOTE):** the closure body
+// references `pirate2`, which is declared AFTER pirate1 in source
+// order. At `createDemoAi()` time, `pirate2` is in the TDZ — the
+// closure is CREATED but NOT INVOKED. By the time the closure runs
+// (in `update()`), pirate2 has been assigned. The
+// `pirate2 && pirate2.isAlive()` guard handles both TDZ and
+// disposed-pirate cases. Don't move this closure to a synchronous
+// context without first reordering the declarations.
+const pirate1 = createDemoAi({
+  scene,
+  asteroids: field.getEntities(),
+  weapon: aiWeapon,
+  getShips: () => [ship, pirate2 && pirate2.isAlive() ? pirate2.getShip() : null].filter(Boolean),
   options: {
-    brain: null,
+    aggroDist: 300,
+    spawnRadius: 0,
+    spawnYaw: 0,
+    rng: () => 0,
   },
 });
+tintShipAs(pirate1.getShip(), PIRATE_RED);
+pirate1.getShip().reset({ x: 100, y: 0, z: 80 });
+pirateHps.set(pirate1.getShip(), PIRATE_MAX_HP);
 
-// AI brain info for the debug HUD. Seeded to the hand-coded brain
-// (the demo's default). When the trained brain loads (async below),
-// `kind` flips to 'trained' and the generation/fitness fields
-// populate from the loaded JSON.
-let aiBrainInfo = { kind: 'hand-coded', generation: null, fitness: null };
+// v0.57.0: apply the procedural pirate texture (hazard stripes +
+// warning triangles) so the pirates look visibly distinct from the
+// smooth cyan-winged player/demo AI ships. The texture is generated
+// ONCE and shared between both pirates (canvas paint is the
+// expensive bit; the THREE.CanvasTexture wrapper is reusable).
+applyPirateTexture(pirate1.getShip(), pirateTexture);
 
-// Async: load the trained brain and swap it in when ready.
-loadTrainedBrain().then((brain) => {
-  if (brain) {
-    // The AI's options are immutable after creation, so we recreate
-    // the AI with the trained brain. We must preserve the ship's
-    // current position/yaw so the swap is invisible.
-    const oldShip = demoAi.getShip();
-    const oldPos = { ...oldShip.position };
-    const oldYaw = oldShip.rotation.yaw;
-    demoAi.dispose();
-    // Recreate with the trained brain
-    const newAi = createDemoAi({
-      scene,
-      asteroids: field.getEntities(),
-      weapon: aiWeapon,
-      getPowerupPos: () => {
-        const p = powerupSystem.getPendingSpawn();
-        return p ? p.getPosition() : null;
-      },
-      options: { brain },
-    });
-    newAi.getShip().position = oldPos;
-    newAi.getShip().rotation.yaw = oldYaw;
-    // Swap the reference so the rest of main.js uses the new AI.
-    // We mutate the demoAi object in place because it's captured
-    // by many closures above (aiWeapon, powerupSystem, etc.).
-    Object.assign(demoAi, newAi);
-    // Update the HUD info. `trainedGenomePayload` is closed over from
-    // the loadTrainedBrain fetch — we read generation/fitness from it.
-    if (trainedGenomePayload) {
-      aiBrainInfo = {
-        kind: 'trained',
-        generation: trainedGenomePayload.generation ?? null,
-        fitness: trainedGenomePayload.fitness ?? null,
-      };
-    } else {
-      aiBrainInfo = { kind: 'trained', generation: null, fitness: null };
-    }
-    if (typeof console !== 'undefined') {
-      console.log('[main] Trained brain swapped in — AI now uses neural network');
-    }
-  }
+// Pirate 2 — spawns at (-100, -80) facing toward origin.
+const pirate2 = createDemoAi({
+  scene,
+  asteroids: field.getEntities(),
+  weapon: aiWeapon,
+  getShips: () => [ship, pirate1 && pirate1.isAlive() ? pirate1.getShip() : null].filter(Boolean),
+  options: {
+    aggroDist: 300,
+    spawnRadius: 0,
+    spawnYaw: Math.PI,
+    rng: () => 0.5,
+  },
 });
+tintShipAs(pirate2.getShip(), PIRATE_RED);
+pirate2.getShip().reset({ x: -100, y: 0, z: -80 });
+pirateHps.set(pirate2.getShip(), PIRATE_MAX_HP);
+applyPirateTexture(pirate2.getShip(), pirateTexture);
 
 // Same GLB swap for the AI demo ship, so the player and the NPC match.
 loadShipModel(demoAi.getShip(), '/models/skyfighter.glb', { modelRotationY: -Math.PI / 2 }).then((result) => {
@@ -525,11 +487,12 @@ const powerupSystem = createPowerUpSystem({
       }
       return ship;
     },
-    // Shorter lifetime in DEMO so an unclaimed power-up cycles
-    // faster (the user sees a new one every ~15s instead of ~32s).
-    // The AI can still pick one up before expiry if it's in range.
+    // Longer lifetime in DEMO so the AI has enough time to navigate
+    // the dense asteroid field and actually collect the power-up.
+    // v0.41.0: raised from 12s to 20s after the AI was given stronger
+    // powerup priority and braking authority.
     powerupLifetimeByState: {
-      DEMO: 12,
+      DEMO: 20,
       // PLAYING / GAME_OVER: default 30s
     },
     // Faster spawn cadence in DEMO so the laser power-up cycles
@@ -547,18 +510,56 @@ const powerupSystem = createPowerUpSystem({
   },
 });
 
-// ---- Game state (score + lives) -----------------------------------------
-// Owned by main.js; the upcoming HUD layer will subscribe to 'score:changed'
-// and 'lives:changed' on the bus.
+// ---- Game state (score + energy) ---------------------------------------
+// Owned by main.js. The HUD subscribes to 'score:changed' on the bus and
+// to the ship's own 'energy:changed' events (the ship is created with
+// `events: bus` above). The v0.10.x `let lives = 3` mechanic is fully
+// removed: the player dies when `ship.energy <= 0` (a `takeDamage` that
+// drains the last point triggers GAME_OVER via the check in
+// processCollisions). The energies counter (lives in spirit) lives
+// entirely on the ship now and is reflected in the HUD via the events
+// bus — no player-side state mirror needed.
 let score = 0;
-let lives = 3;
+
+// ---- AI tuning metrics (exposed to browser automation) ------------------
+// `window._aiMetrics` is read by the hands-off capture scripts to measure
+// powerup collection, score progression, and other AI behaviors without
+// parsing the screen. See scripts/ai_browser_capture.py.
+const aiMetrics = {
+  powerupsCollected: 0,
+  powerupTypes: [],
+  powerupsSpawned: 0,
+  asteroidsDestroyed: 0,
+  score: 0,
+};
+if (typeof window !== 'undefined') {
+  window._aiMetrics = aiMetrics;
+}
+
+// Subscribe to game events that the tuning loop cares about.
+bus.on('powerup:collected', (e) => {
+  aiMetrics.powerupsCollected += 1;
+  aiMetrics.powerupTypes.push(e.type);
+});
+bus.on('powerup:spawned', () => {
+  aiMetrics.powerupsSpawned += 1;
+});
+// score:changed is emitted on every score change; asteroidsDestroyed is
+// approximated by counting score events where the score actually went up.
+let lastScore = 0;
+bus.on('score:changed', (e) => {
+  aiMetrics.score = e.score;
+  if (e.score > lastScore) {
+    aiMetrics.asteroidsDestroyed += 1;
+  }
+  lastScore = e.score;
+});
 function resetRunState() {
   // Clear both bullet pools so no shots from the previous run linger.
   playerBullets.forEachActive((b, i) => playerBullets.despawn(i));
   aiBullets.forEachActive((b, i) => aiBullets.despawn(i));
   score = 0;
-  lives = 3;
-  ship.reset({ x: 0, y: 0, z: 0 });
+  ship.reset({ x: 0, y: 0, z: 0 }); // also clears energy + buffs + emits energy:changed
   // Wipe the world + entities. The next render-loop tick will
   // re-populate the bubble around the ship's reset position.
   field.clearAll();
@@ -568,7 +569,6 @@ function resetRunState() {
   // Clear lingering explosion particles from the previous run.
   particles.clear();
   bus.emit('score:changed', { score });
-  bus.emit('lives:changed', { lives });
 }
 
 // ---- Player weapon ------------------------------------------------------
@@ -619,25 +619,140 @@ const input = createInputSystem({
  * Without this split, the AI's bullets would silently pass through
  * asteroids in DEMO (the previous behavior).
  */
-function processCollisions() {
+function processCollisions(dt) {
   const state = stateMachine.getState();
   if (state === State.GAME_OVER) return;
 
   // Cache the entity array reference — used many times below.
   const asteroids = field.getEntities();
 
+  // ---- Ship roster + shipHash (v0.64.x spatial-hash broad-phase) ----
+  // Built ONCE per frame because ship positions don't change within
+  // processCollisions (the AI ships update once per tick, before
+  // collisions; pirates don't spawn mid-frame). The roster is the
+  // player + both pirates filtered for liveness + finite position.
+  // cellSize=8 covers all 3x3 candidate scans for the relatively
+  // small ship set (max combined radius 3u ship + 0.15u bullet).
+  function aliveShip(ai) {
+    return ai && ai.isAlive && ai.isAlive() ? ai.getShip() : null;
+  }
+  const shipTargets = [
+    ship,
+    aliveShip(pirate1),
+    aliveShip(pirate2),
+  ].filter((s) => s && s.position && typeof s.position.x === 'number');
+  const shipHash = createSpatialHash({ cellSize: 8 });
+  shipHash.rebuild(shipTargets);
+
+  // ---- Asteroid ↔ asteroid (push apart + elastic bounce) ------------
+  // O(n²) but cheap for ~300 asteroids (~45K checks, <0.1ms). Runs in
+  // EVERY non-GAME_OVER state so the AI's demo field looks dynamic.
+  // Resolved BEFORE bullet/laser checks so the new positions are
+  // settled before the destruction pass.
+  //
+  // v0.64.x: still O(n²) for this initial pass because the
+  // resolveAsteroidCollision mutates positions, so any hash built
+  // before this loop would have stale buckets. The post-resolve
+  // asteroidHash below is the broad-phase used by the subsequent
+  // bullet + ship queries.
+  {
+    const pairs = findAsteroidPairs(asteroids);
+    for (const { i, j } of pairs) {
+      resolveAsteroidCollision(asteroids[i], asteroids[j]);
+    }
+  }
+
+  // Post-bounce asteroidHash. ~0.05ms rebuild at MVP scale
+  // (300 inserts ≈ 0.05ms in V8). cellSize=16 covers the
+  // max-combined-radius worst case (5+5=10u asteroid↔asteroid) with
+  // comfortable safety margin — sqrt(2)*16 ≈ 22.6u diagonal reach.
+  const asteroidHash = createSpatialHash({ cellSize: 16 });
+  asteroidHash.rebuild(asteroids);
+
+  // ---- Asteroid ↔ powerup (push powerup out of overlapping asteroid) --
+  // Keeps the pending power-up from being buried inside an asteroid.
+  {
+    const pending = powerupSystem.getPendingSpawn();
+    if (pending) {
+      const pidx = findAsteroidPowerupIndex({ asteroids, powerup: pending, spatialHash: asteroidHash });
+      if (pidx >= 0) {
+        resolveAsteroidPowerupCollision(asteroids[pidx], pending);
+      }
+    }
+  }
+
   // ---- Bullet ↔ asteroid (state-scoped to the correct pool) ----------
   // DEMO:   only the AI shoots (its bullets go to aiBullets).
   // PLAYING: only the player shoots (their bullets go to playerBullets).
   // Each pool is independent — no cooldown sharing, no score bleed.
+  // v0.60.0: BOTH pools run ship-target collision against the live
+  // ship roster (player + alive pirates) so bullets from any source
+  // can damage any ship target.
+  // v0.64.x: spatialHash broad-phase. ~30 candidates per bullet vs
+  // 300, regardless of bullet count.
   const activePool = state === State.DEMO ? aiBullets : playerBullets;
-  const bulletHits = findBulletHits({ asteroids, bullets: activePool });
+  const bulletHits = findBulletHits({ asteroids, bullets: activePool, dt, spatialHash: asteroidHash });
   const asteroidsToRemove = new Set();
   for (const hit of bulletHits) {
     activePool.despawn(hit.bulletIndex);
     if (asteroidsToRemove.has(hit.asteroidIndex)) continue;
     asteroidsToRemove.add(hit.asteroidIndex);
-    score += scoreForSize(asteroids[hit.asteroidIndex].spec.size);
+    const asteroidScore = scoreForSize(asteroids[hit.asteroidIndex].spec.size);
+    score += asteroidScore * ship.getScoreMultiplier();
+  }
+
+  // ---- Bullet ↔ ship (v0.60.0 — pirate combat) ------------------------
+  // v0.60.0: pirate combat. Bullets from BOTH pools (player +
+  // AI/pirates) can hit ANY ship target — player, pirate1,
+  // pirate2. The dead-pirate filter (aliveShip above) ensures we
+  // don't hit a disposed pirate's stale ship object. Each pirate
+  // starts with PIRATE_MAX_HP; on HP=0 the pirate is disposed.
+  // v0.64.x: spatialHash (over ship positions). The hull-mounted set
+  // is tiny (3-4 ships), so speedup is marginal but consistent.
+  for (const bullets of [playerBullets, aiBullets]) {
+    const shipHits = findBulletShipHits({
+      bullets,
+      ships: shipTargets,
+      bulletRadius: BULLET_RADIUS,
+      shipRadius: SHIP_RADIUS,
+      dt,
+      spatialHash: shipHash,
+    });
+    for (const { bulletIndex, shipIndex } of shipHits) {
+      bullets.despawn(bulletIndex);
+      const target = shipTargets[shipIndex];
+      if (target === ship) {
+        // v0.61.0 — shield absorbs the hit. Bullet despawns (clean
+        // up) but no damage applied + no GAME_OVER + no ship.reset().
+        // The shield buff is for the PLAYER only (pirate attacks on
+        // the player are absorbed; pirate-vs-pirate damage is NOT
+        // affected — there's no `isShielded` check on the pirate
+        // branch below).
+        if (ship.isShielded()) {
+          // Skip damage; bullet already despawned above.
+        } else {
+          // Apply damage + game-over transition identical to the
+          // asteroid-hit path.
+          const dmg = 25 * ship.getDamageMultiplier();
+          const remaining = ship.takeDamage(dmg);
+          if (ship.isDead() || remaining <= 0) {
+            stateMachine.transition(State.GAME_OVER, { finalScore: score });
+            bus.emit('game:over', { finalScore: score });
+            ship.reset({ x: 0, y: 0, z: 0 });
+          }
+        }
+      } else if (pirateHps.has(target)) {
+        // Pirate hit. pirateHps is the SSOT for "is this a pirate";
+        // no need for 3 separate `target === pirateN.getShip()` checks.
+        // Pirates don't get the shield buff (intentional design — the
+        // shield is for the player's defense against pirates).
+        const ai = pirate1.getShip() === target ? pirate1 : pirate2;
+        damagePirate(ai);
+      }
+      // Bullets despawned in this loop are gone for the rest of
+      // the frame. The next `findBulletShipHits` pass for the
+      // OTHER pool won't see them (different pool).
+    }
   }
 
   // ---- Laser ↔ asteroid (piercing hits, run in DEMO + PLAYING) -------
@@ -659,7 +774,8 @@ function processCollisions() {
         continue;
       }
       asteroidsToRemove.add(idx);
-      score += scoreForSize(asteroid.spec.size);
+      const asteroidScore = scoreForSize(asteroid.spec.size);
+      score += asteroidScore * ship.getScoreMultiplier();
       laser.consumeHit(asteroid); // consumed this frame
     }
   }
@@ -680,7 +796,7 @@ function processCollisions() {
     // ---- Explosion particle effect ----------------------------
     particles.emitExplosion(destroyedPos, asteroidRadius);
     for (const spec of childSpecs) {
-      asteroids.push(createAsteroidFromSpec({ spec, scene, uvDebugOverlay: asteroidUvDebug }));
+      asteroids.push(createAsteroidFromSpec({ spec, scene }));
     }
     // ---- Power-up drop on asteroid kill -----------------------
     // Roll the per-kill chance (POWERUP_DROP_CHANCE, near the
@@ -695,25 +811,49 @@ function processCollisions() {
     }
   }
 
-  // ---- Ship ↔ asteroid (PLAYING only) --------------------------------
-  // The player is the only entity that can die (lives system). The
-  // AI has infinite lives and the laser/bullet pool handles its own
-  // cooldown — the AI is never a collision target. We also gate
-  // this on PLAYING because the state transition to GAME_OVER only
-  // makes sense when the player is the one being hit.
+  // ---- Ship ↔ asteroid (PLAYING only) --------------------------------    // v0.11.0: replaces the v0.10.x `lives -= 1` mechanic with
+    // energy-based damage. The hit cost is 25 energy points (the
+    // `ENERGY_DAMAGE` literal — defined inline here as the SINGLE
+    // source of truth on the `refine-coded-ai` branch; no trainer
+    // to lockstep with). The hull buff halves incoming damage
+    // via ship.getDamageMultiplier(). v0.61.0: shield absorbs the
+    // hit — asteroid is disposed (consumed by collision) but no
+    // damage + no GAME_OVER + no position reset.
   if (state !== State.PLAYING) return;
-  const shipHitIdx = findShipHit({ ship, asteroids });
+  // Re-key the asteroidHash AFTER the splice. The asteroid array is
+  // now shorter (destroyed entries removed), so any cached hash
+  // indices from before the splice would map to shifted entries.
+  // The rebuild is cheap (~0.05ms) and corrects the indices.
+  asteroidHash.rebuild(asteroids);
+  const shipHitIdx = findShipHit({ ship, asteroids, spatialHash: asteroidHash });
   if (shipHitIdx >= 0) {
     const a = asteroids[shipHitIdx];
     a.dispose();
     asteroids.splice(shipHitIdx, 1);
-    lives -= 1;
-    bus.emit('lives:changed', { lives });
-    if (lives <= 0) {
-      stateMachine.transition(State.GAME_OVER, { finalScore: score });
-      bus.emit('game:over', { finalScore: score });
+    // v0.61.0 — shield absorbs the asteroid hit. The asteroid is
+    // physically consumed (a.dispose + splice), but no energy damage
+    // is applied and the player is not reset. Matches the bullet-
+    // vs-player gating above (consistent shield contract).
+    if (ship.isShielded()) {
+      // Shield is active — no damage, no reset.
     } else {
-      ship.reset({ x: 0, y: 0, z: 0 });
+      // Apply ship damage using the player's current damage multiplier
+      // (hull-buff active → 0.5x). The ship emits `energy:changed` on
+      // the bus itself; the HUD's energy bar updates from that event.
+      const dmg = 25 * ship.getDamageMultiplier();
+      const remaining = ship.takeDamage(dmg);
+      if (ship.isDead() || remaining <= 0) {
+        stateMachine.transition(State.GAME_OVER, { finalScore: score });
+        bus.emit('game:over', { finalScore: score });
+        // Reset the ship so the GAME_OVER overlay shows the player at
+        // a sensible position (the camera continues to follow the
+        // ship; a dead ship at the impact point would render free-fall).
+        ship.reset({ x: 0, y: 0, z: 0 });
+      } else {
+        // Survived with energy left — pulse the player back to spawn.
+        // (v0.10.x behavior preserved.)
+        ship.reset({ x: 0, y: 0, z: 0 });
+      }
     }
   }
 }
@@ -775,17 +915,18 @@ stateMachine.onEnter(State.DEMO, () => setCameraForState(State.DEMO));
 // onEnter only fires on transitions — seed the initial state manually.
 setCameraForState(stateMachine.getState());
 
-// ---- Reset score + lives on DEMO → PLAYING transition ----------------
+// ---- Reset score on DEMO → PLAYING transition -----------------------
 // The AI's demo bullets go to aiBullets (not shared), so there's no
-// pool to clear. But the demo score (accumulated from AI kills in the
-// attract screen) still lives in the `score` variable, so we reset it
-// here for a clean start.
+// pool to clear. The demo score (accumulated from AI kills in the
+// attract screen) lives in the `score` variable, so we reset it
+// here for a clean start. Energy is reset by the same transition via
+// `ship.reset` from input's `onStart` → `resetRunState`. The bus
+// emits `score:changed` for the HUD; the ship's own
+// `energy:changed` event covers the energy HUD update.
 stateMachine.onExit(State.DEMO, () => {
   if (stateMachine.getState() === State.PLAYING) {
     score = 0;
-    lives = 3;
     bus.emit('score:changed', { score });
-    bus.emit('lives:changed', { lives });
   }
 });
 
@@ -820,6 +961,180 @@ const debugHud = createDebugHud();
 {
   const root = document.querySelector('[data-debug-hud-root]');
   if (root) debugHud.mount(root);
+}
+
+// ---- Debug column collapse toggle (v0.50.x + v0.51.x) ------------------
+// Small button at the top-left of the debug column that hides/shows
+// the entire column body (the AI debug overlay + diagnostic HUD).
+// The button itself stays visible as the "little quad" the user
+// can click again to expand. State persists in localStorage so the
+// user's preference survives reloads. Default is expanded. v0.51.x
+// extracted the shared `createColumnToggle` helper so the AI tuners
+// column (right side) can reuse the exact same pattern. No hotkey
+// bound — the button is the only control surface (keep it simple).
+createColumnToggle({
+  column: document.getElementById('debug-column'),
+  toggleBtn: document.getElementById('debug-column-toggle'),
+  storageKey: 'debugColumnCollapsed',
+  collapsedClass: 'debug-column--collapsed',
+  expandTitle: 'Expand debug panels',
+  collapseTitle: 'Collapse debug panels',
+});
+
+// ---- AI tuners column collapse toggle (v0.51.x) ------------------------
+// Right-side counterpart to the debug column toggle. Same shared
+// helper, different storageKey + collapsedClass + titles. The toggle
+// button is the "small square to the top right" the user asked for
+// — when collapsed, only the 32x32 button is visible at top: 12px,
+// right: 12px. When expanded, the body hangs below the HUD top bar
+// via `margin-top: var(--space-5)` so it doesn't overlap the energy
+// HUD on the right side of the top bar. Default is expanded.
+createColumnToggle({
+  column: document.getElementById('ai-tuners-column'),
+  toggleBtn: document.getElementById('ai-tuners-column-toggle'),
+  storageKey: 'aiTunersColumnCollapsed',
+  collapsedClass: 'ai-tuners-column--collapsed',
+  expandTitle: 'Expand AI tuners panel',
+  collapseTitle: 'Collapse AI tuners panel',
+});
+
+// ---- AI tuning master flag (v0.48.0) -----------------------------------
+// One switch that gates the ENTIRE AI-tuning component structure
+// (panel + debug overlay + the HTML containers in index.html).
+// Mirrors the project's "extract when 2+ consumers need it"
+// guideline — the panel, the overlay, and a dev-only console banner
+// all need to know whether AI tuning is enabled.
+const AI_TUNING_ENABLED_DEFAULT = true;
+function isAiTuningEnabled() {
+  // Override order: 1) window.AI_TUNING_ENABLED at runtime (set via
+  // devtools BEFORE this module loads — sets a localStorage note),
+  // 2) localStorage 'aiTuningEnabled' (persisted across sessions),
+  // 3) the build-time default above.
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const stored = localStorage.getItem('aiTuningEnabled');
+      if (stored != null) return stored === '1' || stored === 'true';
+    }
+  } catch { /* SSR / privacy mode */ }
+  return AI_TUNING_ENABLED_DEFAULT;
+}
+const AI_TUNING_ENABLED = isAiTuningEnabled();
+
+// Component vars are null when AI tuning is disabled so the
+// per-frame `if (aiDebugOverlay) update()` no-ops cleanly.
+let aiDebugOverlay = null;
+let aiTunersPanel = null;
+
+if (AI_TUNING_ENABLED) {
+  // v0.23.x AI Debug Overlay (bottom-right; radar + panels).
+  // Always visible. Reads game state via per-frame getter closures.
+  aiDebugOverlay = createAiDebugOverlay({
+    getSubject: () => stateMachine.getState() === State.DEMO
+      ? (demoAi && demoAi.getShip()) || ship
+      : ship,
+    getAiShip: () => demoAi && demoAi.getShip(),
+    getLastDecision: () => demoAi && demoAi.getLastDecision
+      ? demoAi.getLastDecision()
+      : null,
+    getActiveWeapon: () => (powerupSystem.isLaserActive() ? 'laser' : 'bullet'),
+    getAsteroids: () => field.getEntities(),
+    getPowerupPos: () => {
+      const p = powerupSystem.getPendingSpawn();
+      return p ? p.getPosition() : null;
+    },
+    getScore: () => score,
+    getEnergy: () => ({
+      value: ship.getEnergy ? ship.getEnergy() : 0,
+      max: ship.getMaxEnergy ? ship.getMaxEnergy() : 100,
+    }),
+    getState: () => stateMachine.getState(),
+    // v0.59.0 + v0.62.0: radar radius = `radarBubbleMultiplier` ×
+    // ship sight (= bubble radius, i.e. 1800u at MVP defaults × 3.
+    // v0.62.0 makes the multiplier live-tunable via the AI Live
+    // Tuners panel (`AI_TUNABLES.radarBubbleMultiplier`). The live
+    // getter below re-reads the bag every frame so a slider drag
+    // is visible on the very next render loop tick. Falls back to
+    // `RADAR_BUBBLE_MULTIPLIER_DEFAULT` if the bag is missing the
+    // key OR has a non-finite value (defends against NaN/Infinity
+    // sneaking past via `typeof === 'number'` — NaN is also a
+    // number per the typeof test, so we use `Number.isFinite`
+    // instead).
+    getWorldRadius: () => {
+      const mult = (AI_TUNABLES && Number.isFinite(AI_TUNABLES.radarBubbleMultiplier))
+        ? AI_TUNABLES.radarBubbleMultiplier
+        : RADAR_BUBBLE_MULTIPLIER_DEFAULT;
+      return mult * CHUNK_SIZE * BUBBLE_RADIUS_CHUNKS;
+    },
+  });
+  {
+    const root = document.querySelector('[data-ai-debug-root]');
+    if (root) aiDebugOverlay.mount(root);
+  }
+
+  // v0.46.x AI Live Tuners Panel (right of the AI debug overlay, OR
+  // stacked below on narrow viewports). v0.48.0 adds inline SVG
+  // visual guides per slider (cone / circle / speedometer / bar /
+  // clock) so the user can see what each tunable controls. Each
+  // row has a `data-tuner-guide="KEY"` cell containing an SVG that
+  // morphs as the slider drags. RESET restores frozen defaults
+  // (see AI_TUNABLE_DEFAULTS). COPY JSON writes the current
+  // snapshot to clipboard + console.
+  aiTunersPanel = createAiTunersPanel({
+    tunables: AI_TUNABLES,
+    resetFn: () => resetAITunables(),
+    exportFn: () => exportAITunables(),
+  });
+  {
+    const root = document.querySelector('[data-ai-tuners-root]');
+    if (root) aiTunersPanel.mount(root);
+  }  } else {
+    // AI tuning disabled — completely scrub the AI-debug-overlay +
+    // AI-tuners HTML roots AND the AI-tuners-column wrapper from the
+    // DOM so nobody sees an empty container or an orphaned toggle.
+    // The debug column wrapper is INTENTIONALLY kept: it hosts the
+    // diagnostic HUD (#debug-hud) which is NOT gated by AI tuning
+    // and should remain visible regardless. Done BEFORE the render
+    // loop starts so position measurements in CSS don't see
+    // zero-height elements.
+    const removeIfMounted = (selector) => {
+      if (typeof document === 'undefined') return;
+      const el = document.querySelector(selector);
+      if (el && typeof el.remove === 'function') el.remove();
+    };
+    removeIfMounted('[data-ai-tuners-root]');
+    removeIfMounted('[data-ai-debug-root]');
+    removeIfMounted('#ai-tuners-column');
+    if (typeof console !== 'undefined') {
+      console.log('[main] AI tuning disabled (AI_TUNING_ENABLED=false) — panel + overlay + guides + AI tuners column omitted.');
+    }
+  }
+
+// Runtime toggle hook — `window.AI_TUNING_ENABLED = false` then
+// reload to disable; `window.AI_TUNING_ENABLED = true` then reload
+// to re-enable. Once the panel/overlay are mounted, runtime
+// changes are no-ops (with a console warning) because tearing
+// down + re-creating the factories mid-frame would require
+// re-importing all the UI modules, which is not idiomatic for
+// ESM. Documented convention is "set the flag, reload the page".
+if (typeof window !== 'undefined') {
+  Object.defineProperty(window, 'AI_TUNING_ENABLED', {
+    configurable: true,
+    enumerable: true,
+    get() { return AI_TUNING_ENABLED; },
+    set(v) {
+      const next = !!v;
+      try { localStorage.setItem('aiTuningEnabled', next ? '1' : '0'); }
+      catch { /* ignore */ }
+      if (aiDebugOverlay || aiTunersPanel) {
+        if (typeof console !== 'undefined') {
+          console.warn(
+            `[main] window.AI_TUNING_ENABLED is now ${next}; saved to localStorage. ` +
+            'Reload the page for the change to take effect (mid-frame teardown is not supported).',
+          );
+        }
+      }
+    },
+  });
 }
 
 // ---- Render loop ---------------------------------------------------------
@@ -858,25 +1173,6 @@ function countSceneGeometry(scene) {
 }
 
 function tick(dt) {
-  // ---- Edit screen (open) ------------------------------------------
-  // The editor screen has its own lightweight 3D viewport (the
-  // mini renderer inside the modal). The main 3D scene does
-  // NOT render while the screen is open — the modal is opaque
-  // and covers it, so rendering it would be wasted GPU work.
-  if (editScreen.isOpen()) {
-    editScreen.updateMini(dt);
-    return;
-  }
-  // While the game is halted (pick mode, or edit screen open in
-  // an earlier version), the gameplay ticks are skipped but the
-  // chase camera + main render continue so the user can see the
-  // scene. The chase camera is paused while the camera is
-  // FOCUS-locked.
-  if (gameHalted) {
-    if (!cameraFocused) updateCamera(dt);
-    renderer.render(scene, camera);
-    return;
-  }
   input.update();
   ship.update(dt);
   playerBullets.update(dt);
@@ -922,6 +1218,11 @@ function tick(dt) {
   // itself when disabled (outside DEMO). See onEnter/onExit above.
   demoAi.update(dt);
 
+  // v0.56.0: pirate ships tick every frame regardless of state.
+  // They're persistent world fixtures, not demo-state NPCs.
+  pirate1.update(dt);
+  pirate2.update(dt);
+
   // ---- Power-up system -----------------------------------------------
   // Updates the active power-up's countdown, the pending power-up's
   // lifetime, and the respawn timer. Picks up automatically when
@@ -929,9 +1230,15 @@ function tick(dt) {
   // src/systems/powerup-system.js.
   powerupSystem.update(dt, field.getEntities());
 
-  processCollisions();
+  processCollisions(dt);
   particles.update(dt);
+
   updateCamera(dt);
+  // v0.68.0 — sun + shadows follow the ship each frame. Reads the
+  // post-ship.update position so the shadow camera frustum centres
+  // on the NEW position (not the previous frame's). Defensive against
+  // missing/non-finite position (early-exits inside updateLighting).
+  updateLighting(dt, ship.position);
 
   // ---- NEBULA_RENDER_THRESHOLD wiring --------------------------------
   // The single global skydome's opacity reflects the ship's current
@@ -967,11 +1274,23 @@ function tick(dt) {
   // driven by the render loop's `hud.update({...})` call, not by
   // bus events (so the bar drains smoothly without event spam).
   // Score / lives / state-message continue to be event-driven.
+  //
+  // v0.61.0 — when activeType === 'shield', clip `remaining` to
+  // ship.getShieldRemaining() so the bar never fills with the 15s
+  // active-window time after the 10s shield buff has expired
+  // (visually misleading — the shield would be gone but the bar
+  // would still show ~5s of "shield active"). For all other types,
+  // fall through to the active-window time. Keeps the chip label
+  // + color (still says 'SHIELD') intact; only the bar fill changes.
+  const powerupType = powerupSystem.getActiveType();
+  const isShieldActive = powerupType === 'shield';
   hud.update({
     powerup: {
       active: powerupSystem.isLaserActive(),
-      type: powerupSystem.getActiveType(),
-      remaining: powerupSystem.getActiveRemaining(),
+      type: powerupType,
+      remaining: isShieldActive
+        ? ship.getShieldRemaining()
+        : powerupSystem.getActiveRemaining(),
       max: powerupSystem.getActiveMax(),
       hasPending: !!powerupSystem.getPendingSpawn(),
     },
@@ -985,12 +1304,53 @@ function tick(dt) {
     ? (demoAi && demoAi.getShip()) || ship
     : ship;
 
+  // ---- Capture markers -------------------------------------------------
+  // High-contrast overlays for video analysis. Updated every frame so
+  // the markers follow moving objects. The `window._captureState`
+  // object is written by the browser automation scripts to surface
+  // recording status + remaining time in the debug HUD. We cache the
+  // last seen enabled state locally so we don't read the global every
+  // frame.
+  if (typeof window !== 'undefined') {
+    const cs = window._captureState;
+    const wantEnabled = cs ? !!cs.enabled : false;
+    if (wantEnabled !== captureMarkers.isEnabled()) {
+      captureMarkers.setEnabled(wantEnabled);
+    }
+    // Only update markers when they are enabled; the helper is a no-op
+    // when disabled, but skipping the call avoids the entity iteration.
+    if (wantEnabled) {
+      captureMarkers.update({
+        subject,
+        asteroids: field.getEntities(),
+        powerup: powerupSystem.getPendingSpawn(),
+      });
+    }
+  }
+
+  // ---- AI flight debug (3D overlay) ------------------------------------
+  // Follow the AI demo ship in DEMO state and draw velocity + heading +
+  // target vectors. Toggle via `window.AI_FLIGHT_DEBUG = false`.
+  if (stateMachine.getState() === State.DEMO) {
+    const aiShipForDebug = (demoAi && demoAi.getShip()) || ship;
+    const aiDecision = demoAi && typeof demoAi.getLastDecision === 'function'
+      ? demoAi.getLastDecision()
+      : null;
+    aiFlightDebug.update({
+      shipPos: aiShipForDebug.position,
+      shipVel: aiShipForDebug.velocity,
+      shipYaw: aiShipForDebug.rotation.yaw,
+      targetPos: aiDecision && aiDecision.target ? aiDecision.target.pos : null,
+      predictedPos: aiDecision && aiDecision.predictedPos ? aiDecision.predictedPos : null,
+      evadeDist: AI_TUNABLES.evadeDist,
+    });
+  }
+
   // Push the latest diagnostic snapshot to the debug HUD. The HUD
   // throttles its DOM writes to ~12Hz internally.
   debugHud.update({
     state: stateMachine.getState(),
     score,
-    lives,
     asteroidCount: field.getEntities().length,
     // `getActiveChunks` is the public read-helper for the streaming
     // layer's live-chunk count. We use its length (rather than
@@ -1005,18 +1365,28 @@ function tick(dt) {
     // `ship` slot now means "subject" — the entity the camera follows.
     // See the comment above.
     ship: { x: subject.position.x, y: subject.position.y, z: subject.position.z },
-    // AI brain info + the mode the brain actually decided on this
+    // AI brain kind + the mode the brain actually decided on this
     // frame. `getLastMode()` is a closure read (cheap); it returns
     // the cached mode from the AI's most recent update(). When the
     // AI is disabled (outside DEMO) it returns the seed 'wander'
     // from the closure initial value.
-    aiBrain: aiBrainInfo.kind,
-    aiGen: aiBrainInfo.generation,
-    aiFitness: aiBrainInfo.fitness,
-    aiMode: demoAi && typeof demoAi.getLastMode === 'function'
-      ? demoAi.getLastMode()
-      : null,
+    captureState: (typeof window !== 'undefined' && window._captureState)
+      ? window._captureState.recording ? 'REC' : 'OFF'
+      : 'OFF',
+    captureRemaining: (typeof window !== 'undefined' && window._captureState)
+      ? window._captureState.remainingS
+      : undefined,
+    captureMode: (typeof window !== 'undefined' && window._captureState)
+      ? window._captureState.mode
+      : undefined,
   });
+
+  // v0.23.x AI Debug Overlay per-frame tick. Null-safe because
+  // AI_TUNING_ENABLED may have skipped both object creations at
+  // boot (see the master-flag block above). When disabled, the
+  // per-frame guard costs one boolean check and is faster than
+  // any DOM mutation.
+  if (aiDebugOverlay) aiDebugOverlay.update();
 }
 
 function loop() {
@@ -1033,4 +1403,63 @@ console.log(
   'color:#97a3c4;',
 );
 console.log('Ship online. WASD/arrows to fly, Space to fire, any key to start.');
-console.log(`State: ${stateMachine.getState()}   Lives: ${lives}   Score: ${score}`);
+console.log(`State: ${stateMachine.getState()}   Energy: ${ship.getEnergy()}   Score: ${score}`);
+
+// escapeHtml -- defense-in-depth against accidental HTML injection when
+// the chip constants become user-influenced. Today the values are
+// `__BRANCH__` + `VERSION` + `__COMMIT__` injected by Vite's `define`
+// substitution at config-load time (see vite.config.js) -- BRANCH is
+// a `git rev-parse --abbrev-ref HEAD` ref name (alphanumeric + slash +
+// hyphen), VERSION is semantic-version-shaped (alphanumeric + dot),
+// COMMIT is a short SHA hex string. All three are safe by construction
+// today. If any of them ever becomes user-controlled (e.g. an
+// HTTP-served config), the helper treats accidental HTML injection as
+// an invalid-character sequence rather than an XSS bug. Comments
+// drift; defense-in-depth doesn't.
+function escapeHtml(s) {
+  return String(s).replace(/[<>&"]/g, (c) => ({
+    '<': '&lt;',
+    '>': '&gt;',
+    '&': '&amp;',
+    '"': '&quot;',
+  })[c]);
+}
+
+{
+  const v = document.getElementById('game-version');
+  if (v) {
+    // Three-span chip (branch + version + commit). All three values
+    // come from Vite's `define` globals + the manual SSOT:
+    //   - __BRANCH__ / __COMMIT__ : resolved in vite.config.js by
+    //     `execSync('git ...')` at config-load time and substituted
+    //     globally into the source. Fresh by construction (as honest
+    //     as a `git status` taken right before the dev server boots).
+    //   - VERSION : manual SSOT in src/version-constants.js.
+    //
+    // Compared to a post-commit-hook approach (bake the SHA into a
+    // committed file + amend), this architecture has no chicken-and-egg:
+    // the SHA never needs to appear in any committed file's content,
+    // so no amend cycle is required to keep the chip in sync.
+    //
+    // The escapeHtml helper is defense-in-depth: branch + commit are
+    // alphanumeric or `git-ref` shaped today (no HTML-unsafe chars),
+    // but if a future iteration wires the values from HTTP-served
+    // config, the helper treats accidental HTML injection as an
+    // invalid-character sequence rather than an XSS bug.
+    v.innerHTML =
+      `<span class="game-version__branch">${escapeHtml(__BRANCH__)}</span>` +
+      `<span class="game-version__sep" aria-hidden="true">·</span>` +
+      `<span class="game-version__ver">${escapeHtml(VERSION)}</span>` +
+      `<span class="game-version__sep" aria-hidden="true">·</span>` +
+      `<span class="game-version__commit">${escapeHtml(__COMMIT__)}</span>`;
+  }
+}
+
+// One extra console.log stamping version + branch + commit (matches
+// the chip so DevTools and the corner chip agree). ONE log, not two:
+console.log(
+  `%c${VERSION}%c on %c${__BRANCH__}%c @ ${__COMMIT__}`,
+  'background:#48dbfb;color:#05060c;padding:2px 6px;border-radius:2px;font-weight:bold;',
+  'color:#97a3c4;',
+  'color:#48dbfb;',
+);

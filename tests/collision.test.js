@@ -19,7 +19,13 @@ import {
   SCORE_BY_SIZE,
   BULLET_RADIUS,
   SHIP_RADIUS,
+  findAsteroidPairs,
+  resolveAsteroidCollision,
+  findAsteroidPowerupIndex,
+  resolveAsteroidPowerupCollision,
+  findBulletShipHits,
 } from '../src/systems/collision.js';
+import { createSpatialHash } from '../src/systems/spatial-hash.js';
 
 // ---- Helpers ------------------------------------------------------------
 
@@ -29,11 +35,16 @@ import {
  * @param {number} y
  * @param {number} z
  * @param {number} r
+ * @param {{x:number,z:number}} [vel]
  */
-function fakeAsteroid(x, y, z, r) {
+function fakeAsteroid(x, y, z, r, vel) {
+  const v = vel || { x: 0, z: 0 };
+  const pos = { x, y, z };
   return {
-    getPosition: () => ({ x, y, z }),
+    getPosition: () => pos,
     getRadius: () => r,
+    getVelocity: () => ({ x: v.x, z: v.z }),
+    setVelocity(vx, vz) { v.x = vx; v.z = vz; },
   };
 }
 
@@ -45,6 +56,26 @@ function fakeAsteroid(x, y, z, r) {
  */
 function fakeBullet(x, y, z) {
   return { position: { x, y, z } };
+}
+
+/**
+ * Build a fake powerup with the duck-typed API for collision + push.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} z
+ * @param {number} r
+ */
+function fakePowerup(x, y, z, r) {
+  const pos = { x, y, z };
+  let _pushVx = 0;
+  let _pushVz = 0;
+  return {
+    getPosition: () => pos,
+    getRadius: () => r,
+    getPushVx: () => _pushVx,
+    getPushVz: () => _pushVz,
+    pushAway(vx, vz) { _pushVx += vx; _pushVz += vz; },
+  };
 }
 
 /**
@@ -199,6 +230,30 @@ test('findBulletHits: bulletRadius option narrows the hit zone', () => {
   assert.equal(findBulletHits({ asteroids, bullets, bulletRadius: 0.05 }).length, 0);
 });
 
+test('findBulletHits: swept-sphere catches fast bullet passing through small asteroid', () => {
+  // Bullet radius 0.15, asteroid radius 1.5. Bullet crosses the asteroid
+  // during the frame and ends up past it. The discrete position check at
+  // the end point misses; swept-sphere should catch it.
+  const asteroids = [fakeAsteroid(0, 0, 0, 1.5)];
+  const b = {
+    position: { x: -2, y: 0, z: 0 },
+    velocity: { x: -500, y: 0, z: 0 },
+  };
+  const bullets = {
+    forEachActive(fn) { fn(b, 0); },
+  };
+  // Without dt (discrete only) → bullet at (-2,0,0), asteroid r=1.5,
+  // centers 2 apart, sum=1.65 → miss.
+  assert.deepEqual(findBulletHits({ asteroids, bullets }).length, 0);
+  // With dt=0.02 (20ms at 50 FPS): previous pos = (-2 + 10, 0, 0) = (8,0,0).
+  // Path segment from (8,0,0) to (-2,0,0) passes through origin.
+  // Distance from origin to segment = 0 < 0.15 + 1.5 → hit.
+  const hits = findBulletHits({ asteroids, bullets, dt: 0.02 });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].bulletIndex, 0);
+  assert.equal(hits[0].asteroidIndex, 0);
+});
+
 test('findBulletHits: missing args → empty list, no throw', () => {
   assert.deepEqual(findBulletHits({}), []);
   assert.deepEqual(findBulletHits({ asteroids: [] }), []);
@@ -257,10 +312,14 @@ test('findShipHit: missing args → -1, no throw', () => {
 
 // ---- scoreForSize / SCORE_BY_SIZE ---------------------------------------
 
-test('SCORE_BY_SIZE: classic Asteroids table (large=20, medium=50, small=100)', () => {
+test('SCORE_BY_SIZE: classic Asteroids table + v0.71.0 HUGE (large=20, medium=50, small=100, huge=200)', () => {
   assert.equal(SCORE_BY_SIZE[0], 20);
   assert.equal(SCORE_BY_SIZE[1], 50);
   assert.equal(SCORE_BY_SIZE[2], 100);
+  // v0.71.0 — new HUGE apex tier. 2× small's reward balances the
+  // rarity (5% distribution) with a meaningful payoff for engaging
+  // the dangerous 10×-ship-size tier.
+  assert.equal(SCORE_BY_SIZE[3], 200);
 });
 
 test('SCORE_BY_SIZE: frozen', () => {
@@ -274,9 +333,283 @@ test('scoreForSize: returns the table value for known sizes', () => {
 });
 
 test('scoreForSize: returns 0 for unknown sizes', () => {
-  assert.equal(scoreForSize(3), 0);
+  // v0.71.0 — size=3 is now a KNOWN tier (HUGE, score 200), so use
+  // truly out-of-range values for the unknown-size check.
+  assert.equal(scoreForSize(4), 0);
   assert.equal(scoreForSize(-1), 0);
   assert.equal(scoreForSize(undefined), 0);
+});
+
+test('scoreForSize: returns 200 for HUGE tier (v0.71.0)', () => {
+  // v0.71.0 — new HUGE apex tier at score 200 (2× small's 100).
+  assert.equal(scoreForSize(3), 200);
+});
+
+// ---- findAsteroidPairs -------------------------------------------------
+
+test('findAsteroidPairs: empty list → []', () => {
+  assert.deepEqual(findAsteroidPairs([]), []);
+});
+
+test('findAsteroidPairs: single asteroid → []', () => {
+  assert.deepEqual(findAsteroidPairs([fakeAsteroid(0, 0, 0, 5)]), []);
+});
+
+test('findAsteroidPairs: two overlapping asteroids → one pair', () => {
+  const asteroids = [
+    fakeAsteroid(0, 0, 0, 5),
+    fakeAsteroid(3, 0, 0, 5), // centers 3 apart, radii 5+5=10 → overlap
+  ];
+  const pairs = findAsteroidPairs(asteroids);
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].i, 0);
+  assert.equal(pairs[0].j, 1);
+});
+
+test('findAsteroidPairs: two far apart → []', () => {
+  const asteroids = [
+    fakeAsteroid(0, 0, 0, 5),
+    fakeAsteroid(100, 0, 0, 5),
+  ];
+  assert.deepEqual(findAsteroidPairs(asteroids), []);
+});
+
+test('findAsteroidPairs: three overlapping all pairs', () => {
+  // All three at origin with r=10 → all overlap each other → 3 pairs
+  const asteroids = [
+    fakeAsteroid(0, 0, 0, 10),
+    fakeAsteroid(0, 0, 0, 10),
+    fakeAsteroid(0, 0, 0, 10),
+  ];
+  const pairs = findAsteroidPairs(asteroids);
+  assert.equal(pairs.length, 3);
+  // Each pair i<j
+  for (const { i, j } of pairs) {
+    assert.ok(i < j);
+  }
+});
+
+test('findAsteroidPairs: null/undefined → []', () => {
+  assert.deepEqual(findAsteroidPairs(null), []);
+  assert.deepEqual(findAsteroidPairs(undefined), []);
+});
+
+// ---- resolveAsteroidCollision -------------------------------------------
+
+test('resolveAsteroidCollision: separates overlapping asteroids', () => {
+  const a = fakeAsteroid(0, 0, 0, 5, { x: 0, z: 0 });
+  const b = fakeAsteroid(2, 0, 0, 5, { x: 0, z: 0 }); // overlap by 8 units
+  resolveAsteroidCollision(a, b);
+  const ap = a.getPosition();
+  const bp = b.getPosition();
+  const dist = Math.hypot(bp.x - ap.x, bp.z - ap.z);
+  assert.ok(dist >= 9.99); // minDist = 10, pushed apart
+});
+
+test('resolveAsteroidCollision: equal masses push apart equally', () => {
+  const a = fakeAsteroid(0, 0, 0, 5, { x: 0, z: 0 });
+  const b = fakeAsteroid(2, 0, 0, 5, { x: 0, z: 0 });
+  resolveAsteroidCollision(a, b);
+  const ap = a.getPosition();
+  const bp = b.getPosition();
+  // Equal masses: both move equally. Center stayed at 1.
+  const centerX = (ap.x + bp.x) / 2;
+  assert.ok(Math.abs(centerX - 1) < 0.01, 'center of mass preserved');
+});
+
+test('resolveAsteroidCollision: transfers momentum (equal mass, A moving toward B)', () => {
+  const a = fakeAsteroid(0, 0, 0, 5, { x: 10, z: 0 }); // moving right
+  const b = fakeAsteroid(8, 0, 0, 5, { x: 0, z: 0 });  // stationary
+  resolveAsteroidCollision(a, b);
+  const av = a.getVelocity();
+  const bv = b.getVelocity();
+  // A lost some speed to B (both now moving right, but B got a kick)
+  assert.ok(av.x < 10, 'A lost speed');
+  assert.ok(bv.x > 0, 'B gained speed');
+});
+
+test('resolveAsteroidCollision: larger mass barely moves', () => {
+  const big = fakeAsteroid(0, 0, 0, 10, { x: 0, z: 0 }); // r=10, mass=1000
+  const small = fakeAsteroid(3, 0, 0, 1, { x: 5, z: 0 }); // r=1, mass=1
+  const bigPosBefore = { ...big.getPosition() };
+  resolveAsteroidCollision(big, small);
+  const bigPos = big.getPosition();
+  // Big asteroid barely moved
+  assert.ok(Math.abs(bigPos.x - bigPosBefore.x) < 1, 'big barely moved');
+});
+
+// ---- v0.71.0 — HUGE tier collision verification ------------------------
+//
+// User explicitly asked: "be sure to have the asteroid to asteroid
+// collision system working" with the new huge 10×-ship-size tier.
+// These tests verify (a) the pair detector finds overlaps involving
+// huge asteroids and (b) the bounce resolver handles the massive
+// mass-ratio correctly (huge barely moves, small gets the kick).
+// The collision code is size-agnostic (radius-only), so these tests
+// are essentially pinning "the existing sphere-sphere collision
+// works for arbitrary radii including the new 30u HUGE tier".
+
+test('findAsteroidPairs: HUGE-vs-TINY overlap is detected (v0.71.0 size variation)', () => {
+  // HUGE r=30 at origin + SMALL r=2 at (10, 0, 0). Centers 10 apart,
+  // sum of radii = 32, so they overlap (10 < 32). The pair detector
+  // must find this pair regardless of the size asymmetry.
+  const asteroids = [
+    fakeAsteroid(0, 0, 0, 30, { x: 0, z: 0 }), // HUGE
+    fakeAsteroid(10, 0, 0, 2, { x: 0, z: 0 }), // SMALL (overlapping the huge)
+    fakeAsteroid(200, 0, 0, 2, { x: 0, z: 0 }), // SMALL (isolated, no pair)
+  ];
+  const pairs = findAsteroidPairs(asteroids);
+  assert.equal(pairs.length, 1, 'should detect the single HUGE-SMALL overlap');
+  assert.equal(pairs[0].i, 0);
+  assert.equal(pairs[0].j, 1);
+});
+
+test('findAsteroidPairs: two HUGE asteroids overlapping detected (v0.71.0)', () => {
+  // Two HUGE asteroids (r=30 each) at (0,0,0) and (10,0,0) overlap
+  // (sum=60 > 10). Same as before but both endpoints are now huge.
+  const asteroids = [
+    fakeAsteroid(0, 0, 0, 30, { x: 0, z: 0 }),
+    fakeAsteroid(10, 0, 0, 30, { x: 0, z: 0 }),
+  ];
+  const pairs = findAsteroidPairs(asteroids);
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].i, 0);
+  assert.equal(pairs[0].j, 1);
+});
+
+test('resolveAsteroidCollision: HUGE absorbs a TINY impact (v0.71.0 mass asymmetry)', () => {
+  // HUGE r=30 (mass=27000) vs TINY r=2 (mass=8). Mass ratio 3375:1.
+  // A TINY moving toward the HUGE should bounce back at ~2x its
+  // original speed (elastic-ish bounce, restitution 0.5) while the
+  // HUGE barely moves (impulse split by mass ratio).
+  const huge = fakeAsteroid(0, 0, 0, 30, { x: 0, z: 0 });
+  const tiny = fakeAsteroid(10, 0, 0, 2, { x: 5, z: 0 }); // moving +X toward huge at origin... wait, away.
+  // Wait, if huge is at origin and tiny at (10,0,0), tiny moving +X
+  // moves AWAY from huge. Set tiny velocity = (-5, 0) for moving
+  // toward huge.
+  tiny.setVelocity(-5, 0);
+  const hugePosBefore = { ...huge.getPosition() };
+  resolveAsteroidCollision(huge, tiny);
+  // HUGE: barely moved (<0.05u — its mass dwarfs the tiny's).
+  assert.ok(
+    Math.abs(huge.getPosition().x - hugePosBefore.x) < 0.1,
+    `huge should barely move, moved ${huge.getPosition().x - hugePosBefore.x}u`,
+  );
+  // TINY: bounced back (now moving +X — away from huge — after collision).
+  assert.ok(tiny.getVelocity().x > 0, `tiny should bounce back (+X), got vx=${tiny.getVelocity().x}`);
+  // Separation: pushed apart so dist >= sum of radii (32).
+  const dist = Math.hypot(
+    tiny.getPosition().x - huge.getPosition().x,
+    tiny.getPosition().z - huge.getPosition().z,
+  );
+  assert.ok(dist >= 32 - 0.01, `huge-tiny should be separated to ≥32u, got ${dist}u`);
+});
+
+test('findShipHit: HUGE asteroid kills the ship on contact (v0.71.0)', () => {
+  // Ship r=3 (v0.42.x), HUGE r=30. Centers 20 apart, sum=33 > 20 →
+  // overlap. findShipHit must return the HUGE's index (the ship dies
+  // on contact with any size of asteroid, the size only changes the
+  // hit sphere size).
+  const ship = { position: { x: 0, y: 0, z: 0 } };
+  const asteroids = [
+    fakeAsteroid(100, 0, 0, 30), // HUGE, far
+    fakeAsteroid(20, 0, 0, 30),  // HUGE, overlapping the ship
+  ];
+  assert.equal(findShipHit({ ship, asteroids }), 1);
+});
+
+test('findShipHit: ship survives close pass to non-overlapping HUGE (v0.71.0)', () => {
+  // Ship r=3, HUGE r=30. Centers 50 apart, sum=33 → no overlap.
+  const ship = { position: { x: 0, y: 0, z: 0 } };
+  const asteroids = [
+    fakeAsteroid(50, 0, 0, 30), // HUGE 50u away from ship
+  ];
+  assert.equal(findShipHit({ ship, asteroids }), -1);
+});
+
+test('resolveAsteroidCollision: non-overlapping does nothing', () => {
+  const a = fakeAsteroid(0, 0, 0, 5, { x: 10, z: 0 });
+  const b = fakeAsteroid(30, 0, 0, 5, { x: 0, z: 0 });
+  const aVelBefore = { ...a.getVelocity() };
+  const aPosBefore = { ...a.getPosition() };
+  resolveAsteroidCollision(a, b);
+  assert.equal(a.getVelocity().x, aVelBefore.x);
+  assert.equal(a.getPosition().x, aPosBefore.x);
+});
+
+test('resolveAsteroidCollision: already separating does nothing', () => {
+  const a = fakeAsteroid(0, 0, 0, 5, { x: -5, z: 0 }); // moving left
+  const b = fakeAsteroid(2, 0, 0, 5, { x: 5, z: 0 });  // moving right (away from A)
+  const avBefore = a.getVelocity().x;
+  const bvBefore = b.getVelocity().x;
+  resolveAsteroidCollision(a, b);
+  // Relative velocity along normal (B→A direction) is positive → already separating
+  assert.equal(a.getVelocity().x, avBefore);
+  assert.equal(b.getVelocity().x, bvBefore);
+});
+
+// ---- findAsteroidPowerupIndex -------------------------------------------
+
+test('findAsteroidPowerupIndex: no asteroids → -1', () => {
+  const pu = fakePowerup(0, 0, 0, 1.5);
+  assert.equal(findAsteroidPowerupIndex({ asteroids: [], powerup: pu }), -1);
+});
+
+test('findAsteroidPowerupIndex: no powerup → -1', () => {
+  const asteroids = [fakeAsteroid(0, 0, 0, 5)];
+  assert.equal(findAsteroidPowerupIndex({ asteroids }), -1);
+});
+
+test('findAsteroidPowerupIndex: overlapping → returns index', () => {
+  const asteroids = [
+    fakeAsteroid(100, 0, 0, 5),
+    fakeAsteroid(0, 0, 0, 5), // this one overlaps the powerup at (2,0,0)
+  ];
+  const pu = fakePowerup(2, 0, 0, 1.5); // asteroid r=5, powerup r=1.5, sum=6.5
+  // centers 2 apart, 2 < 6.5 → overlap
+  assert.equal(findAsteroidPowerupIndex({ asteroids, powerup: pu }), 1);
+});
+
+test('findAsteroidPowerupIndex: not overlapping → -1', () => {
+  const asteroids = [fakeAsteroid(0, 0, 0, 5)];
+  const pu = fakePowerup(100, 0, 0, 1.5);
+  assert.equal(findAsteroidPowerupIndex({ asteroids, powerup: pu }), -1);
+});
+
+// ---- resolveAsteroidPowerupCollision -------------------------------------
+
+test('resolveAsteroidPowerupCollision: pushes powerup out and kicks away', () => {
+  const ast = fakeAsteroid(0, 0, 0, 5);
+  const pu = fakePowerup(2, 0, 0, 1.5); // overlapping (2 < 6.5)
+  const originalPuX = pu.getPosition().x;
+  resolveAsteroidPowerupCollision(ast, pu);
+  // Powerup pushed out (further from origin)
+  assert.ok(pu.getPosition().x > originalPuX, 'powerup pushed away');
+  // Distance between centers >= minDist
+  const dist = Math.hypot(
+    pu.getPosition().x - ast.getPosition().x,
+    pu.getPosition().z - ast.getPosition().z,
+  );
+  assert.ok(dist >= 6.5 - 0.01, 'powerup outside asteroid radius');
+  // Push velocity set (positive X = away from asteroid)
+  assert.ok(pu.getPushVx() > 0, 'kick velocity in X');
+});
+
+test('resolveAsteroidPowerupCollision: not overlapping does nothing', () => {
+  const ast = fakeAsteroid(0, 0, 0, 5);
+  const pu = fakePowerup(100, 0, 0, 1.5);
+  const puX = pu.getPosition().x;
+  resolveAsteroidPowerupCollision(ast, pu);
+  assert.equal(pu.getPosition().x, puX);
+  assert.equal(pu.getPushVx(), 0);
+});
+
+test('resolveAsteroidPowerupCollision: null/undefined is no-op', () => {
+  // Should not throw
+  resolveAsteroidPowerupCollision(null, null);
+  resolveAsteroidPowerupCollision(undefined, undefined);
+  resolveAsteroidPowerupCollision(fakeAsteroid(0, 0, 0, 5), null);
+  resolveAsteroidPowerupCollision(null, fakePowerup(0, 0, 0, 1.5));
 });
 
 // ---- Constants sanity ---------------------------------------------------
@@ -284,4 +617,303 @@ test('scoreForSize: returns 0 for unknown sizes', () => {
 test('BULLET_RADIUS and SHIP_RADIUS are positive scalars', () => {
   assert.ok(typeof BULLET_RADIUS === 'number' && BULLET_RADIUS > 0);
   assert.ok(typeof SHIP_RADIUS === 'number' && SHIP_RADIUS > 0);
+});
+
+test('SHIP_RADIUS is 3.0 (v0.42.x matches 3x-scaled visual mesh)', () => {
+  assert.equal(SHIP_RADIUS, 3.0);
+});
+
+// ---- Spatial-hash parity (v0.64.x broad-phase) ------------------------
+
+test('hash path: findBulletHits with spatialHash matches O(N²) result', () => {
+  // Build a 30-asteroid field with realistic positions + radii. For
+  // each find* function below, we run BOTH paths (with and without
+  // the spatialHash arg) and assert identical output. The narrow-phase
+  // contract must not change just because we have a different
+  // candidate-selection strategy.
+  const entities = [];
+  for (let i = 0; i < 30; i++) {
+    entities.push({
+      position: { x: (i % 6) * 30, y: 0, z: Math.floor(i / 6) * 30 },
+      radius: 2,
+      spec: { size: 0, radius: 2 },
+      getPosition() { return this.position; },
+      getRadius() { return this.radius; },
+    });
+  }
+
+  // Inject a small cluster that crosses cell boundaries so the hash
+  // has to span multiple cells for the same query point. Plain-object
+  // positions need direct field assignment (no `.set` method on a
+  // raw `{x,y,z}` object).
+  entities[0].position.x = -1;
+  entities[0].position.y = 0;
+  entities[0].position.z = -1;
+  entities[1].position.x = 15;
+  entities[1].position.y = 0;
+  entities[1].position.z = 15; // crosses cell boundary at x=16
+  entities[2].position.x = 16;
+  entities[2].position.y = 0;
+  entities[2].position.z = 0;  // right at the boundary
+
+  const bullets = [
+    { position: { x: 0, y: 0, z: 0 }, index: 0 },             // inside 0
+    { position: { x: -1000, y: 0, z: -1000 }, index: 1 },     // far away
+    { position: { x: 30, y: 0, z: 30 }, index: 2 },            // hits an asteroid at 30,30
+    { position: { x: 17, y: 0, z: 17 }, index: 3 },           // near 1 + 2
+  ];
+
+  const BULLET_RADIUS = 2; // wide enough to bite the boundaries
+  const noHash = findBulletHits({ asteroids: entities, bullets: { forEachActive(fn) { for (let i = 0; i < bullets.length; i++) fn(bullets[i], i); } }, bulletRadius: BULLET_RADIUS });
+
+  const hash = createSpatialHash({ cellSize: 16 });
+  hash.rebuild(entities);
+  const withHash = findBulletHits({
+    asteroids: entities,
+    bullets: { forEachActive(fn) { for (let i = 0; i < bullets.length; i++) fn(bullets[i], i); } },
+    bulletRadius: BULLET_RADIUS,
+    spatialHash: hash,
+  });
+
+  // Sort both for stable comparison (set semantics: at most one hit per bullet).
+  const sortFn = (a, b) => a.bulletIndex - b.bulletIndex || a.asteroidIndex - b.asteroidIndex;
+  assert.deepEqual([...noHash].sort(sortFn), [...withHash].sort(sortFn));
+});
+
+test('hash path: findAsteroidPairs with spatialHash matches O(N²) result', () => {
+  // Compact cluster of overlapping asteroids — the hash path must
+  // produce the same `i<j` pair list as the legacy sweep.
+  const entities = [];
+  for (let i = 0; i < 10; i++) {
+    entities.push({
+      position: { x: i * 3, y: 0, z: 0 },
+      radius: 5, // r=5 + r=5 = 10 — every neighbor within 6u overlaps
+      getPosition() { return this.position; },
+      getRadius() { return this.radius; },
+    });
+  }
+  // Add two far-away entities to force long-range miss pairs.
+  entities.push({
+    position: { x: 1000, y: 0, z: 0 },
+    radius: 5,
+    getPosition() { return this.position; },
+    getRadius() { return this.radius; },
+  });
+  entities.push({
+    position: { x: -1000, y: 0, z: 0 },
+    radius: 5,
+    getPosition() { return this.position; },
+    getRadius() { return this.radius; },
+  });
+
+  const noHash = findAsteroidPairs(entities);
+  const hash = createSpatialHash({ cellSize: 16 });
+  hash.rebuild(entities);
+  const withHash = findAsteroidPairs(entities, { spatialHash: hash });
+
+  const sortFn = (a, b) => a.i - b.i || a.j - b.j;
+  assert.deepEqual([...noHash].sort(sortFn), [...withHash].sort(sortFn));
+});
+
+test('hash path: findShipHit with spatialHash matches O(N²) result', () => {
+  const ship = { position: { x: 50, y: 0, z: 25 } };
+  const asteroids = [];
+  for (let i = 0; i < 20; i++) {
+    asteroids.push({
+      position: { x: i * 7, y: 0, z: 0 },
+      radius: 2,
+      getPosition() { return this.position; },
+      getRadius() { return this.radius; },
+    });
+  }
+  // Place an asteroid inside the ship's collision sphere.
+  asteroids.push({
+    position: { x: 52, y: 0, z: 24 },
+    radius: 2,
+    getPosition() { return this.position; },
+    getRadius() { return this.radius; },
+  });
+
+  assert.equal(findShipHit({ ship, asteroids }), findShipHit({ ship, asteroids: asteroids.slice() }));
+  const hash = createSpatialHash({ cellSize: 16 });
+  hash.rebuild(asteroids);
+  assert.equal(findShipHit({ ship, asteroids }), findShipHit({ ship, asteroids, spatialHash: hash }));
+});
+
+test('hash path: findBulletShipHits with spatialHash matches O(N²) result', () => {
+  const ships = [
+    { position: { x: 10, y: 0, z: 0 } },
+    { position: { x: 100, y: 0, z: 0 } },
+    { position: { x: -50, y: 0, z: -50 } },
+  ];
+  const bullets = [
+    { position: { x: 10, y: 0, z: 0 } },     // hits ship 0
+    { position: { x: 100, y: 0, z: 0 } },   // hits ship 1
+    { position: { x: -50, y: 0, z: -50 } }, // hits ship 2
+    { position: { x: 1000, y: 0, z: 1000 } }, // misses all
+  ];
+  const bulletsObj = {
+    forEachActive(fn) { for (let i = 0; i < bullets.length; i++) fn(bullets[i], i); },
+  };
+
+  const noHash = findBulletShipHits({ bullets: bulletsObj, ships, bulletRadius: 0.15, shipRadius: 3.0 });
+  const hash = createSpatialHash({ cellSize: 8 });
+  hash.rebuild(ships);
+  const withHash = findBulletShipHits({
+    bullets: bulletsObj,
+    ships,
+    bulletRadius: 0.15,
+    shipRadius: 3.0,
+    spatialHash: hash,
+  });
+  const sortFn = (a, b) => a.bulletIndex - b.bulletIndex || a.shipIndex - b.shipIndex;
+  assert.deepEqual([...noHash].sort(sortFn), [...withHash].sort(sortFn));
+});
+
+test('hash path: findAsteroidPowerupIndex with spatialHash matches O(N²) result', () => {
+  const pu = { getPosition: () => ({ x: 0, y: 0, z: 0 }), getRadius: () => 1.5 };
+  const asteroids = [];
+  for (let i = 0; i < 20; i++) {
+    asteroids.push({
+      position: { x: i * 5, y: 0, z: 0 },
+      radius: 2,
+      getPosition() { return this.position; },
+      getRadius() { return this.radius; },
+    });
+  }
+  // Inject an asteroid that overlaps the powerup (at origin).
+  asteroids[3] = {
+    position: { x: 0.5, y: 0, z: 0.5 },
+    radius: 2,
+    getPosition() { return this.position; },
+    getRadius() { return this.radius; },
+  };
+  const noHash = findAsteroidPowerupIndex({ asteroids, powerup: pu });
+  const hash = createSpatialHash({ cellSize: 16 });
+  hash.rebuild(asteroids);
+  const withHash = findAsteroidPowerupIndex({ asteroids, powerup: pu, spatialHash: hash });
+  assert.equal(noHash, withHash);
+});
+
+test('hash path: null/missing spatialHash falls back to O(N²) (back-compat)', () => {
+  // Regression: passing `null`, `undefined`, or omitting the param all
+  // must invoke the existing O(N²) sweep unchanged. This is the
+  // back-compat contract for every pre-v0.64.x call site.
+  const asteroids = [{
+    position: { x: 0, y: 0, z: 0 },
+    radius: 2,
+    getPosition() { return this.position; },
+    getRadius() { return this.radius; },
+  }];
+  const bulletPool = {
+    forEachActive(fn) { fn({ position: { x: 0, y: 0, z: 0 } }, 0); },
+  };
+  // Omit param
+  assert.equal(findBulletHits({ asteroids, bullets: bulletPool }).length, 1);
+  // Explicit undefined
+  assert.equal(findBulletHits({ asteroids, bullets: bulletPool, spatialHash: undefined }).length, 1);
+  // Explicit null
+  assert.equal(findBulletHits({ asteroids, bullets: bulletPool, spatialHash: null }).length, 1);
+  // Empty hash (no candidates)
+  const emptyHash = createSpatialHash({ cellSize: 16 });
+  assert.equal(findBulletHits({ asteroids, bullets: bulletPool, spatialHash: emptyHash }).length, 0);
+});
+
+// ---- findBulletShipHits (v0.60.0 — pirate combat loop) -----------------
+
+/**
+ * Build a fake ship with the live-property duck typing the AI ships
+ * use (`.position` is an object ref, not a `getPosition()` method).
+ */
+function fakeShip(x, z) {
+  return { position: { x, y: 0, z } };
+}
+
+test('findBulletShipHits: empty lists → no hits', () => {
+  assert.deepEqual(findBulletShipHits({ bullets: fakeBulletPool([]), ships: [] }), []);
+});
+
+test('findBulletShipHits: bullet inside ship → hit', () => {
+  const bullets = fakeBulletPool([fakeBullet(0, 0, 0)]);
+  const ships = [fakeShip(0, 0)];
+  const hits = findBulletShipHits({ bullets, ships });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].bulletIndex, 0);
+  assert.equal(hits[0].shipIndex, 0);
+});
+
+test('findBulletShipHits: bullet far from ship → no hit', () => {
+  const bullets = fakeBulletPool([fakeBullet(0, 0, 0)]);
+  const ships = [fakeShip(100, 0)];
+  assert.deepEqual(findBulletShipHits({ bullets, ships }), []);
+});
+
+test('findBulletShipHits: one bullet hits first matching ship only', () => {
+  // Bullet at origin; ship 0 at (1,0,0) (hit) + ship 1 at (-1,0,0) (also hit).
+  // Bullet should report ship 0 (first in iteration order).
+  const bullets = fakeBulletPool([fakeBullet(0, 0, 0)]);
+  const ships = [fakeShip(1, 0), fakeShip(-1, 0)];
+  const hits = findBulletShipHits({ bullets, ships });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].shipIndex, 0);
+});
+
+test('findBulletShipHits: multiple bullets → multiple ship hits', () => {
+  const bullets = fakeBulletPool([
+    fakeBullet(0, 0, 0),
+    fakeBullet(50, 0, 0),
+  ]);
+  const ships = [fakeShip(0, 0), fakeShip(50, 0)];
+  const hits = findBulletShipHits({ bullets, ships });
+  assert.equal(hits.length, 2);
+});
+
+test('findBulletShipHits: ships with null position are skipped (dead pirates)', () => {
+  const bullets = fakeBulletPool([fakeBullet(0, 0, 0)]);
+  const ships = [
+    { position: null }, // dead pirate (disposed but still in array)
+    fakeShip(0, 0),     // live player
+  ];
+  const hits = findBulletShipHits({ bullets, ships });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].shipIndex, 1);
+});
+
+test('findBulletShipHits: ships with non-finite position are skipped', () => {
+  const bullets = fakeBulletPool([fakeBullet(0, 0, 0)]);
+  const ships = [
+    { position: { x: NaN, z: 0 } },
+    fakeShip(0, 0),
+  ];
+  const hits = findBulletShipHits({ bullets, ships });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].shipIndex, 1);
+});
+
+test('findBulletShipHits: missing args → empty list, no throw', () => {
+  assert.deepEqual(findBulletShipHits({}), []);
+  assert.deepEqual(findBulletShipHits({ bullets: fakeBulletPool([]) }), []);
+  assert.deepEqual(findBulletShipHits({ ships: [] }), []);
+});
+
+test('findBulletShipHits: swept-sphere catches fast bullet passing through ship', () => {
+  // Bullet at (-2,0,0) with velocity (-500,0,0); ship at origin.
+  // Default SHIP_RADIUS=3.0 (v0.42.x bumped from 1.4 to match the 3x
+  // scaled visual mesh), so the discrete check at (-2,0,0) would
+  // HIT (sum=3.15 > 2). Use shipRadius=0.5 override to isolate the
+  // swept-sphere logic from the radius-based discrete match.
+  // Without dt: bullet at (-2,0,0), ship r=0.5, sum=0.65 → miss.
+  const ships = [fakeShip(0, 0)];
+  const b = {
+    position: { x: -2, y: 0, z: 0 },
+    velocity: { x: -500, y: 0, z: 0 },
+  };
+  const bullets = { forEachActive(fn) { fn(b, 0); } };
+  assert.deepEqual(findBulletShipHits({ bullets, ships, shipRadius: 0.5 }), []);
+  // With dt=0.02: previous pos = (8,0,0). Path passes through origin.
+  // Distance from origin to segment = 0 < 0.5 + 0.15 = 0.65 → hit.
+  const hits = findBulletShipHits({ bullets, ships, shipRadius: 0.5, dt: 0.02 });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].bulletIndex, 0);
+  assert.equal(hits[0].shipIndex, 0);
 });

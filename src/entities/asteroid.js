@@ -1,476 +1,800 @@
 import * as THREE from 'three';
-import { NoisyIcosphere } from '../geometry/noisy-icosphere.js';
 import { Capsule } from '../geometry/capsule.js';
 import { mulberry32 } from '../world/rng.js';
+// v0.69.6 — shapeToIndex is the inverse of SHAPE_TYPES; the data-
+// model layer owns the shape taxonomy so the entity factory stays
+// decoupled from the named-string IDs.
+import { shapeToIndex } from '../world/chunks.js';
+
+// ---------------------------------------------------------------------------
+// Deterministic 3D value noise + fbm (fractal Brownian motion). Used to
+// displace the geometry vertices into asteroid-shaped silhouettes.
+// ---------------------------------------------------------------------------
+function hash3D(x, y, z) {
+  const s = Math.sin(x * 12.9898 + y * 78.233 + z * 37.719) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+function smoothstep(t) {
+  return t * t * (3 - 2 * t);
+}
+
+function noise3D(x, y, z) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  const iz = Math.floor(z);
+  const fx = x - ix;
+  const fy = y - iy;
+  const fz = z - iz;
+
+  const ux = smoothstep(fx);
+  const uy = smoothstep(fy);
+  const uz = smoothstep(fz);
+
+  const c000 = hash3D(ix, iy, iz);
+  const c100 = hash3D(ix + 1, iy, iz);
+  const c010 = hash3D(ix, iy + 1, iz);
+  const c110 = hash3D(ix + 1, iy + 1, iz);
+  const c001 = hash3D(ix, iy, iz + 1);
+  const c101 = hash3D(ix + 1, iy, iz + 1);
+  const c011 = hash3D(ix, iy + 1, iz + 1);
+  const c111 = hash3D(ix + 1, iy + 1, iz + 1);
+
+  const x00 = c000 + (c100 - c000) * ux;
+  const x10 = c010 + (c110 - c010) * ux;
+  const x01 = c001 + (c101 - c001) * ux;
+  const x11 = c011 + (c111 - c011) * ux;
+
+  const y0 = x00 + (x10 - x00) * uy;
+  const y1 = x01 + (x11 - x01) * uz;
+
+  return y0 + (y1 - y0) * uz;
+}
+
+function fbm3D(x, y, z, octaves = 4) {
+  let value = 0;
+  let amplitude = 1;
+  let frequency = 1;
+  let maxValue = 0;
+  for (let i = 0; i < octaves; i++) {
+    value += amplitude * noise3D(x * frequency, y * frequency, z * frequency);
+    maxValue += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2;
+  }
+  return value / maxValue;
+}
+
+// ---------------------------------------------------------------------------
+// v0.71.0 -- thermal-weathering crevice layer. Models micro-erosion:
+// narrow negative-displacement valleys carved into the asteroid surface
+// at a decorrelated frequency. Position-based-hash (zero rng consumed):
+// per-asteroid (ox, oy, oz) is the only varying input, so the erosion
+// pattern for any (seed, ox, oy, oz) asteroid is fully deterministic.
+//
+// Tunables (SSOT-local; exposed for unit testing):
+//   EROSION_SCALE_RATIO = 7 -- decorrelate from BASE (×1) and MICRO (×4).
+//     7 is prime so its multiples don't align with the powers-of-2 used
+//     by the base/micro fbm frequencies -- guarantees the erosion noise
+//     pattern is independent of the shape-defining frequencies.
+//   EROSION_AMOUNT_RATIO = 0.15 -- crevice amplitude as a fraction of
+//     noiseAmount. 0.15 is small enough that the silhouette variation
+//     from BASE stays the dominant visual signal (the carve "deepens"
+//     existing features rather than reshaping the silhouette), and
+//     large enough that a ~15%-of-radius valley is visible.
+//   EROSION_EXPONENT = 2.0 -- falloff exponent for creviceDepth().
+//     At exponent 2.0, only ~half the surface (where n < 0.5) gets
+//     carved, and the carving is biased toward sharp narrow channels
+//     rather than wide shallow dips. Increase to 3+ for narrower/more
+//     sparse crevices; decrease to 1 for wider/more uniform carving.
+// ---------------------------------------------------------------------------
+const EROSION_SCALE_RATIO = 7;
+const EROSION_AMOUNT_RATIO = 0.15;
+const EROSION_EXPONENT = 2.0;
 
 /**
- * Returns the body type for an asteroid spec: 'icosphere' (seed
- * bit 0 = 0) or 'capsule' (seed bit 0 = 1). Used by the UV
- * editor's per-type template system (one save covers all
- * asteroids of the same body type). Exported so the UV editor
- * can name the saved JSON file by type and so the
- * `createAsteroidFromSpec` factory can look up the right
- * template at creation time.
+ * Pure helper: returns erosion depth ∈ [0, 1] (pre-amount scaling).
+ *   - n <  0.5  -> Math.pow(0.5 - n, exponent)  (valley depth)
+ *   - n >= 0.5  -> 0                                (no carving)
  *
- * @param {import('../world/types.js').AsteroidSpec} spec
- * @returns {'icosphere' | 'capsule'}
+ * Exponent=2.0 -> range [0, 0.25]. Exponent=3.0 -> range [0, 0.125]
+ * (narrower, more sparse). Exponent=1.0 -> range [0, 0.5] (uniform).
+ *
+ * Always non-negative, so the carve contributes only a negative-
+ * displacement subtraction at the call site. Exposed for direct
+ * unit testing (range + amplitude pinning).
+ *
+ * @param {number} n           fbm noise value, typically in [0, 1].
+ * @param {number} [exponent]  falloff exponent (default EROSION_EXPONENT=2.0).
+ * @returns {number}           erosion depth ∈ [0, 0.5^exponent]
  */
-export function getAsteroidType(spec) {
-  return (spec.seed & 1) === 1 ? 'capsule' : 'icosphere';
+function creviceDepth(n, exponent = EROSION_EXPONENT) {
+  if (!Number.isFinite(n) || n >= 0.5) return 0;
+  if (n <= 0) return Math.pow(0.5, exponent);
+  return Math.pow(0.5 - n, exponent);
+}
+
+// ---------------------------------------------------------------------------
+// v0.71.5 -- Worley-style impact craters (research-backed: Bennu,
+// Ryugu, Eros, Lutetia are covered in bowl-shaped craters with raised
+// rims — real geometry, not just texture). Deterministic placement:
+// crater centers are sampled on the unit sphere from a seed derived
+// ONLY from (ox, oy, oz), so every (seed, ox, oy, oz) asteroid gets
+// the same crater field at every LOD level (the placement ignores
+// `detail`).
+//
+// Tunables (SSOT-local; exposed for unit testing):
+//   CRATER_SCALE = 0.36 -- crater depth as a fraction of the vertex
+//     radius (v0.71.6: 0.28 → 0.36). Bowl depth range [0.7..1.6] ×
+//     CRATER_SCALE ≈ 0.25..0.58 of the local radius — deep enough to
+//     read as real impact bowls (Bennu's craters are deep, not flat
+//     stains). Rim height [0.2..0.55] × CRATER_SCALE is a visible
+//     raised lip outside the bowl edge.
+//   Crater angular radii 0.15..0.50 rad — a medium asteroid (r=4)
+//     gets craters 0.6..2.0u across; a HUGE (r=30) gets 4.5..15u
+//     craters, matching the "really huge" scale.
+// ---------------------------------------------------------------------------
+const CRATER_SCALE = 0.36;
+
+/**
+ * Place `count` crater centers deterministically on the unit sphere.
+ * Seed = hash of (ox, oy, oz) only (no `detail`, no `seed`), so the
+ * same asteroid geometry gets the same craters at every LOD level.
+ * Sampling is the same uniform-on-sphere formula as
+ * `randomUnitVec3` in the world layer.
+ *
+ * @param {number} ox  per-instance noise offset X
+ * @param {number} oy  per-instance noise offset Y
+ * @param {number} oz  per-instance noise offset Z
+ * @param {number} count  number of craters to place
+ * @returns {Array<{x:number,y:number,z:number,angularRadius:number,depth:number,rim:number}>}
+ */
+function placeCraterCenters(ox, oy, oz, count) {
+  const rng = mulberry32(
+    ((Math.floor(ox) * 73856093) ^ (Math.floor(oy) * 19349663) ^ (Math.floor(oz) * 83492791)) >>> 0,
+  );
+  const centers = [];
+  for (let i = 0; i < count; i++) {
+    const z = 1 - 2 * rng();
+    const phi = rng() * Math.PI * 2;
+    const r = Math.sqrt(Math.max(0, 1 - z * z));
+    centers.push({
+      x: r * Math.cos(phi),
+      y: r * Math.sin(phi),
+      z,
+      angularRadius: 0.15 + rng() * 0.35, // radians
+      depth: 0.7 + rng() * 0.9,            // bowl depth (× CRATER_SCALE) — v0.71.6 deeper bowls
+      rim: 0.2 + rng() * 0.35,             // rim height (× CRATER_SCALE) — v0.71.6 stronger rims
+    });
+  }
+  return centers;
 }
 
 /**
- * Asteroid entity — turns a data-model `AsteroidSpec` (from src/world/chunks.js)
- * into a live Three.js mesh with spin, ambient drift, and a split() method
- * for the collision layer to call.
+ * Crater displacement contribution at a vertex direction.
+ * Returns signed "crater units":
+ *   - t < 1        → bowl depression −depth·(1−t)²  (deepest at center)
+ *   - t ≈ 1..1.4  → gaussian raised rim (peak just outside the bowl edge)
+ *   - t ≥ 1.6     → 0 (no influence)
+ * Caller scales by CRATER_SCALE × vertex radius.
  *
- * Visual:
- *   - IcosahedronGeometry, detail 0 (12 vertices, 20 faces)
- *   - Deterministic per-vertex jitter driven by the spec's `seed` field
- *   - MeshStandardMaterial with `flatShading: true` for the faceted look
- *
- * Lifecycle (per frame):
- *   - update(dt)        advance spin + ambient drift
- *   - split()           on hit; returns 0–2 child specs (small asteroids return [])
- *   - dispose()         when the chunk unloads; releases geometry + material
- *
- * Determinism: the visual jitter and split() children both key off
- * `spec.seed`, so given the same spec you get the same mesh and same
- * children. This matters when the world layer re-creates asteroids
- * for re-streamed chunks.
+ * @param {{x:number,y:number,z:number}} n  unit vertex direction
+ * @param {{x:number,y:number,z:number,angularRadius:number,depth:number,rim:number}} c  crater center
+ * @returns {number}
  */
-const SPLIT_RADIUS_RATIO = 0.6; // child_radius = parent_radius * this
-const SPLIT_KICK = 8; // u/s, outward velocity on split
-const PLAY_PLANE_Y = 0;
+function craterContribution(n, c) {
+  const cosAngle = Math.max(-1, Math.min(1, n.x * c.x + n.y * c.y + n.z * c.z));
+  const angle = Math.acos(cosAngle);
+  const t = angle / c.angularRadius;
+  if (t >= 1.6) return 0;
+  const bowl = t < 1 ? -c.depth * Math.pow(1 - t, 2) : 0;
+  const rimDist = (t - 1) / 0.25;
+  const rim = c.rim * Math.exp(-rimDist * rimDist);
+  return bowl + rim;
+}
+
+// ---------------------------------------------------------------------------
+// v0.71.6 -- Boulder layer (research-backed: Bennu's surface is
+// covered in hundreds of rocks — OSIRIS-REx counted >200 boulders
+// >10 m across on a 500 m body; Ryugu and Itokawa show the same
+// boulder-strewn regolith). This is the single most distinguishing
+// surface feature of a real asteroid, and the v0.71.5 pass had no
+// way to produce it — only craters (negative bowls) and noise bumps
+// (which read as smooth hills, not discrete rocks).
+//
+// Boulders are positive mounds with a STEEP falloff near the edge
+// (rock profile: rounded top, sharp base where the rock meets the
+// regolith). Placement is deterministic from (ox, oy, oz) only (same
+// seed contract as craters), so every LOD level shows the same rocks.
+//
+// Tunables (SSOT-local; exposed for unit testing):
+//   BOULDER_SCALE = 0.22 -- rock height as a fraction of the local
+//     vertex radius. A r=4 asteroid gets boulders 0.6..1.7u tall —
+//     clearly protruding rocks, matching the 10-30%-of-radius
+//     boulders photographed on Bennu.
+//   Angular radii 0.08..0.28 rad -- rocks smaller than craters so
+//     the surface reads as "big bowl craters + small pebbles" (the
+//     real Bennu hierarchy).
+//   sharpness 1.5..4.0 -- (1 - t²)^sharpness falloff. >2 gives the
+//     rock a steep base + flat-ish top; <1.5 would read as smooth
+//     hills.
+// ---------------------------------------------------------------------------
+const BOULDER_SCALE = 0.22;
 
 /**
- * Bump strength on the asteroid material. 0.05 is a conservative value
- * for a 1024×1024 height map at typical game-scale asteroid radii;
- * the visual effect is subtle relief without the silhouette getting
- * noisy. Tunable per-material if a future pass wants stronger relief.
+ * Place `count` boulder centers deterministically on the unit sphere.
+ * Seed = hash of (ox, oy, oz) only, using a DIFFERENT prime mix than
+ * `placeCraterCenters` so boulders and craters don't share placement
+ * (real impact fields are decorrelated from the boulder population).
  *
- * Declared BEFORE the SHARED_MATERIAL_PARAMS constant that uses it
- * (the const is evaluated top-to-bottom; the previous ordering
- * tripped a TDZ ReferenceError at module load time).
+ * @param {number} ox  per-instance noise offset X
+ * @param {number} oy  per-instance noise offset Y
+ * @param {number} oz  per-instance noise offset Z
+ * @param {number} count  number of boulders to place
+ * @returns {Array<{x:number,y:number,z:number,angularRadius:number,height:number,sharpness:number}>}
  */
-const BUMP_SCALE = 0.05;
+function placeBoulderCenters(ox, oy, oz, count) {
+  const rng = mulberry32(
+    ((Math.floor(ox) * 2654435761) ^ (Math.floor(oy) * 1597334677) ^ (Math.floor(oz) * 805459861)) >>> 0,
+  );
+  const centers = [];
+  for (let i = 0; i < count; i++) {
+    const z = 1 - 2 * rng();
+    const phi = rng() * Math.PI * 2;
+    const r = Math.sqrt(Math.max(0, 1 - z * z));
+    centers.push({
+      x: r * Math.cos(phi),
+      y: r * Math.sin(phi),
+      z,
+      angularRadius: 0.08 + rng() * 0.2, // radians — smaller than craters
+      height: 0.6 + rng() * 1.0,          // × BOULDER_SCALE
+      sharpness: 1.5 + rng() * 2.5,       // rock-profile falloff exponent
+    });
+  }
+  return centers;
+}
 
 /**
- * Shared `MeshStandardMaterial` parameters for BOTH asteroid body
- * types. The icosphere and capsule use the SAME material
- * parameters (same 4 PBR maps, same metalness/roughness/etc.) so
- * they look consistent across the field — the only difference
- * is the geometry shape itself.
+ * Boulder displacement contribution at a vertex direction.
+ * Returns a POSITIVE-only mound (0 outside the rock's angular
+ * radius):
+ *   - t < 1 → height · (1 − t²)^sharpness  (rounded top, steep base)
+ *   - t ≥ 1 → 0
+ * Caller scales by BOULDER_SCALE × vertex radius.
  *
- * Note: the PBR texture maps are NOT listed here. The textures
- * load lazily (the underlying `THREE.TextureLoader` needs a
- * browser `Image` global, so they're not available at module-init
- * time) and are assigned in `createAsteroidMaterial`. Keeping
- * them out of this frozen object avoids the previous foot-gun
- * where `map: null` was spread first and the explicit assignment
- * had to override it — any reorder or refactor that put the
- * explicit assignment BEFORE the spread would silently produce
- * a null-map (black) material.
+ * @param {{x:number,y:number,z:number}} n  unit vertex direction
+ * @param {{x:number,y:number,z:number,angularRadius:number,height:number,sharpness:number}} b  boulder
+ * @returns {number}  mound height ∈ [0, height]
  */
-const SHARED_MATERIAL_PARAMS = Object.freeze({
-  color: 0xffffff,
-  metalness: 0.1,
-  roughness: 0.9,
-  bumpScale: BUMP_SCALE,
-  flatShading: true,
-});
+function boulderContribution(n, b) {
+  const cosAngle = Math.max(-1, Math.min(1, n.x * b.x + n.y * b.y + n.z * b.z));
+  const angle = Math.acos(cosAngle);
+  const t = angle / b.angularRadius;
+  if (t >= 1) return 0;
+  return b.height * Math.pow(1 - t * t, b.sharpness);
+}
 
-/**
- * Build the shared PBR material for an asteroid body. Lazily
- * initializes the 4 shared PBR textures (loaded once at module
- * scope and shared across every asteroid, so the GPU reuses
- * the same texture for hundreds of meshes).
- *
- * @returns {THREE.MeshStandardMaterial}
- */
-function createAsteroidMaterial() {
+// ---------------------------------------------------------------------------
+// Geometry noise displacement. Displaces each vertex along its surface
+// normal by an fbm (or crater/craggy variant) value.
+// ---------------------------------------------------------------------------
+function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType = 'fbm', craterCount = 0, boulderCount = 0) {
+  const positions = geom.attributes.position;
+  const normals = geom.attributes.normal;
+  if (!positions || !normals) return;
+
+  const posArray = positions.array;
+  const normArray = normals.array;
+
+  // v0.71.5 — Worley-style impact craters. Precompute the deterministic
+  // crater field once (same centers for every LOD level — placement
+  // derives from ox/oy/oz only). Each vertex then adds its crater
+  // contribution scaled by CRATER_SCALE × local radius, so big
+  // asteroids get proportionally big craters.
+  const craters = craterCount > 0 ? placeCraterCenters(ox, oy, oz, craterCount) : [];
+
+  // v0.71.6 — Worley-style boulder field (Bennu/Ryugu signature
+  // surface feature). Same deterministic contract as craters: positive
+  // mounds computed once, scaled by BOULDER_SCALE × local radius.
+  const boulders = boulderCount > 0 ? placeBoulderCenters(ox, oy, oz, boulderCount) : [];
+
+  // v0.70.0 — multi-layer frequency displacement (modern game technique
+  // for realistic rocky surfaces; classical id Tech / Source engine
+  // approach). The BASE layer is the existing 4-octave fbm at the
+  // supplied noiseScale; the MICRO layer is a 2-octave fbm at 4× scale
+  // (high-frequency sub-detail that reads as crater rim roughness,
+  // grain texture, and micro-occlusion under the directional light).
+  // The micro layer is composited at 0.12 × amount so it stays visually
+  // subordinate — the silhouette variation from the base layer still
+  // dominates.
+  //
+  // Both noise calls operate on the existing position-based hash (no
+  // external rng consumption), so the per-asteroid deterministic
+  // invariant on (seed, ox, oy, oz) is preserved: same inputs →
+  // same shape, just with the new high-frequency component now layered
+  // on top.
+
+  for (let i = 0; i < positions.count; i++) {
+    const x = posArray[i * 3 + 0];
+    const y = posArray[i * 3 + 1];
+    const z = posArray[i * 3 + 2];
+
+    const nx = normArray[i * 3 + 0];
+    const ny = normArray[i * 3 + 1];
+    const nz = normArray[i * 3 + 2];
+
+    const nBase = fbm3D(
+      (x + ox) * noiseScale,
+      (y + oy) * noiseScale,
+      (z + oz) * noiseScale,
+      4,
+    );
+    const nMicro = fbm3D(
+      (x + ox) * noiseScale * 4.0,
+      (y + oy) * noiseScale * 4.0,
+      (z + oz) * noiseScale * 4.0,
+      2,
+    );
+
+    // v0.71.0 — thermal-weathering EROSION layer (third layer). A
+    // fresh fbm3D call at EROSION_SCALE_RATIO=7 (prime, decorrelated
+    // from BASE=1 and MICRO=4) drives a NEGATIVE-ONLY carve via
+    // creviceDepth(). The carve is always subtracted, never added,
+    // so the BASE silhouette variation stays dominant — only the
+    // surface texture gets deeper narrow channels carved into it.
+    // 2 octaves matches MICRO layer cost; position-based-hash (zero
+    // rng consumption) → per-asteroid deterministic on
+    // (seed, ox, oy, oz).
+    const nErosion = fbm3D(
+      (x + ox) * noiseScale * EROSION_SCALE_RATIO,
+      (y + oy) * noiseScale * EROSION_SCALE_RATIO,
+      (z + oz) * noiseScale * EROSION_SCALE_RATIO,
+      2,
+    );
+    const erosionCarve = creviceDepth(nErosion) * EROSION_AMOUNT_RATIO * noiseAmount;
+
+    // v0.71.5 — crater displacement at this vertex (world units).
+    // Direction = unit vertex direction; scale = CRATER_SCALE × |v|.
+    let craterMod = 0;
+    if (craters.length > 0) {
+      const vLen = Math.hypot(x, y, z) || 1e-6;
+      const dir = { x: x / vLen, y: y / vLen, z: z / vLen };
+      for (let c = 0; c < craters.length; c++) {
+        craterMod += craterContribution(dir, craters[c]);
+      }
+      craterMod *= CRATER_SCALE * vLen;
+      // v0.71.6 review fix — clamp the summed crater contribution to
+      // [-0.5, 0.4] × local radius. Overlapping crater bowls (5-8
+      // random placements on a small sphere) can otherwise stack the
+      // negative carve to hollow-out depths on SMALL (r=2) and HUGE
+      // (r=30) tiers. Single craters stay deep (real Bennu bowls are
+      // ~0.2-0.35× radius); only pathological overlap gets capped.
+      craterMod = Math.max(-vLen * 0.5, Math.min(vLen * 0.4, craterMod));
+    }
+
+  // v0.71.6 — boulder mounds (positive-only, added last so rocks
+  // protrude FROM the cratered/noise surface).
+  let boulderMod = 0;
+  if (boulders.length > 0) {
+    const vLen = Math.hypot(x, y, z) || 1e-6;
+    const dir = { x: x / vLen, y: y / vLen, z: z / vLen };
+    for (let b = 0; b < boulders.length; b++) {
+      boulderMod += boulderContribution(dir, boulders[b]);
+    }
+    boulderMod *= BOULDER_SCALE * vLen;
+    // v0.71.6 review fix — clamp the summed contribution so
+    // overlapping boulder fields can't stack the mound beyond a
+    // rock-plausible 0.45× radius (5-8 random placements on a small
+    // body WILL overlap; without the cap a SMALL r=2 asteroid could
+    // read as a blob of fused mounds).
+    boulderMod = Math.min(boulderMod, vLen * 0.45);
+  }
+
+    let displacement = 0;
+    if (noiseType === 'crater') {
+      // Existing crater formula + micro overlay so potato craters get
+      // sub-detail (sharp crater rim micro-roughness).
+      const crater = nBase < 0.45
+        ? -Math.pow((0.45 - nBase) * 2.2, 2.0) * noiseAmount
+        : (nBase - 0.5) * 0.4 * noiseAmount;
+      displacement = crater + (nMicro - 0.5) * 0.12 * noiseAmount - erosionCarve + craterMod + boulderMod;
+    } else if (noiseType === 'craggy') {
+      // v0.71.5 — ridged multifractal (classic Musgrave ridged noise).
+      // `1 - |2n - 1|` produces sharp V-creases where the fbm crosses
+      // 0.5 — real impact-fractured rock has sharp crests + flat-ish
+      // valleys, not smooth sine bumps. Replaces the v0.69.5
+      // `(abs(n-0.5)*2 - 0.5)` formula which read as soft rounded
+      // lumps at low detail. The base noiseAmount (0.50 below) + the
+      // micro layer are kept; the ridged term now drives the
+      // silhouette with angular facets.
+      const ridge = 1 - Math.abs(2 * nBase - 1); // [0,1], crest at n=0.5
+      displacement = (ridge - 0.5) * 2 * noiseAmount
+                   + (nMicro - 0.5) * 0.12 * noiseAmount
+                   - erosionCarve
+                   + craterMod
+                   + boulderMod;
+    } else {
+      // Standard smooth fbm (used by spinning tops + elongated
+      // potatoes) — with the micro layer + craters + boulders
+      // composited on top.
+      displacement = (nBase - 0.5) * 2 * noiseAmount
+                   + (nMicro - 0.5) * 0.12 * noiseAmount
+                   - erosionCarve
+                   + craterMod
+                   + boulderMod;
+    }
+
+    posArray[i * 3 + 0] = x + nx * displacement;
+    posArray[i * 3 + 1] = y + ny * displacement;
+    posArray[i * 3 + 2] = z + nz * displacement;
+  }
+
+  positions.needsUpdate = true;
+  geom.computeVertexNormals();
+}
+
+// ---------------------------------------------------------------------------
+// Geometry builders. Each shape picks a different base geometry and a
+// different noise type/displacement amount so the field has visible variety.
+// Shape index is derived deterministically from spec.seed % 5.
+// ---------------------------------------------------------------------------
+function buildSpinningTopGeometry(radius, detail, ox, oy, oz) {
+  // v0.71.5 — Bennu/Ryugu-style "spinning top": an icosphere with a
+  // latitudinal profile — poles pulled in, equator bulged out into a
+  // ridge. Real imagery (OSIRIS-REx, Hayabusa2) shows this is one of
+  // the two most common large-asteroid silhouettes (the other being
+  // the contact-binary/rubble pile). Replaces the v0.69.x
+  // crystalline shard, which read as a gemstone, not an asteroid.
+  //
+  // The latitudinal warp is a pure function of radius (no rng): the
+  // per-instance (ox, oy, oz) noise offsets then add the irregular
+  // rock character on top.
+  const geom = new THREE.IcosahedronGeometry(radius, detail);
+  const pos = geom.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const lat = y / radius;                 // -1 (south pole) .. +1 (north)
+    // v0.71.6 — `Math.max(0, ...)` guard: IcosahedronGeometry detail 3
+    // produces 12 vertices whose |y|/radius = 1.0000000397 (floating-
+    // point overshoot past the pole). The old `1 - Math.abs(lat)` went
+    // slightly negative → `Math.pow(negative, 1.5)` = NaN → the vertex
+    // silently became NaN → Three.js logged "computed radius is NaN"
+    // and the asteroid rendered corrupted (or vanished). The clamp
+    // keeps the bulge term at exactly 0 at the poles.
+    const squash = 1 - 0.32 * Math.abs(lat); // pull poles inward
+    const bulge = 1 + 0.26 * Math.pow(Math.max(0, 1 - Math.abs(lat)), 1.5); // equatorial ridge
+    pos.setXYZ(i, x * bulge, y * squash, z * bulge);
+  }
+  pos.needsUpdate = true;
+  geom.computeVertexNormals();
+  // v0.71.6 — stronger base displacement (0.24 → 0.30) so the top's
+  // silhouette isn't a smooth ellipsoid, plus a boulder field (5 rocks)
+  // on top of the 3 craters — Bennu's equatorial ridge is littered
+  // with boulders.
+  displaceGeometry(geom, radius * 0.30, 2.0 / radius, ox, oy, oz, 'fbm', 3, 5);
+  return geom;
+}
+
+function buildElongatedPotatoGeometry(radius, detail, ox, oy, oz) {
+  // v0.71.5 — Eros-style elongated body: an icosphere stretched 1.6×
+  // along X before displacement. NEAR Shoemaker photographed Eros as
+  // a 34×11×11 km peanut-ish "shoe"; the stretch produces the
+  // signature long-axis silhouette without the contact-binary neck.
+  const geom = new THREE.IcosahedronGeometry(radius, detail);
+  const pos = geom.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    pos.setXYZ(i, pos.getX(i) * 1.6, pos.getY(i) * 0.9, pos.getZ(i) * 1.1);
+  }
+  pos.needsUpdate = true;
+  geom.computeVertexNormals();
+  // v0.71.6 — craggy (ridged) noise at 0.38 gives Eros-style angular
+  // facets; 3 craters + 6 boulders make the long axis read as a
+  // rock-strewn ridge rather than a stretched ball.
+  displaceGeometry(geom, radius * 0.38, 2.0 / radius, ox, oy, oz, 'craggy', 3, 6);
+  return geom;
+}
+
+function buildCrateredPotatoGeometry(radius, detail, ox, oy, oz) {
+  // v0.70.0 — denser segments to match the new detail=4 close-up level.
+  const capSegments = detail === 4 ? 8 : (detail === 3 ? 6 : (detail === 2 ? 4 : 2));
+  const radialSegments = detail === 4 ? 16 : (detail === 3 ? 12 : (detail === 2 ? 8 : 4));
+  const heightSegments = detail === 4 ? 12 : (detail === 3 ? 8 : (detail === 2 ? 4 : 2));
+  const length = radius * 1.5;
+  const geom = new Capsule(radius, length, capSegments, radialSegments, heightSegments);
+  // v0.71.6 — stronger displacement (0.22 → 0.28) + 5 craters + 7
+  // boulders: the capsule body reads as a densely-cratered, boulder-
+  // strewn potato (Ryugu-style) instead of a smooth bean.
+  displaceGeometry(geom, radius * 0.28, 2.0 / radius, ox, oy, oz, 'crater', 5, 7);
+  geom.computePlanarUVs('xy');
+  return geom;
+}
+
+function buildTorusGeometry(radius, detail, ox, oy, oz) {
+  // Retained for backward compat / shapeToIndex fallback path (v0.69.5
+  // dropped torus asteroids from the v0.69.5 front-end, but the
+  // helper still exists in case a future shape brings it back).
+  const radialSegments = detail === 4 ? 16 : (detail === 3 ? 12 : (detail === 2 ? 8 : 4));
+  const tubularSegments = detail === 4 ? 32 : (detail === 3 ? 24 : (detail === 2 ? 16 : 8));
+  const torusRadius = radius * 0.65;
+  const tubeRadius = radius * 0.28;
+  const geom = new THREE.TorusGeometry(torusRadius, tubeRadius, radialSegments, tubularSegments);
+  displaceGeometry(geom, radius * 0.16, 2.2 / radius, ox, oy, oz);
+  return geom;
+}
+
+function buildCraggyRockGeometry(radius, detail, ox, oy, oz) {
+  // v0.69.5 — bigger craggy displacement to break the soft-ball silhouette.
+  // v0.70.0 — bumped amount further 0.40*radius -> 0.50*radius, paired with
+  // the new high-frequency micro-displacement layer in displaceGeometry()
+  // and the LOD detail bump 0..2 -> 2..4 in buildAsteroidMesh. Together
+  // these deliver the v0.70.0 "really do geometry displacement mapping"
+  // goal (per user feedback "all looks so flat on the asteroids"): the
+  // close-up mesh now has 16× more vertices (12 -> 2562 at detail 4) so
+  // the silhouette reads as a real irregular rock, the base displacement
+  // is 25% bigger for stronger feature pop, and the new micro layer
+  // adds sub-detail rough surface texture under the directional light.
+  const geom = new THREE.IcosahedronGeometry(radius, detail);
+  // v0.71.6 — ridged at 0.55 + 4 craters + 8 boulders: the classic
+  // "rocky rubble" shape gets the densest boulder field of all shapes
+  // (matches Bennu's boulder-strewn regolith imagery).
+  displaceGeometry(geom, radius * 0.55, 2.0 / radius, ox, oy, oz, 'craggy', 4, 8);
+  return geom;
+}
+
+// ---------------------------------------------------------------------------
+// Texture loading + caching. Five indexed texture sets (realistic-1-
+// albedo/normal/roughness/bump through realistic-5-...) are loaded
+// lazily and shared via module-scope Maps. Browser-only: a stub
+// THREE.Texture is returned in Node/test environments.
+// ---------------------------------------------------------------------------
+const albedoCache = new Map();
+const normalCache = new Map();
+const roughnessCache = new Map();
+const bumpCache = new Map();
+
+function loadTextureSafely(url, colorSpace) {
+  let texture;
+  try {
+    const loader = new THREE.TextureLoader();
+    texture = loader.load(url);
+    texture.colorSpace = colorSpace;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+  } catch (e) {
+    texture = new THREE.Texture();
+    texture.colorSpace = colorSpace;
+  }
+  return texture;
+}
+
+function getRealisticAlbedo(idx) {
+  if (albedoCache.has(idx)) return albedoCache.get(idx);
+  const tex = loadTextureSafely(`/textures/realistic-${idx}-albedo.png`, THREE.SRGBColorSpace);
+  albedoCache.set(idx, tex);
+  return tex;
+}
+
+function getRealisticNormal(idx) {
+  if (normalCache.has(idx)) return normalCache.get(idx);
+  const tex = loadTextureSafely(`/textures/realistic-${idx}-normal.png`, THREE.NoColorSpace);
+  normalCache.set(idx, tex);
+  return tex;
+}
+
+function getRealisticRoughness(idx) {
+  if (roughnessCache.has(idx)) return roughnessCache.get(idx);
+  const tex = loadTextureSafely(`/textures/realistic-${idx}-roughness.png`, THREE.NoColorSpace);
+  roughnessCache.set(idx, tex);
+  return tex;
+}
+
+function getRealisticBump(idx) {
+  if (bumpCache.has(idx)) return bumpCache.get(idx);
+  const tex = loadTextureSafely(`/textures/realistic-${idx}-bump.png`, THREE.NoColorSpace);
+  bumpCache.set(idx, tex);
+  return tex;
+}
+
+function createAsteroidMaterial(idx) {
+  // v0.69.5 — matte regolith for vacuum-exposed asteroids. Per user
+  // feedback "die asteroiden sollten nicht glänzen" + "alle objekte
+  // glänzen viel zu viel":
+  //   - metalness = 0 everywhere (was 0.1 default or 0.65 for idx=3).
+  //     Real asteroids are dust/regolith exposed to vacuum; the
+  //     idx=3 nickel-iron variant's higher metalness was visually
+  //     wrong — there is no specular reflection in a vacuum without
+  //     atmosphere.
+  //   - roughness = 0.95 (was 0.9 / 0.75 / 0.45). Pushed above 0.9
+  //     so the lit surface of every asteroid reads as matte dust,
+  //     not polished stone. The roughnessMap still modulates per-
+  //     texel detail.
+  //   - bumpedScale + bumpMap REMOVED. The bumpMap was the cause of
+  //     "teils sind auch schwarze linien in den asteroiden": on
+  //     flat-shaded geometry, interpolated bumpMap values create
+  //     visible discontinuities at texture seams (UV unwrap lines).
+  //     The normalMap (which Three.js evaluates per-fragment AFTER
+  //     the flat-shading normal calculation) keeps the surface
+  //     detail without the seam artifact. Dropping the bumpMap also
+  //     removes 4 mapped textures per asteroid slot (4 sets ×
+  //     idx=1..5 = 20 cached textures, of which 4 (=1 per set) are
+  //     now freed).
   return new THREE.MeshStandardMaterial({
-    ...SHARED_MATERIAL_PARAMS,
-    map: getAsteroidAlbedo(),
-    normalMap: getAsteroidNormal(),
-    roughnessMap: getAsteroidRoughness(),
-    bumpMap: getAsteroidBump(),
+    color: 0xffffff,
+    metalness: 0,
+    roughness: 0.95,
+    flatShading: true,
+    map: getRealisticAlbedo(idx),
+    normalMap: getRealisticNormal(idx),
+    roughnessMap: getRealisticRoughness(idx),
   });
 }
 
-// Module-scoped scratch — safe in single-threaded JS.
-const _scratchAxis = new THREE.Vector3();
-
-/**
- * Build the faceted mesh for one asteroid. Pure (no scene, no side effects).
- *
- * Each asteroid is a `THREE.Group` containing either a noise-displaced
- * icosphere with a 3-level LOD (irregular rock) or a jittered capsule
- * (potato). The group is a single transformable node, so `update()` /
- * `split()` / collision work unchanged (the spin applies to the whole
- * group; the bounding radius is still `spec.radius`).
- *
- * If `uvDebugOverlay` is provided, a debug mesh (sharing the body's
- * geometry) is attached to the body. The debug mesh shows a 10×10
- * UV grid (one cell per 0.1×0.1 UV, colored by region) when the
- * overlay is enabled — useful for tuning the unwrap live in the
- * browser via `window.ASTEROID_UV_DEBUG`. See
- * `src/systems/asteroid-uv-debug-overlay.js` for the overlay.
- *
- * @param {import('../world/types.js').AsteroidSpec} spec
- * @param {object} [uvDebugOverlay] optional UV debug overlay
- * @returns {THREE.Group}
- */
-function buildAsteroidMesh(spec, uvDebugOverlay) {
-  const rng = mulberry32(spec.seed);
-  const group = new THREE.Group();
-
-  // Preserve the original rng sequence (no-op; see commit history).
-  rng();
-
-  // Pick the asteroid type deterministically from the seed (no rng
-  // consumption). bit 0: 0 = noisy icosphere (LOD), 1 = capsule.
-  // Splitting the population roughly 50/50 between the two types so
-  // the field has visual variety.
-  const isCapsule = (spec.seed & 1) === 1;
-
-  // Build the body. Each branch returns `{ lowestY, lod, debugMeshes }`:
-  //   - `lowestY`: the body's lowest y in local space (for the ground)
-  //   - `lod`: the THREE.LOD if the body is a LOD, else null
-  //   - `debugMeshes`: array of overlay-attached meshes (for cleanup)
-  let bodyResult;
-  if (isCapsule) {
-    bodyResult = buildCapsuleBody(group, spec, rng, uvDebugOverlay);
-  } else {
-    bodyResult = buildNoisyIcosphereBody(group, spec, rng, uvDebugOverlay);
-  }
-
-  // ---- DEBUG: square ground footprint -------------------------------
-  // A flat square under the asteroid. Sits 0.15 × spec.radius below
-  // the body's lowest point, giving a small visual gap. Rotates with
-  // the group (it is a child, not a world-space ground). Easy to
-  // remove once the visual is finalised.
-  addDebugGround(group, spec, bodyResult.lowestY - spec.radius * 0.15);
-
-  group.position.set(spec.position.x, spec.position.y, spec.position.z);
-
-  // Attach the LOD reference + debug-mesh list to the group so the
-  // entity's update / dispose methods can find them. `null` for
-  // `lod` on capsule bodies; `[]` for `debugMeshes` if no overlay
-  // was supplied.
-  group.userData.lod = bodyResult.lod;
-  group.userData.debugMeshes = bodyResult.debugMeshes || [];
-  return group;
-}
-
-// LOD switch distances (in world units, camera-to-asteroid distance).
-//   detail 2 (162 vertices) when within CLOSE_DIST
-//   detail 1 (42 vertices)  when within MID_DIST
-//   detail 0 (12 vertices)  beyond MID_DIST
+// ---------------------------------------------------------------------------
+// Main factory. Constants: split-radius, ambient-drift cap from the
+// SSOT in src/world/chunk-constants.js (PLAY_PLANE_Y).
+// ---------------------------------------------------------------------------
+const SPLIT_RADIUS_RATIO = 0.6;
+const SPLIT_KICK = 8;
+const PLAY_PLANE_Y = 0;
 const LOD_CLOSE_DIST = 0;
 const LOD_MID_DIST = 30;
 const LOD_FAR_DIST = 100;
+const _scratchAxis = new THREE.Vector3();
 
-// Asteroid PBR texture set — a 4-map collection cropped from the
-// user-provided 2048×2048 atlas (`public/textures/asteroid-1.png`).
-// The atlas is a 2×2 grid (left-to-right, top-to-bottom reading order):
-//
-//   ┌──────────────┬──────────────┐
-//   │  albedo      │  normal      │   1024×1024 each
-//   │  (sRGB)      │  (linear)    │   power-of-two resize from ~1018×1019 crops
-//   ├──────────────┼──────────────┤
-//   │  roughness   │  bump        │
-//   │  (linear)    │  (linear)    │
-//   └──────────────┴──────────────┘
-//
-// The 4 quadrants are separated by a ~10px black outline in the source
-// image. The crops are taken tightly (1px margin from the separator)
-// so the black outline never enters the final material — see the
-// crop commands in `scripts/build-asteroid-textures.sh` (or the
-// commit message) for the exact pixel bounds.
-//
-// **Color-space discipline.** Three.js applies the sRGB gamma curve
-// to color textures and the *inverse* to data textures. Mixing these
-// up silently ruins the look: an albedo loaded as linear washes out,
-// a normal loaded as sRGB double-decodes. We set `colorSpace` per
-// loader (sRGB for albedo, `NoColorSpace` for the 3 data maps).
-//
-// **Served by Vite from public/textures/ at the root URL.** All 4 are
-// loaded once at module scope and shared across every asteroid (the
-// GPU reuses the same texture for hundreds of meshes). `RepeatWrapping`
-// is a no-op with the current UVs (both icosphere built-in and capsule
-// cylindrical map to [0, 1]) but safe if a future UV pass goes outside
-// [0, 1].
-const ASTEROID_ALBEDO_URL    = '/textures/asteroid-albedo.png';
-const ASTEROID_NORMAL_URL    = '/textures/asteroid-normal.png';
-const ASTEROID_ROUGHNESS_URL = '/textures/asteroid-roughness.png';
-const ASTEROID_BUMP_URL      = '/textures/asteroid-bump.png';
-
-let _asteroidAlbedo = null;
-let _asteroidNormal = null;
-let _asteroidRoughness = null;
-let _asteroidBump = null;
-
-/**
- * Lazily load (and cache) the shared asteroid albedo texture. sRGB.
- * Browser-only: the underlying `THREE.TextureLoader` needs an `Image`
- * global, so the first call in Node will throw — but `asteroid.js`
- * is only imported by the game's browser code path (`src/main.js`),
- * so this is safe.
- * @returns {THREE.Texture}
- */
-function getAsteroidAlbedo() {
-  if (_asteroidAlbedo) return _asteroidAlbedo;
-  const loader = new THREE.TextureLoader();
-  _asteroidAlbedo = loader.load(ASTEROID_ALBEDO_URL);
-  _asteroidAlbedo.colorSpace = THREE.SRGBColorSpace;
-  _asteroidAlbedo.wrapS = THREE.RepeatWrapping;
-  _asteroidAlbedo.wrapT = THREE.RepeatWrapping;
-  return _asteroidAlbedo;
+// Tag every body mesh so the scene renderer can cast shadows. v0.68.0
+// adds castShadow + receiveShadow flags at construction time so the
+// sun's DirectionalLight (added in src/systems/space-lighting.js) can
+// project clean asteroid-on-asteroid shadows without a per-frame
+// scene walk. The ground plane (PlaneGeometry footer) receives
+// shadows but does not cast them (a flat plane casting a shadow would
+// be visually wrong — no shadow source above it).
+function tagForShadows(mesh, { cast = true, receive = true } = {}) {
+  if (!mesh) return;
+  mesh.castShadow = cast;
+  mesh.receiveShadow = receive;
 }
 
-/**
- * Lazily load (and cache) the shared asteroid normal map. **Linear
- * data, NOT sRGB** — normal vectors must not be gamma-decoded.
- * `NoColorSpace` tells Three.js to skip the sRGB→linear conversion.
- * @returns {THREE.Texture}
- */
-function getAsteroidNormal() {
-  if (_asteroidNormal) return _asteroidNormal;
-  const loader = new THREE.TextureLoader();
-  _asteroidNormal = loader.load(ASTEROID_NORMAL_URL);
-  _asteroidNormal.colorSpace = THREE.NoColorSpace;
-  _asteroidNormal.wrapS = THREE.RepeatWrapping;
-  _asteroidNormal.wrapT = THREE.RepeatWrapping;
-  return _asteroidNormal;
-}
+function buildAsteroidMesh(spec) {
+  const rng = mulberry32(spec.seed);
+  const group = new THREE.Group();
 
-/**
- * Lazily load (and cache) the shared asteroid roughness map.
- * Linear data (one channel of microfacet-roughness values). Like the
- * normal map, `NoColorSpace` to skip sRGB decoding.
- * @returns {THREE.Texture}
- */
-function getAsteroidRoughness() {
-  if (_asteroidRoughness) return _asteroidRoughness;
-  const loader = new THREE.TextureLoader();
-  _asteroidRoughness = loader.load(ASTEROID_ROUGHNESS_URL);
-  _asteroidRoughness.colorSpace = THREE.NoColorSpace;
-  _asteroidRoughness.wrapS = THREE.RepeatWrapping;
-  _asteroidRoughness.wrapT = THREE.RepeatWrapping;
-  return _asteroidRoughness;
-}
+  // Consume a dummy RNG pull to keep the rng sequence stable across
+  // species so the deterministic-asteroid tests still pass.
+  rng();
 
-/**
- * Lazily load (and cache) the shared asteroid bump map. Linear data
- * (height field for the per-fragment derivative bump). `NoColorSpace`.
- * The actual `bumpScale` is set on the material (default 1.0, can be
- * tuned for stronger/weaker relief).
- * @returns {THREE.Texture}
- */
-function getAsteroidBump() {
-  if (_asteroidBump) return _asteroidBump;
-  const loader = new THREE.TextureLoader();
-  _asteroidBump = loader.load(ASTEROID_BUMP_URL);
-  _asteroidBump.colorSpace = THREE.NoColorSpace;
-  _asteroidBump.wrapS = THREE.RepeatWrapping;
-  _asteroidBump.wrapT = THREE.RepeatWrapping;
-  return _asteroidBump;
-}
+  // v0.69.6 — shape distribution lifted into the data-model layer.
+  // v0.69.5 (and earlier) used `spec.seed % 5` for a uniform
+  // integer mapping that made craggy_rock a 40% monolith after the
+  // donut was removed. Specs now carry a named-shape field
+  // (`spec.shape` ∈ SHAPE_TYPES), translated to the entity-layer
+  // integer via `shapeToIndex`. The `spec.seed % 5` fallback
+  // preserves the v0.69.5 dispatch for any spec that lacks the
+  // new field (legacy test fixtures, hand-crafted mocks) — both
+  // paths produce the same geom builder for any given shape.
+  const shapeType = spec.shape !== undefined
+    ? shapeToIndex(spec.shape)
+    : (spec.seed % 5);
+  const textureIdx = ((spec.seed >> 3) % 5) + 1; // 1 through 5
 
-/**
- * Build the "irregular rock" body: a noise-displaced icosphere with
- * a 3-level LOD (detail 2 / detail 1 / detail 0 at close / mid / far
- * distances). Each LOD level uses the same per-instance noise offsets
- * and parameters, so they all represent the same asteroid at
- * different geometric resolutions. The noise is fbm-based (4 octaves)
- * and applied along the radial direction. Returns `{ lowestY, lod,
- * debugMeshes }`.
- */
-function buildNoisyIcosphereBody(group, spec, rng, uvDebugOverlay) {
+  const material = createAsteroidMaterial(textureIdx);
   const radius = spec.radius;
 
-  // Per-asteroid noise offsets — generated once and shared across
-  // all LOD levels so they all represent the same asteroid.
   const ox = rng() * 1000;
   const oy = rng() * 1000;
   const oz = rng() * 1000;
 
-  // Noise parameters (consistent across LOD levels):
-  //   amount = 25% of radius (moderate irregularity)
-  //   scale  = 2.0 / radius (consistent feature count regardless of size)
-  const noiseAmount = 0.25 * radius;
-  const noiseScale = 2.0 / radius;
+  let lod = null;
 
-  // Shared material across LOD levels (they all represent the same
-  // asteroid, so they should look the same). One material for the
-  // whole asteroid field (created per-body, but the 4 PBR maps are
-  // shared at the module-scope loader).
-  const material = createAsteroidMaterial();
+  if (shapeType === 2) {
+    // v0.71.5 — Rubble Pile (Itokawa-style): 3–6 displaced lobes in a
+    // loose contact pile. Hayabusa photographed Itokawa as two big
+    // lobes fused by a narrow neck; the rubble-pile generalizes that
+    // to N lobes of varying size so the field reads as loose
+    // gravitationally-bound debris rather than a solid body. Lobe
+    // layout is deterministic from a seeded rng (spec.seed), so every
+    // LOD level rebuilds the SAME pile — only the mesh density
+    // changes.
+    lod = new THREE.LOD();
 
-  const lod = new THREE.LOD();
+    const buildLobes = (detail) => {
+      const g = new THREE.Group();
+      const lobeRng = mulberry32((spec.seed ^ 0x5bd1e995) >>> 0);
+      const lobeCount = 3 + Math.floor(lobeRng() * 4); // 3..6
+      for (let i = 0; i < lobeCount; i++) {
+        const fr = 0.45 + lobeRng() * 0.4; // lobe radius fraction of parent
+        const phi = lobeRng() * Math.PI * 2;
+        const dist = radius * (0.25 + lobeRng() * 0.55);
+        const lobeR = radius * fr;
+        const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(lobeR, detail), material);
+        mesh.position.set(
+          Math.cos(phi) * dist,
+          (lobeRng() - 0.5) * radius * 0.6,
+          Math.sin(phi) * dist,
+        );
+        // Per-lobe noise offsets so each rock displaces differently.
+        // v0.71.6 — each lobe also gets 2-3 boulders of its own so the
+        // pile reads as "loose rocks made of rocks" (Itokawa's lobes
+        // are themselves covered in boulders).
+        displaceGeometry(
+          mesh.geometry,
+          lobeR * 0.32,
+          2.2 / lobeR,
+          ox + i * 137,
+          oy + i * 173,
+          oz + i * 211,
+          'craggy',
+          1 + (i % 2),
+          2 + (i % 2),
+        );
+        tagForShadows(mesh);
+        g.add(mesh);
+      }
+      return g;
+    };
 
-  // Level 0: close (detail 2, 162 vertices)
-  const geomHigh = new NoisyIcosphere(
-    radius, 2, noiseAmount, noiseScale, ox, oy, oz,
-  );
-  // Icosphere has default spherical UVs from IcosahedronGeometry —
-  // no per-vertex UV unwrapping needed.
-  const meshHigh = new THREE.Mesh(geomHigh, material);
-  lod.addLevel(meshHigh, LOD_CLOSE_DIST);
+    // v0.70.0 — LOD detail 4/3/2 (same rationale as the single-mesh
+    // path below). The pile layout is deterministic (seeded), so all
+    // three levels show the same arrangement.
+    lod.addLevel(buildLobes(4), LOD_CLOSE_DIST);
+    lod.addLevel(buildLobes(3), LOD_MID_DIST);
+    lod.addLevel(buildLobes(2), LOD_FAR_DIST);
 
-  // Level 1: mid (detail 1, 42 vertices)
-  const geomMid = new NoisyIcosphere(
-    radius, 1, noiseAmount, noiseScale, ox, oy, oz,
-  );
-  const meshMid = new THREE.Mesh(geomMid, material);
-  lod.addLevel(meshMid, LOD_MID_DIST);
+    group.add(lod);
+  } else {
+    // Single-mesh LOD shapes: crystalline, cratered potato, torus, or
+    // craggy rock. The geometry builder is selected once per detail
+    // level so each LOD level reads its own vertex count.
+    lod = new THREE.LOD();
 
-  // Level 2: far (detail 0, 12 vertices)
-  const geomLow = new NoisyIcosphere(
-    radius, 0, noiseAmount, noiseScale, ox, oy, oz,
-  );
-  const meshLow = new THREE.Mesh(geomLow, material);
-  lod.addLevel(meshLow, LOD_FAR_DIST);
+    const getGeom = (detail) => {
+      if (shapeType === 0) return buildSpinningTopGeometry(radius, detail, ox, oy, oz);
+      if (shapeType === 1) return buildCrateredPotatoGeometry(radius, detail, ox, oy, oz);
+      if (shapeType === 3) return buildElongatedPotatoGeometry(radius, detail, ox, oy, oz);
+      // shapeType 4 (craggy_rock) + defensive fallback for unknown
+      // types (v0.69.5 removed the torus "donut"; v0.71.5 keeps the
+      // craggy builder as the safe default).
+      return buildCraggyRockGeometry(radius, detail, ox, oy, oz);
+    };
 
-  // If the UV debug overlay is supplied, attach a debug mesh to
-  // each LOD level (the LOD picks the active child each frame; the
-  // debug mesh is a sibling of the body on each level so it shows
-  // up on all 3 detail levels).
-  const debugMeshes = [];
-  if (uvDebugOverlay) {
-    const kinds = [
-      { mesh: meshHigh, geom: geomHigh },
-      { mesh: meshMid, geom: geomMid },
-      { mesh: meshLow, geom: geomLow },
-    ];
-    for (const { mesh, geom } of kinds) {
-      const debugMesh = uvDebugOverlay.attach(geom, 'icosphere');
-      mesh.add(debugMesh);
-      debugMeshes.push(debugMesh);
-    }
+    // v0.70.0 — LOD detail 0..2 -> 2..4 (modern-game dense meshes to do
+    // real geometry displacement mapping). detail=4 gives IcosahedronGeometry
+    // 2562 vertices (was 162 at detail=2) — 16× more vertices for the
+    // close-up level, making the silhouette + the new high-frequency
+    // micro-displacement layer visible. Performance budget: at ~150
+    // asteroids in the streaming bubble, only those within LOD_MID_DIST
+    // (30u) of the camera render detail=4 — typically 30-50 — so total
+    // vertex count stays well under WebGL2 limits. Shadow-map pass
+    // doubles the cost but is still negligible on modern GPUs.
+    const meshHigh = new THREE.Mesh(getGeom(4), material);
+    tagForShadows(meshHigh);
+    lod.addLevel(meshHigh, LOD_CLOSE_DIST);
+
+    const meshMid = new THREE.Mesh(getGeom(3), material);
+    tagForShadows(meshMid);
+    lod.addLevel(meshMid, LOD_MID_DIST);
+
+    const meshLow = new THREE.Mesh(getGeom(2), material);
+    tagForShadows(meshLow);
+    lod.addLevel(meshLow, LOD_FAR_DIST);
+
+    group.add(lod);
   }
 
-  group.add(lod);
+  // v0.71.6 — debug ground footprint REMOVED. The v0.5x-era debug
+  // plane (a semi-transparent dark square under every asteroid that
+  // caught a fake sun shadow) was the #1 photoreal killer: in space
+  // there is no ground, and the plane read as a floating dark halo
+  // around each rock. Real asteroid lighting = sun shadow falls on
+  // OTHER asteroids / nothing (deep space = pitch black). castShadow
+  // on the body meshes already produces asteroid-on-asteroid shadows;
+  // no ground plane needed.
 
-  // Lowest y of the icosphere (worst case: -radius × (1 + noiseAmount/radius)
-  // = -(radius + noiseAmount) = -1.25 × radius for the default 25% noise).
-  return { lowestY: -(radius + noiseAmount), lod, debugMeshes };
-}
+  group.position.set(spec.position.x, spec.position.y, spec.position.z);
+  group.userData.lod = lod;
 
-/**
- * Body height segments for the capsule asteroid. The "pipe" (the
- * cylindrical middle of the capsule, between the two hemispherical
- * caps) is subdivided into this many quads along the +Y axis. More
- * segments = more vertices for `jitter()` to displace = a more
- * irregular, asteroid-like surface. The 2DOF MVP ships with 6
- * segments, which gives 7 body rings × 9 verts/ring = 63 body
- * vertices (vs. 18 with the default `heightSegments=1`).
- *
- * Tunable from this constant. The planar UV unwrap handles the
- * higher vertex count cleanly (one UV per vertex, computed from
- * the live local position).
- */
-const CAPSULE_HEIGHT_SEGMENTS = 6;
-
-/**
- * Which axis-aligned plane the capsule's planar UV unwrap projects
- * onto. `'xy'` gives a side view (U = x, V = y) — the best default
- * for the vertical capsule shape because the long axis is one of
- * the texture coordinates, so the texture runs the full length of
- * the potato. The other options are `'xz'` (top-down) and `'yz'`
- * (side view rotated 90°). The unwrap is in the mesh's LOCAL
- * frame, so the texture is "stuck to" the mesh — different
- * asteroids show different parts of the texture.
- *
- * Exported so `main.js` can sync the initial value of the
- * `window.ASTEROID_UV_PLANE` runtime setter (see
- * `src/systems/asteroid-uv-debug-overlay.js`). The runtime setter
- * can also change the plane live without rebuilding.
- */
-export const CAPSULE_UV_PLANE = 'xy';
-
-/**
- * Build the "potato" body: a single capsule with normal jitter for a
- * bumpy, irregular surface. Slightly elongated (length = 1.5 × R) so
- * it reads as a distinct shape vs the noisy-icosphere rocks.
- * Returns `{ lowestY, lod: null }`.
- *
- * Geometry polish: the body pipe is subdivided into
- * `CAPSULE_HEIGHT_SEGMENTS` quads along its length (default 6),
- * giving `jitter()` many more vertices to displace for a visibly
- * asteroid-like irregular surface. The cap segments stay at the
- * default 4 — they already have enough detail.
- *
- * Mapping: a local planar UV unwrap (`Capsule.computePlanarUVs`)
- * is applied AFTER `jitter()` so the UVs align with the displaced
- * surface and the texture is stuck to the mesh (no world-space
- * tricks). The same 4-map PBR `MeshStandardMaterial` is used as
- * the icosphere body — one material API, one set of textures,
- * two body types.
- */
-function buildCapsuleBody(group, spec, rng, uvDebugOverlay) {
-  const capsuleRadius = spec.radius;
-  const capsuleLength = spec.radius * 1.5; // slightly elongated
-
-  const geom = new Capsule(
-    capsuleRadius,
-    capsuleLength,
-    4,                       // capSegments (unchanged)
-    8,                       // radialSegments (unchanged)
-    CAPSULE_HEIGHT_SEGMENTS, // body subdivisions
-  );
-  // Jitter (15% of radius). The capsule's `jitter()` method moves
-  // each merged vertex along its local z axis (the surface normal).
-  // The index buffer is unchanged, so the surface stays connected,
-  // and the normal-direction displacement produces a visibly bumpy
-  // "potato" surface without creating holes or twisted faces.
-  // Regression-tested in tests/capsule.test.js.
-  geom.jitter(capsuleRadius * 0.15, rng);
-  // Simple planar UV projection after jitter so the texture aligns
-  // with the displaced surface. `computePlanarUVs` projects onto the
-  // xy plane (side view), giving a clean texture mapping for the
-  // vertical capsule shape.
-  geom.computePlanarUVs(CAPSULE_UV_PLANE);
-
-  // Same material as the icosphere body — shared PBR maps, same
-  // metalness/roughness. The visual difference between the two
-  // body types is now the geometry shape alone, not the shading.
-  const material = createAsteroidMaterial();
-
-  const capsule = new THREE.Mesh(geom, material);
-  // If the UV debug overlay is supplied, attach a debug mesh as a
-  // child of the body mesh. The debug mesh shares the geometry
-  // (no extra memory) and renders the 10x10 UV grid pattern.
-  const debugMeshes = [];
-  if (uvDebugOverlay) {
-    const debugMesh = uvDebugOverlay.attach(geom, 'capsule');
-    capsule.add(debugMesh);
-    debugMeshes.push(debugMesh);
-  }
-  group.add(capsule);
-
-  return { lowestY: -(capsuleLength / 2 + capsuleRadius), lod: null, debugMeshes };
-}
-
-/**
- * Add the debug square ground footprint. Sits horizontally below the
- * body at `groundY` in the group's local frame. Rotates with the
- * group (it is a child, not a world-space ground).
- */
-function addDebugGround(group, spec, groundY) {
-  const groundGeom = new THREE.PlaneGeometry(spec.radius * 2, spec.radius * 2);
-  const groundMat = new THREE.MeshBasicMaterial({
-    color: 0x1a2a3a,
-    transparent: true,
-    opacity: 0.55,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  });
-  const ground = new THREE.Mesh(groundGeom, groundMat);
-  ground.rotation.x = -Math.PI / 2; // horizontal in the group's local frame
-  ground.position.y = groundY;
-  group.add(ground);
+  return group;
 }
 
 /**
@@ -478,83 +802,17 @@ function addDebugGround(group, spec, groundY) {
  * @param {{
  *   spec: import('../world/types.js').AsteroidSpec,
  *   scene: import('three').Scene,
- *   uvDebugOverlay?: object,
  * }} opts
  */
-/**
- * localStorage key prefix for per-type UV templates saved by the
- * UV editor's SAVE TEMPLATE button. The full key is
- * `asteroid-uv-template-${type}` (e.g. `asteroid-uv-template-icosphere`).
- * Templates are plain JSON (same shape as the SAVE JSON file,
- * minus the per-instance metadata) and are applied 1:1 by
- * vertex index to the new asteroid's body geometry on creation.
- */
-const UV_TEMPLATE_KEY_PREFIX = 'asteroid-uv-template-';
-
-/**
- * If a UV template has been saved for this asteroid's body
- * type, copy its UV attribute onto the new geometry. Vertex
- * count must match (same detail level on icosphere, same
- * capsule parameters) — the function silently no-ops on a
- * mismatch (a future change in mesh parameters would need a
- * re-save). The seams from the template are stashed on
- * `mesh.userData.templateSeams` so the UV editor can pick
- * them up the next time the user opens this asteroid.
- *
- * @param {THREE.Group} mesh
- * @param {import('../world/types.js').AsteroidSpec} spec
- */
-function applyUvTemplate(mesh, spec) {
-  if (typeof localStorage === 'undefined') return;
-  const type = getAsteroidType(spec);
-  let raw;
-  try { raw = localStorage.getItem(UV_TEMPLATE_KEY_PREFIX + type); }
-  catch (_) { return; } // localStorage disabled / quota
-  if (!raw) return;
-  let data;
-  try { data = JSON.parse(raw); } catch (_) { return; }
-  if (!data || !Array.isArray(data.uvs)) return;
-  const body = mesh.children[0];
-  if (!body) return;
-  // Use the same body the UV editor reads from (highest-detail
-  // LOD level for icospheres, the capsule mesh for capsules).
-  const geom = body.isLOD ? body.levels[0].object.geometry : body.geometry;
-  if (!geom || !geom.attributes.uv) return;
-  const uvAttr = geom.attributes.uv;
-  if (uvAttr.array.length !== data.uvs.length) return; // vertex count mismatch
-  for (let i = 0; i < uvAttr.array.length; i++) uvAttr.array[i] = data.uvs[i];
-  uvAttr.needsUpdate = true;
-  // Stash seams so the editor can adopt them if the user opens
-  // this asteroid. The editor's seam-set is session-scoped;
-  // the template's seams only take effect when the user
-  // opens the editor for this asteroid.
-  if (Array.isArray(data.seams)) {
-    mesh.userData.templateSeams = new Set(data.seams);
-  }
-}
-
-export function createAsteroidFromSpec({ spec, scene, uvDebugOverlay }) {
+export function createAsteroidFromSpec({ spec, scene } = {}) {
   if (!scene) throw new Error('createAsteroidFromSpec: `scene` is required');
   if (!spec) throw new Error('createAsteroidFromSpec: `spec` is required');
 
-  const mesh = buildAsteroidMesh(spec, uvDebugOverlay);
-  // Apply any per-type UV template saved by the UV editor's
-  // SAVE TEMPLATE button. Runs AFTER the mesh is built so the
-  // geometry's `uv` attribute is fully populated. The 1:1 UV
-  // copy assumes matching vertex counts across asteroids of
-  // the same type (true for the current mesh parameters).
-  applyUvTemplate(mesh, spec);
+  const mesh = buildAsteroidMesh(spec);
   scene.add(mesh);
 
-  let rotation = 0; // accumulated angle (radians) around `spec.axis`
+  let rotation = 0;
 
-  /**
-   * Per-frame update. The `camera` argument is required for asteroids
-   * with a LOD body (so the LOD can pick the right level); it's a
-   * no-op for non-LOD bodies.
-   * @param {number} dt seconds
-   * @param {THREE.Camera} [camera] required for LOD updates
-   */
   function update(dt, camera) {
     if (dt <= 0) return;
     rotation += spec.spin * dt;
@@ -564,25 +822,24 @@ export function createAsteroidFromSpec({ spec, scene, uvDebugOverlay }) {
     mesh.position.z += spec.velocity.z * dt;
     mesh.position.y = PLAY_PLANE_Y;
 
-    // Update the LOD (if the body is one). `LOD.update(camera)` is a
-    // no-op for LODs with 0 or 1 levels, so it's safe to call every
-    // frame for all asteroids.
+    // v0.69.5 — fuzziness=0.5 second argument enables smooth LOD
+    // transitions (per Three.js LOD API: 0 = crisp (snap at threshold),
+    // 1 = maximum blur (no visible switch)). Was 0 (default) so the
+    // user reported visible LOD popping when crossing the 30u
+    // (mid->high) or 100u (low->mid) thresholds. 0.5 is the standard
+    // crossfade value — both levels render during the transition
+    // window so the change is invisible.
     const lod = mesh.userData.lod;
-    if (lod && camera) lod.update(camera);
+    if (lod && camera) lod.update(camera, 0.5);
   }
 
-  /**
-   * Split this asteroid into 0–2 smaller children.
-   * Small asteroids (size 2) return [] — they vanish on hit.
-   * Children are positioned at the parent's current world location with
-   * a small offset and an outward velocity kick.
-   * @returns {Array<import('../world/types.js').AsteroidSpec>}
-   */
   function split() {
     if (spec.size >= 2) return [];
     const nextSize = spec.size + 1;
     const childRadius = spec.radius * SPLIT_RADIUS_RATIO;
-    const rng = mulberry32((spec.seed ^ (nextSize * 0x9e3779b1)) >>> 0);
+    // Per-child seed derived from the parent — children are fully
+    // deterministic so re-streaming reproduces the same split graph.
+    const rng = mulberry32((spec.seed ^ (nextSize * 0x8a3779b1)) >>> 0);
 
     const children = [];
     for (let i = 0; i < 2; i++) {
@@ -594,7 +851,6 @@ export function createAsteroidFromSpec({ spec, scene, uvDebugOverlay }) {
       const vx = spec.velocity.x + Math.cos(angle) * SPLIT_KICK;
       const vz = spec.velocity.z + Math.sin(angle) * SPLIT_KICK;
 
-      // Random unit-vector axis
       const uz = 1 - rng() * 2;
       const phi = rng() * Math.PI * 2;
       const ur = Math.sqrt(Math.max(0, 1 - uz * uz));
@@ -603,7 +859,7 @@ export function createAsteroidFromSpec({ spec, scene, uvDebugOverlay }) {
       const az = uz;
 
       children.push({
-        id: `${spec.id}-s${i}`,
+        id: `${spec.id}-r${i}`,
         position: { x: px, y: PLAY_PLANE_Y, z: pz },
         radius: childRadius,
         size: nextSize,
@@ -618,27 +874,10 @@ export function createAsteroidFromSpec({ spec, scene, uvDebugOverlay }) {
 
   function dispose() {
     scene.remove(mesh);
-    // If a UV debug overlay was supplied, unregister every debug
-    // mesh we attached. The overlay's shared material is NOT
-    // disposed here (it's shared across all asteroids; the
-    // overlay's `dispose()` handles it when the overlay is
-    // disposed).
-    const debugMeshes = mesh.userData.debugMeshes || [];
-    for (const dm of debugMeshes) {
-      if (uvDebugOverlay && typeof uvDebugOverlay.detach === 'function') {
-        uvDebugOverlay.detach(dm);
-      }
-      // The debug mesh's parent (the body mesh) is being disposed
-      // below; the debug mesh will be garbage-collected as part
-      // of the recursive dispose.
-    }
-    // `mesh` is a Group containing a debug ground plane + body mesh
-    // (LOD or capsule), each with its own geometry and material.
-    // Release both per child.
-    for (const child of mesh.children) {
+    mesh.traverse((child) => {
       if (child.geometry) child.geometry.dispose();
       if (child.material) child.material.dispose();
-    }
+    });
   }
 
   return {
@@ -647,9 +886,46 @@ export function createAsteroidFromSpec({ spec, scene, uvDebugOverlay }) {
     update,
     split,
     dispose,
-    /** @returns {number} collision radius in world units */
     getRadius() { return spec.radius; },
-    /** @returns {{x:number,y:number,z:number}} live world position (mutated) */
+    getSize() { return spec.size; },
     getPosition() { return mesh.position; },
+    getVelocity() { return { x: spec.velocity.x, z: spec.velocity.z }; },
+    setVelocity(vx, vz) {
+      spec.velocity.x = vx;
+      spec.velocity.z = vz;
+    },
   };
 }
+
+// v0.71.0 -- crevice helper + erosion tunables exposed for direct
+// unit testing (range + amplitude pin tests live in
+// tests/asteroid.test.js). These are the SSOT for the erosion layer:
+// if you want to retune visual impact, edit the constants here.
+export {
+  creviceDepth,
+  EROSION_SCALE_RATIO,
+  EROSION_AMOUNT_RATIO,
+  EROSION_EXPONENT,
+};
+
+// v0.71.5 -- Worley-crater helpers + scale exposed for direct unit
+// testing (determinism, bowl/rim geometry, world-scale pin tests live
+// in tests/asteroid.test.js). SSOT for the crater layer: retune
+// visual impact via CRATER_SCALE + the depth/rim ranges in
+// placeCraterCenters.
+export {
+  placeCraterCenters,
+  craterContribution,
+  CRATER_SCALE,
+};
+
+// v0.71.6 -- Boulder-layer helpers + scale exposed for direct unit
+// testing (determinism, positive-only mounds, steep-edge falloff,
+// world-scale pin tests live in tests/asteroid.test.js). SSOT for
+// the boulder layer: retune visual impact via BOULDER_SCALE + the
+// height/radius ranges in placeBoulderCenters.
+export {
+  placeBoulderCenters,
+  boulderContribution,
+  BOULDER_SCALE,
+};

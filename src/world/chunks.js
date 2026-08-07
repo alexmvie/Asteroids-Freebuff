@@ -17,7 +17,96 @@ import {
   NEBULA_RENDER_THRESHOLD,
   MAX_ASTEROID_DRIFT,
   PLAY_PLANE_Y,
+  SHAPE_TYPES,
+  SHAPE_WEIGHTS,
+  validateShapeWeights,
+  ASTEROID_RADIUS_BY_SIZE,
+  ASTEROID_SIZE_WEIGHTS,
+  validateSizeWeights,
 } from './constants.js';
+
+// v0.69.6 — fail fast if SHAPE_WEIGHTS is malformed (sum != 100).
+// Catches drift during development: if a future edit bumps one
+// weight without compensating the others, the sampler would assign
+// some asteroids to a non-existent bucket or skip the last bucket
+// entirely. Better to throw at module-load than to silently corrupt
+// the streaming field's distribution on every page load.
+if (!validateShapeWeights()) {
+  const sum = Object.values(SHAPE_WEIGHTS).reduce((a, b) => a + b, 0);
+  throw new Error(`SHAPE_WEIGHTS must sum to 100, got ${sum}`);
+}
+
+// v0.71.0 — same fail-fast guard for ASTEROID_SIZE_WEIGHTS.
+if (!validateSizeWeights()) {
+  const sum = Object.values(ASTEROID_SIZE_WEIGHTS).reduce((a, b) => a + b, 0);
+  throw new Error(`ASTEROID_SIZE_WEIGHTS must sum to 100, got ${sum}`);
+}
+
+// v0.69.6 — inverse of SHAPE_TYPES. Maps a named shape to the
+// integer shapeType used by `src/entities/asteroid.js`'s
+// `buildAsteroidMesh` switch.
+//
+// v0.71.5 — 5-shape taxonomy (research-backed realistic pool):
+//   0 = spinning_top (Bennu/Ryugu equatorial-ridge top)
+//   1 = cratered_potato (Capsule + carved crater bowls)
+//   2 = rubble_pile (Itokawa-style 3–6 lobe contact pile)
+//   3 = elongated_potato (Eros-style 1.6× stretched rock)
+//   4 = craggy_rock (ridged irregular monolith)
+// Lives in the data-model layer so the entity factory stays
+// decoupled from SHAPE_TYPES' string IDs — only `pickShapeType`
+// (which produces the string names) is called by chunk generation;
+// only `shapeToIndex` (which consumes the strings) is called by
+// the entity factory.
+const SHAPE_TO_INDEX = Object.freeze({
+  spinning_top: 0,
+  cratered_potato: 1,
+  rubble_pile: 2,
+  elongated_potato: 3,
+  craggy_rock: 4,
+});
+
+/**
+ * v0.69.6 — Inverse of SHAPE_TYPES. Returns the integer shapeType
+ * that the entity factory uses to dispatch geometry builders.
+ * Defensive: unknown shapes fall back to craggy_rock (4) so a
+ * future SHAPE_TYPES addition without a matching SHAPE_TO_INDEX
+ * entry never produces a non-asteroid entity.
+ *
+ * @param {string} shape  One of SHAPE_TYPES values.
+ * @returns {0|1|2|3|4}
+ */
+export function shapeToIndex(shape) {
+  const idx = SHAPE_TO_INDEX[shape];
+  return typeof idx === 'number' ? idx : 4;
+}
+
+/**
+ * v0.69.6 — Cumulative-distribution sampler over SHAPE_WEIGHTS.
+ * Pure function of `rng()`. Returns one of the SHAPE_TYPES values,
+ * preserving the chunk's deterministic sequence (same (cx, cz,
+ * systemSeed) → same shape stream).
+ *
+ * Algorithm: draw r ~ [0, 100), walk SHAPE_WEIGHTS in declaration
+ * order accumulating the cumulative sum, return the first bucket
+ * whose cumulative exceeds r. Object.entries on a frozen plain
+ * object preserves insertion order. The fallback at the bottom
+ * handles a degenerate `rng = () => 1` (returns the last bucket)
+ * — should never trigger in practice because `mulberry32` returns
+ * values in [0, 1).
+ *
+ * @param {() => number} rng   Returns [0, 1).
+ * @returns {string}           A SHAPE_TYPES key (e.g. 'crystalline_shard').
+ */
+export function pickShapeType(rng) {
+  const r = rng() * 100; // [0, 100)
+  let cum = 0;
+  for (const [k, w] of Object.entries(SHAPE_WEIGHTS)) {
+    cum += w;
+    if (r < cum) return k;
+  }
+  const entries = Object.keys(SHAPE_WEIGHTS);
+  return entries[entries.length - 1]; // defensive: r === 100.0
+}
 
 // ---------------------------------------------------------------------------
 // Chunk hash
@@ -95,27 +184,55 @@ export function chunkHasNebula(id) {
 function lerp(a, b, t) { return a + (b - a) * t; }
 
 /**
- * Map an asteroid size tier to its world-space radius.
- * @param {0|1|2} size
- * @returns {number}
+ * v0.71.0 — Map an asteroid size tier to its world-space radius.
+ * Delegates to the SSOT in `chunk-constants.js`
+ * (`ASTEROID_RADIUS_BY_SIZE`) so the visual + physics + chunk-
+ * generation layers agree on a single number per tier.
+ *
+ * Unknown sizes fall back to MEDIUM (radius 4) defensively — a
+ * future size added to `ASTEROID_SIZE` without a matching radius
+ * row would otherwise produce NaN-radius asteroids that the
+ * collision layer would happily create infinite-overlap pairs for.
+ *
+ * @param {0|1|2|3} size  An AsteroidSize enum value.
+ * @returns {number}      World-space radius in scene units.
  */
 export function sizeRadius(size) {
-  if (size === 0) return 8;  // large
-  if (size === 1) return 4;  // medium
-  return 2;                  // small
+  const r = ASTEROID_RADIUS_BY_SIZE[size];
+  return typeof r === 'number' ? r : 4; // defensive fallback to MEDIUM
 }
 
 /**
- * Uniform random size pick. (Could later be density-biased by passing
- * `density` in from the caller; kept simple for MVP.)
- * @param {() => number} rng
- * @returns {0|1|2}
+ * v0.71.0 — Cumulative-distribution sampler over `ASTEROID_SIZE_WEIGHTS`.
+ * Pure function of `rng()`. Returns one of the 4 AsteroidSize
+ * integer values (0..3), preserving the chunk's deterministic
+ * sequence (same (cx, cz, systemSeed) → same size stream).
+ *
+ * Algorithm: draw r ~ [0, 100), walk ASTEROID_SIZE_WEIGHTS in
+ * declaration order accumulating the cumulative sum, return the
+ * first bucket whose cumulative exceeds r. Object.entries on a
+ * frozen plain object preserves insertion order — keys are
+ * '0','1','2','3' (stringified) but we coerce back to Number for
+ * the return value.
+ *
+ * Current target distribution: LARGE 25%, MEDIUM 35%, SMALL 35%,
+ * HUGE 5% (see ASTEROID_SIZE_WEIGHTS JSDoc).
+ *
+ * @param {() => number} rng   Returns [0, 1).
+ * @returns {0|1|2|3}          An AsteroidSize enum value.
  */
 function pickSize(rng) {
-  const r = rng();
-  if (r < 0.3) return 0; // large
-  if (r < 0.7) return 1; // medium
-  return 2;              // small
+  const r = rng() * 100; // [0, 100)
+  let cum = 0;
+  for (const [k, w] of Object.entries(ASTEROID_SIZE_WEIGHTS)) {
+    cum += w;
+    if (r < cum) return Number(k);
+  }
+  // Defensive: r === 100.0 fallback (mulberry32 returns [0, 1) so
+  // this should never trigger in production). Return the last
+  // declared tier.
+  const keys = Object.keys(ASTEROID_SIZE_WEIGHTS);
+  return Number(keys[keys.length - 1]);
 }
 
 /**
@@ -172,22 +289,41 @@ export function generateChunk(id) {
     );
   }
 
+  // v0.68.0 — every asteroid is now the textured-PBR realistic
+  // variant. The v0.67.x per-asteroid realistic-vs-standard mix
+  // was removed by user request ("alte Asteroiden komplett raus").
+  // The pure chunk-seed sequence below is unchanged, so the
+  // deterministic invariants in tests/world.test.js still pass.
+  //
+  // v0.69.6 — per-shape-type distribution. pickShapeType(rng)
+  // consumes one extra rng() value per asteroid (picked FIRST,
+  // before size/position/axis/etc.) so the entity layer can read
+  // `spec.shape` instead of falling back to `spec.seed % 5` (the
+  // uniform distribution that made craggy_rock a 40% monolithic
+  // after the v0.69.5 donut removal). The seed stream shifts
+  // downstream, which is fine: no test pins specific values, only
+  // invariants (determinism, axis-unit, drift cap, etc.) — all
+  // of which the new stream still satisfies.
   const asteroids = [];
   for (let i = 0; i < count; i++) {
+    const shape = pickShapeType(rng);
     const size = pickSize(rng);
+    const px = (id.cx + rng()) * CHUNK_SIZE;
+    const pz = (id.cz + rng()) * CHUNK_SIZE;
+    const axis = randomUnitVec3(rng);
+    const spin = lerp(0.1, 0.8, rng());
+    const velocity = randomDriftVec3(rng, MAX_ASTEROID_DRIFT);
+    const seed = (rng() * 1e9) | 0;
     asteroids.push({
       id: `${id.cx}-${id.cz}-${i}`,
-      position: {
-        x: (id.cx + rng()) * CHUNK_SIZE,
-        y: PLAY_PLANE_Y,
-        z: (id.cz + rng()) * CHUNK_SIZE,
-      },
+      shape,
+      position: { x: px, y: PLAY_PLANE_Y, z: pz },
       radius: sizeRadius(size),
       size,
-      axis: randomUnitVec3(rng),
-      spin: lerp(0.1, 0.8, rng()),
-      velocity: randomDriftVec3(rng, MAX_ASTEROID_DRIFT),
-      seed: (rng() * 1e9) | 0,
+      axis,
+      spin,
+      velocity,
+      seed,
     });
   }
 
