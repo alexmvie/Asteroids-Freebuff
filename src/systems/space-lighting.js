@@ -86,6 +86,10 @@ export function createSpaceLighting() {
   );
   sunMesh.frustumCulled = false; // huge; never cull
   sunMesh.renderOrder = -2; // draw before the asteroid field
+  // v0.72.1 — keep the sun disc visible in showcase mode (the showcase
+  // isolation pass hides every non-tagged mesh; the sun IS part of the
+  // "same rendering setup" the showcase promises).
+  sunMesh.userData.showcaseKeep = true;
 
   // ---- Corona -----------------------------------------------------------
   // Bigger, half-transparent halo sphere drawn behind the sun. Same
@@ -119,6 +123,9 @@ export function createSpaceLighting() {
   coronaMesh.frustumCulled = false;
   coronaMesh.renderOrder = -3; // behind the sun mesh itself
   coronaMesh.visible = false; // v0.69.5: halo removed (was the 'light from all directions' feel)
+  // v0.72.1 — same showcase-keep contract as the sun mesh (harmless
+  // while invisible, correct if the halo is ever re-enabled).
+  coronaMesh.userData.showcaseKeep = true;
 
   // ---- PointLight (the user-requested "from there") ---------------------
   // distance:0 + decay:0 means the light acts like a far-away uniform

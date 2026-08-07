@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { createShowcase } from '../src/systems/showcase.js';
+import { createStarfield } from '../src/systems/starfield.js';
+import { createNebulaBackground } from '../src/systems/nebula-background.js';
+import { createSpaceLighting } from '../src/systems/space-lighting.js';
 
 // ---------------------------------------------------------------------------
 // v0.72.0 — Object-Viewer showcase mode tests.
@@ -142,4 +145,40 @@ test('Showcase: deactivate after activate builds no lingering meshes in scene', 
   showcase.setIndex(0); // build an asteroid
   showcase.deactivate();
   assert.equal(scene.children.length, before, 'showcase objects fully removed on deactivate');
+});
+
+// ---------------------------------------------------------------------------
+// v0.72.1 — REAL backdrop objects carry the showcaseKeep contract.
+//
+// The isolation pass hides every non-tagged mesh/points/line while the
+// showcase is active. The user asked for "exakt das selbe rendering
+// setup" — so the deep-space backdrop (starfield, nebula, sun disc)
+// must survive. The unit-level mechanism was already covered above
+// with fake meshes; these tests pin the REAL production objects to the
+// contract so a future refactor of starfield.js / nebula-background.js
+// / space-lighting.js cannot silently drop the tag.
+// ---------------------------------------------------------------------------
+
+test('Showcase: starfield group + every Points layer is showcaseKeep-tagged', () => {
+  const starfield = createStarfield();
+  assert.equal(starfield.userData.showcaseKeep, true, 'starfield group tagged');
+  let pointsCount = 0;
+  starfield.traverse((o) => {
+    if (o.isPoints) {
+      pointsCount += 1;
+      assert.equal(o.userData.showcaseKeep, true, 'starfield Points layer tagged');
+    }
+  });
+  assert.ok(pointsCount >= 3, 'starfield has its 3 layer Points objects');
+});
+
+test('Showcase: nebula sphere is showcaseKeep-tagged', () => {
+  const nebula = createNebulaBackground({ imageUrl: '/bgnebula/bgnebula-2.png' });
+  assert.equal(nebula.mesh.userData.showcaseKeep, true, 'nebula mesh tagged');
+});
+
+test('Showcase: sun mesh + corona are showcaseKeep-tagged', () => {
+  const lighting = createSpaceLighting();
+  assert.equal(lighting.sunMesh.userData.showcaseKeep, true, 'sun mesh tagged');
+  assert.equal(lighting.coronaMesh.userData.showcaseKeep, true, 'corona mesh tagged');
 });

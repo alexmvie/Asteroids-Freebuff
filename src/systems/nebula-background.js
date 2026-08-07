@@ -104,6 +104,9 @@ export function createNebulaBackground({ imageUrl, radius = 5000, widthSegments 
    mesh.renderOrder = -1; // render first (behind everything else)
    mesh.frustumCulled = false; // the sphere is huge; never cull it
    mesh.name = 'nebula-background';
+  // v0.72.1 — keep the nebula backdrop visible in showcase mode
+  // (same contract as the starfield; see src/systems/showcase.js).
+  mesh.userData.showcaseKeep = true;
 
    let mountedScene = null;
 

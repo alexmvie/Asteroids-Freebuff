@@ -28,6 +28,10 @@ export function createStarfield({
   const rng = seed === null ? Math.random : mulberry32(seed >>> 0);
   const group = new THREE.Group();
   group.name = 'starfield';
+  // v0.72.1 — keep the starfield visible in showcase mode. The
+  // showcase's isolation pass hides every non-tagged mesh/points/line;
+  // this tag is the contract that the deep-space backdrop survives.
+  group.userData.showcaseKeep = true;
 
   const layers = [
     { weight: 0.70, sizeMul: 0.7, bMin: 0.3, bMax: 0.7 },
@@ -74,7 +78,9 @@ export function createStarfield({
       fog: false,
     });
 
-    group.add(new THREE.Points(geom, mat));
+    const points = new THREE.Points(geom, mat);
+    points.userData.showcaseKeep = true; // v0.72.1 — same contract as the group
+    group.add(points);
   }
 
   return group;
