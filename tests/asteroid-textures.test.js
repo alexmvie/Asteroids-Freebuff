@@ -44,6 +44,58 @@ for (const { name, path } of TEXTURES) {
 }
 
 // -----------------------------------------------------------------------
+// Realistic texture sets (realistic-{1..5}-{albedo,normal,roughness}.png).
+//
+// v0.71.4 regression guard for the JPEG-as-PNG trap: the July-2026
+// Antigravity generation shipped JPEG bytes with .png extensions.
+// Chrome happens to sniff magic bytes and decodes them anyway, but the
+// assets violate the engine texture spec (public/asteroid-prompt.md:
+// "No JPEG — JPEG artifacts on normal maps look like a bumpy waxy
+// surface") and can break in stricter environments (CDNs that enforce
+// MIME type, other browsers, texture-compression pipelines). These
+// tests pin real PNG signatures + exact 1024×1024 power-of-two
+// dimensions for every realistic set the engine loads via
+// src/entities/asteroid.js's getRealisticAlbedo/Normal/Roughness.
+// -----------------------------------------------------------------------
+
+const REALISTIC_SETS = [1, 2, 3, 4, 5];
+const REALISTIC_MAPS = ['albedo', 'normal', 'roughness'];
+const REALISTIC_TEXTURES = [];
+for (const set of REALISTIC_SETS) {
+  for (const map of REALISTIC_MAPS) {
+    REALISTIC_TEXTURES.push(`${TEXTURE_DIR}/realistic-${set}-${map}.png`);
+  }
+}
+
+for (const path of REALISTIC_TEXTURES) {
+  const label = path.replace(`${TEXTURE_DIR}/`, '');
+  test(`Realistic texture: ${label} exists and is a real PNG (not JPEG bytes)`, () => {
+    assert.ok(existsSync(path), `expected realistic texture at ${path}`);
+    // PNG magic-number check. A JPEG saved with a .png extension
+    // starts with FF D8 FF E0 and fails byte 0 here (89 vs FF).
+    const head = readFileSync(path).subarray(0, 8);
+    for (let i = 0; i < PNG_SIGNATURE.length; i++) {
+      assert.equal(
+        head[i], PNG_SIGNATURE[i],
+        `${label} is not a valid PNG (signature byte ${i} = 0x${head[i].toString(16)}, expected 0x${PNG_SIGNATURE[i].toString(16)}) — JPEG bytes saved with a .png extension will fail this check`,
+      );
+    }
+  });
+}
+
+test('Realistic texture sets: all 15 maps are 1024×1024 (power-of-two)', () => {
+  // Same cheap IHDR width/height read as the classic-set test above.
+  for (const path of REALISTIC_TEXTURES) {
+    const label = path.replace(`${TEXTURE_DIR}/`, '');
+    const head = readFileSync(path).subarray(0, 24);
+    const w = (head[16] << 24) | (head[17] << 16) | (head[18] << 8) | head[19];
+    const h = (head[20] << 24) | (head[21] << 16) | (head[22] << 8) | head[23];
+    assert.equal(w, 1024, `${label} width = ${w}, expected 1024`);
+    assert.equal(h, 1024, `${label} height = ${h}, expected 1024`);
+  }
+});
+
+// -----------------------------------------------------------------------
 // Cross-cutting: all 4 maps are 1024×1024 (power-of-two).
 //
 // Power-of-two dimensions get full mipmap + texture-compression
