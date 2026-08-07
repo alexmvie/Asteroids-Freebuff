@@ -75,6 +75,15 @@ export function createScene({ canvas } = {}) {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setClearColor(0x05060c, 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
+  // v0.71.5 — ACES filmic tone mapping (research-backed: real space
+  // scenes have extreme luminance range — blinding sunlit rock next to
+  // pitch-black shadow. Default NoToneMapping clamps the sunlit side
+  // (intensity 5.2) to pure white. ACES rolls off highlights softly
+  // instead, so the lit sides of asteroids keep albedo detail while
+  // shadows stay dark. Exposure 1.0 keeps the overall brightness;
+  // tune TONE_MAPPING_EXPOSURE here if the field reads too dark.
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.0;
   // v0.69.3 — PCFShadowMap (medium-hart) instead of PCFSoftShadowMap.
   // Physically motivated: there’s no atmospheric scatter in space, so
   // shadow penumbra approaches 0. The v0.68.0 PCFSoftShadowMap + radius=4

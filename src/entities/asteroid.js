@@ -115,16 +115,188 @@ function creviceDepth(n, exponent = EROSION_EXPONENT) {
 }
 
 // ---------------------------------------------------------------------------
+// v0.71.5 -- Worley-style impact craters (research-backed: Bennu,
+// Ryugu, Eros, Lutetia are covered in bowl-shaped craters with raised
+// rims — real geometry, not just texture). Deterministic placement:
+// crater centers are sampled on the unit sphere from a seed derived
+// ONLY from (ox, oy, oz), so every (seed, ox, oy, oz) asteroid gets
+// the same crater field at every LOD level (the placement ignores
+// `detail`).
+//
+// Tunables (SSOT-local; exposed for unit testing):
+//   CRATER_SCALE = 0.36 -- crater depth as a fraction of the vertex
+//     radius (v0.71.6: 0.28 → 0.36). Bowl depth range [0.7..1.6] ×
+//     CRATER_SCALE ≈ 0.25..0.58 of the local radius — deep enough to
+//     read as real impact bowls (Bennu's craters are deep, not flat
+//     stains). Rim height [0.2..0.55] × CRATER_SCALE is a visible
+//     raised lip outside the bowl edge.
+//   Crater angular radii 0.15..0.50 rad — a medium asteroid (r=4)
+//     gets craters 0.6..2.0u across; a HUGE (r=30) gets 4.5..15u
+//     craters, matching the "really huge" scale.
+// ---------------------------------------------------------------------------
+const CRATER_SCALE = 0.36;
+
+/**
+ * Place `count` crater centers deterministically on the unit sphere.
+ * Seed = hash of (ox, oy, oz) only (no `detail`, no `seed`), so the
+ * same asteroid geometry gets the same craters at every LOD level.
+ * Sampling is the same uniform-on-sphere formula as
+ * `randomUnitVec3` in the world layer.
+ *
+ * @param {number} ox  per-instance noise offset X
+ * @param {number} oy  per-instance noise offset Y
+ * @param {number} oz  per-instance noise offset Z
+ * @param {number} count  number of craters to place
+ * @returns {Array<{x:number,y:number,z:number,angularRadius:number,depth:number,rim:number}>}
+ */
+function placeCraterCenters(ox, oy, oz, count) {
+  const rng = mulberry32(
+    ((Math.floor(ox) * 73856093) ^ (Math.floor(oy) * 19349663) ^ (Math.floor(oz) * 83492791)) >>> 0,
+  );
+  const centers = [];
+  for (let i = 0; i < count; i++) {
+    const z = 1 - 2 * rng();
+    const phi = rng() * Math.PI * 2;
+    const r = Math.sqrt(Math.max(0, 1 - z * z));
+    centers.push({
+      x: r * Math.cos(phi),
+      y: r * Math.sin(phi),
+      z,
+      angularRadius: 0.15 + rng() * 0.35, // radians
+      depth: 0.7 + rng() * 0.9,            // bowl depth (× CRATER_SCALE) — v0.71.6 deeper bowls
+      rim: 0.2 + rng() * 0.35,             // rim height (× CRATER_SCALE) — v0.71.6 stronger rims
+    });
+  }
+  return centers;
+}
+
+/**
+ * Crater displacement contribution at a vertex direction.
+ * Returns signed "crater units":
+ *   - t < 1        → bowl depression −depth·(1−t)²  (deepest at center)
+ *   - t ≈ 1..1.4  → gaussian raised rim (peak just outside the bowl edge)
+ *   - t ≥ 1.6     → 0 (no influence)
+ * Caller scales by CRATER_SCALE × vertex radius.
+ *
+ * @param {{x:number,y:number,z:number}} n  unit vertex direction
+ * @param {{x:number,y:number,z:number,angularRadius:number,depth:number,rim:number}} c  crater center
+ * @returns {number}
+ */
+function craterContribution(n, c) {
+  const cosAngle = Math.max(-1, Math.min(1, n.x * c.x + n.y * c.y + n.z * c.z));
+  const angle = Math.acos(cosAngle);
+  const t = angle / c.angularRadius;
+  if (t >= 1.6) return 0;
+  const bowl = t < 1 ? -c.depth * Math.pow(1 - t, 2) : 0;
+  const rimDist = (t - 1) / 0.25;
+  const rim = c.rim * Math.exp(-rimDist * rimDist);
+  return bowl + rim;
+}
+
+// ---------------------------------------------------------------------------
+// v0.71.6 -- Boulder layer (research-backed: Bennu's surface is
+// covered in hundreds of rocks — OSIRIS-REx counted >200 boulders
+// >10 m across on a 500 m body; Ryugu and Itokawa show the same
+// boulder-strewn regolith). This is the single most distinguishing
+// surface feature of a real asteroid, and the v0.71.5 pass had no
+// way to produce it — only craters (negative bowls) and noise bumps
+// (which read as smooth hills, not discrete rocks).
+//
+// Boulders are positive mounds with a STEEP falloff near the edge
+// (rock profile: rounded top, sharp base where the rock meets the
+// regolith). Placement is deterministic from (ox, oy, oz) only (same
+// seed contract as craters), so every LOD level shows the same rocks.
+//
+// Tunables (SSOT-local; exposed for unit testing):
+//   BOULDER_SCALE = 0.22 -- rock height as a fraction of the local
+//     vertex radius. A r=4 asteroid gets boulders 0.6..1.7u tall —
+//     clearly protruding rocks, matching the 10-30%-of-radius
+//     boulders photographed on Bennu.
+//   Angular radii 0.08..0.28 rad -- rocks smaller than craters so
+//     the surface reads as "big bowl craters + small pebbles" (the
+//     real Bennu hierarchy).
+//   sharpness 1.5..4.0 -- (1 - t²)^sharpness falloff. >2 gives the
+//     rock a steep base + flat-ish top; <1.5 would read as smooth
+//     hills.
+// ---------------------------------------------------------------------------
+const BOULDER_SCALE = 0.22;
+
+/**
+ * Place `count` boulder centers deterministically on the unit sphere.
+ * Seed = hash of (ox, oy, oz) only, using a DIFFERENT prime mix than
+ * `placeCraterCenters` so boulders and craters don't share placement
+ * (real impact fields are decorrelated from the boulder population).
+ *
+ * @param {number} ox  per-instance noise offset X
+ * @param {number} oy  per-instance noise offset Y
+ * @param {number} oz  per-instance noise offset Z
+ * @param {number} count  number of boulders to place
+ * @returns {Array<{x:number,y:number,z:number,angularRadius:number,height:number,sharpness:number}>}
+ */
+function placeBoulderCenters(ox, oy, oz, count) {
+  const rng = mulberry32(
+    ((Math.floor(ox) * 2654435761) ^ (Math.floor(oy) * 1597334677) ^ (Math.floor(oz) * 805459861)) >>> 0,
+  );
+  const centers = [];
+  for (let i = 0; i < count; i++) {
+    const z = 1 - 2 * rng();
+    const phi = rng() * Math.PI * 2;
+    const r = Math.sqrt(Math.max(0, 1 - z * z));
+    centers.push({
+      x: r * Math.cos(phi),
+      y: r * Math.sin(phi),
+      z,
+      angularRadius: 0.08 + rng() * 0.2, // radians — smaller than craters
+      height: 0.6 + rng() * 1.0,          // × BOULDER_SCALE
+      sharpness: 1.5 + rng() * 2.5,       // rock-profile falloff exponent
+    });
+  }
+  return centers;
+}
+
+/**
+ * Boulder displacement contribution at a vertex direction.
+ * Returns a POSITIVE-only mound (0 outside the rock's angular
+ * radius):
+ *   - t < 1 → height · (1 − t²)^sharpness  (rounded top, steep base)
+ *   - t ≥ 1 → 0
+ * Caller scales by BOULDER_SCALE × vertex radius.
+ *
+ * @param {{x:number,y:number,z:number}} n  unit vertex direction
+ * @param {{x:number,y:number,z:number,angularRadius:number,height:number,sharpness:number}} b  boulder
+ * @returns {number}  mound height ∈ [0, height]
+ */
+function boulderContribution(n, b) {
+  const cosAngle = Math.max(-1, Math.min(1, n.x * b.x + n.y * b.y + n.z * b.z));
+  const angle = Math.acos(cosAngle);
+  const t = angle / b.angularRadius;
+  if (t >= 1) return 0;
+  return b.height * Math.pow(1 - t * t, b.sharpness);
+}
+
+// ---------------------------------------------------------------------------
 // Geometry noise displacement. Displaces each vertex along its surface
 // normal by an fbm (or crater/craggy variant) value.
 // ---------------------------------------------------------------------------
-function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType = 'fbm') {
+function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType = 'fbm', craterCount = 0, boulderCount = 0) {
   const positions = geom.attributes.position;
   const normals = geom.attributes.normal;
   if (!positions || !normals) return;
 
   const posArray = positions.array;
   const normArray = normals.array;
+
+  // v0.71.5 — Worley-style impact craters. Precompute the deterministic
+  // crater field once (same centers for every LOD level — placement
+  // derives from ox/oy/oz only). Each vertex then adds its crater
+  // contribution scaled by CRATER_SCALE × local radius, so big
+  // asteroids get proportionally big craters.
+  const craters = craterCount > 0 ? placeCraterCenters(ox, oy, oz, craterCount) : [];
+
+  // v0.71.6 — Worley-style boulder field (Bennu/Ryugu signature
+  // surface feature). Same deterministic contract as craters: positive
+  // mounds computed once, scaled by BOULDER_SCALE × local radius.
+  const boulders = boulderCount > 0 ? placeBoulderCenters(ox, oy, oz, boulderCount) : [];
 
   // v0.70.0 — multi-layer frequency displacement (modern game technique
   // for realistic rocky surfaces; classical id Tech / Source engine
@@ -181,6 +353,43 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
     );
     const erosionCarve = creviceDepth(nErosion) * EROSION_AMOUNT_RATIO * noiseAmount;
 
+    // v0.71.5 — crater displacement at this vertex (world units).
+    // Direction = unit vertex direction; scale = CRATER_SCALE × |v|.
+    let craterMod = 0;
+    if (craters.length > 0) {
+      const vLen = Math.hypot(x, y, z) || 1e-6;
+      const dir = { x: x / vLen, y: y / vLen, z: z / vLen };
+      for (let c = 0; c < craters.length; c++) {
+        craterMod += craterContribution(dir, craters[c]);
+      }
+      craterMod *= CRATER_SCALE * vLen;
+      // v0.71.6 review fix — clamp the summed crater contribution to
+      // [-0.5, 0.4] × local radius. Overlapping crater bowls (5-8
+      // random placements on a small sphere) can otherwise stack the
+      // negative carve to hollow-out depths on SMALL (r=2) and HUGE
+      // (r=30) tiers. Single craters stay deep (real Bennu bowls are
+      // ~0.2-0.35× radius); only pathological overlap gets capped.
+      craterMod = Math.max(-vLen * 0.5, Math.min(vLen * 0.4, craterMod));
+    }
+
+  // v0.71.6 — boulder mounds (positive-only, added last so rocks
+  // protrude FROM the cratered/noise surface).
+  let boulderMod = 0;
+  if (boulders.length > 0) {
+    const vLen = Math.hypot(x, y, z) || 1e-6;
+    const dir = { x: x / vLen, y: y / vLen, z: z / vLen };
+    for (let b = 0; b < boulders.length; b++) {
+      boulderMod += boulderContribution(dir, boulders[b]);
+    }
+    boulderMod *= BOULDER_SCALE * vLen;
+    // v0.71.6 review fix — clamp the summed contribution so
+    // overlapping boulder fields can't stack the mound beyond a
+    // rock-plausible 0.45× radius (5-8 random placements on a small
+    // body WILL overlap; without the cap a SMALL r=2 asteroid could
+    // read as a blob of fused mounds).
+    boulderMod = Math.min(boulderMod, vLen * 0.45);
+  }
+
     let displacement = 0;
     if (noiseType === 'crater') {
       // Existing crater formula + micro overlay so potato craters get
@@ -188,26 +397,31 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
       const crater = nBase < 0.45
         ? -Math.pow((0.45 - nBase) * 2.2, 2.0) * noiseAmount
         : (nBase - 0.5) * 0.4 * noiseAmount;
-      displacement = crater + (nMicro - 0.5) * 0.12 * noiseAmount - erosionCarve;
+      displacement = crater + (nMicro - 0.5) * 0.12 * noiseAmount - erosionCarve + craterMod + boulderMod;
     } else if (noiseType === 'craggy') {
-      // v0.70.0 — the v0.69.5 formula `(abs(n-0.5)*2 - 0.5) * amount`
-      // is the canonical cragged-rock silhouette but reads as soft
-      // on low-detail meshes. The base layer's noiseAmount is bumped
-      // 0.40 -> 0.50 below to push silhouette variation further, and
-      // the v0.70.0 micro layer adds the high-frequency sub-detail
-      // that gives the close-up "rough rock" read. The formula itself
-      // is kept (sharpening exponents were considered but introduced
-      // bias asymmetry; the multi-layer approach + bigger amount
-      // achieves the intended visual gain without the math pitfalls).
-      displacement = (Math.abs(nBase - 0.5) * 2.0 - 0.5) * noiseAmount
+      // v0.71.5 — ridged multifractal (classic Musgrave ridged noise).
+      // `1 - |2n - 1|` produces sharp V-creases where the fbm crosses
+      // 0.5 — real impact-fractured rock has sharp crests + flat-ish
+      // valleys, not smooth sine bumps. Replaces the v0.69.5
+      // `(abs(n-0.5)*2 - 0.5)` formula which read as soft rounded
+      // lumps at low detail. The base noiseAmount (0.50 below) + the
+      // micro layer are kept; the ridged term now drives the
+      // silhouette with angular facets.
+      const ridge = 1 - Math.abs(2 * nBase - 1); // [0,1], crest at n=0.5
+      displacement = (ridge - 0.5) * 2 * noiseAmount
                    + (nMicro - 0.5) * 0.12 * noiseAmount
-                   - erosionCarve;
+                   - erosionCarve
+                   + craterMod
+                   + boulderMod;
     } else {
-      // Standard smooth fbm (used by crystalline shards + contact
-      // binary lobes) — now with the micro layer composited on top.
+      // Standard smooth fbm (used by spinning tops + elongated
+      // potatoes) — with the micro layer + craters + boulders
+      // composited on top.
       displacement = (nBase - 0.5) * 2 * noiseAmount
                    + (nMicro - 0.5) * 0.12 * noiseAmount
-                   - erosionCarve;
+                   - erosionCarve
+                   + craterMod
+                   + boulderMod;
     }
 
     posArray[i * 3 + 0] = x + nx * displacement;
@@ -224,22 +438,61 @@ function displaceGeometry(geom, noiseAmount, noiseScale, ox, oy, oz, noiseType =
 // different noise type/displacement amount so the field has visible variety.
 // Shape index is derived deterministically from spec.seed % 5.
 // ---------------------------------------------------------------------------
-function buildCrystallineShardGeometry(radius, detail, ox, oy, oz) {
-  // v0.70.0 — denser segment counts across the LOD range so a close-up
-  // crystalline cylinder has visibly more angular facets and reads as
-  // a faceted crystal instead of an octagonal prism.
-  const radialSegments = detail === 4 ? 8 : (detail === 3 ? 6 : (detail === 2 ? 5 : 4));
-  const heightSegments = detail === 4 ? 6 : (detail === 3 ? 4 : (detail === 2 ? 2 : 1));
-  const height = radius * 1.6;
-  const geom = new THREE.CylinderGeometry(
-    radius * 0.6,
-    radius * 0.9,
-    height,
-    radialSegments,
-    heightSegments,
-    false
-  );
-  displaceGeometry(geom, 0.18 * radius, 1.8 / radius, ox, oy, oz);
+function buildSpinningTopGeometry(radius, detail, ox, oy, oz) {
+  // v0.71.5 — Bennu/Ryugu-style "spinning top": an icosphere with a
+  // latitudinal profile — poles pulled in, equator bulged out into a
+  // ridge. Real imagery (OSIRIS-REx, Hayabusa2) shows this is one of
+  // the two most common large-asteroid silhouettes (the other being
+  // the contact-binary/rubble pile). Replaces the v0.69.x
+  // crystalline shard, which read as a gemstone, not an asteroid.
+  //
+  // The latitudinal warp is a pure function of radius (no rng): the
+  // per-instance (ox, oy, oz) noise offsets then add the irregular
+  // rock character on top.
+  const geom = new THREE.IcosahedronGeometry(radius, detail);
+  const pos = geom.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const lat = y / radius;                 // -1 (south pole) .. +1 (north)
+    // v0.71.6 — `Math.max(0, ...)` guard: IcosahedronGeometry detail 3
+    // produces 12 vertices whose |y|/radius = 1.0000000397 (floating-
+    // point overshoot past the pole). The old `1 - Math.abs(lat)` went
+    // slightly negative → `Math.pow(negative, 1.5)` = NaN → the vertex
+    // silently became NaN → Three.js logged "computed radius is NaN"
+    // and the asteroid rendered corrupted (or vanished). The clamp
+    // keeps the bulge term at exactly 0 at the poles.
+    const squash = 1 - 0.32 * Math.abs(lat); // pull poles inward
+    const bulge = 1 + 0.26 * Math.pow(Math.max(0, 1 - Math.abs(lat)), 1.5); // equatorial ridge
+    pos.setXYZ(i, x * bulge, y * squash, z * bulge);
+  }
+  pos.needsUpdate = true;
+  geom.computeVertexNormals();
+  // v0.71.6 — stronger base displacement (0.24 → 0.30) so the top's
+  // silhouette isn't a smooth ellipsoid, plus a boulder field (5 rocks)
+  // on top of the 3 craters — Bennu's equatorial ridge is littered
+  // with boulders.
+  displaceGeometry(geom, radius * 0.30, 2.0 / radius, ox, oy, oz, 'fbm', 3, 5);
+  return geom;
+}
+
+function buildElongatedPotatoGeometry(radius, detail, ox, oy, oz) {
+  // v0.71.5 — Eros-style elongated body: an icosphere stretched 1.6×
+  // along X before displacement. NEAR Shoemaker photographed Eros as
+  // a 34×11×11 km peanut-ish "shoe"; the stretch produces the
+  // signature long-axis silhouette without the contact-binary neck.
+  const geom = new THREE.IcosahedronGeometry(radius, detail);
+  const pos = geom.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    pos.setXYZ(i, pos.getX(i) * 1.6, pos.getY(i) * 0.9, pos.getZ(i) * 1.1);
+  }
+  pos.needsUpdate = true;
+  geom.computeVertexNormals();
+  // v0.71.6 — craggy (ridged) noise at 0.38 gives Eros-style angular
+  // facets; 3 craters + 6 boulders make the long axis read as a
+  // rock-strewn ridge rather than a stretched ball.
+  displaceGeometry(geom, radius * 0.38, 2.0 / radius, ox, oy, oz, 'craggy', 3, 6);
   return geom;
 }
 
@@ -250,7 +503,10 @@ function buildCrateredPotatoGeometry(radius, detail, ox, oy, oz) {
   const heightSegments = detail === 4 ? 12 : (detail === 3 ? 8 : (detail === 2 ? 4 : 2));
   const length = radius * 1.5;
   const geom = new Capsule(radius, length, capSegments, radialSegments, heightSegments);
-  displaceGeometry(geom, radius * 0.22, 2.0 / radius, ox, oy, oz, 'crater');
+  // v0.71.6 — stronger displacement (0.22 → 0.28) + 5 craters + 7
+  // boulders: the capsule body reads as a densely-cratered, boulder-
+  // strewn potato (Ryugu-style) instead of a smooth bean.
+  displaceGeometry(geom, radius * 0.28, 2.0 / radius, ox, oy, oz, 'crater', 5, 7);
   geom.computePlanarUVs('xy');
   return geom;
 }
@@ -280,7 +536,10 @@ function buildCraggyRockGeometry(radius, detail, ox, oy, oz) {
   // is 25% bigger for stronger feature pop, and the new micro layer
   // adds sub-detail rough surface texture under the directional light.
   const geom = new THREE.IcosahedronGeometry(radius, detail);
-  displaceGeometry(geom, radius * 0.50, 2.0 / radius, ox, oy, oz, 'craggy');
+  // v0.71.6 — ridged at 0.55 + 4 craters + 8 boulders: the classic
+  // "rocky rubble" shape gets the densest boulder field of all shapes
+  // (matches Bennu's boulder-strewn regolith imagery).
+  displaceGeometry(geom, radius * 0.55, 2.0 / radius, ox, oy, oz, 'craggy', 4, 8);
   return geom;
 }
 
@@ -429,26 +688,55 @@ function buildAsteroidMesh(spec) {
   let lod = null;
 
   if (shapeType === 2) {
-    // Contact Binary (Peanut): two overlapping spheres in a sub-group.
+    // v0.71.5 — Rubble Pile (Itokawa-style): 3–6 displaced lobes in a
+    // loose contact pile. Hayabusa photographed Itokawa as two big
+    // lobes fused by a narrow neck; the rubble-pile generalizes that
+    // to N lobes of varying size so the field reads as loose
+    // gravitationally-bound debris rather than a solid body. Lobe
+    // layout is deterministic from a seeded rng (spec.seed), so every
+    // LOD level rebuilds the SAME pile — only the mesh density
+    // changes.
     lod = new THREE.LOD();
 
     const buildLobes = (detail) => {
       const g = new THREE.Group();
-      const a = new THREE.Mesh(new THREE.IcosahedronGeometry(radius * 0.78, detail), material);
-      a.position.set(-radius * 0.35, 0, 0);
-      displaceGeometry(a.geometry, radius * 0.22, 2.2 / radius, ox, oy, oz);
-      tagForShadows(a);
-      const b = new THREE.Mesh(new THREE.IcosahedronGeometry(radius * 0.55, detail), material);
-      b.position.set(radius * 0.45, 0, 0);
-      displaceGeometry(b.geometry, radius * 0.17, 2.5 / radius, ox + 200, oy + 200, oz + 200);
-      tagForShadows(b);
-      g.add(a);
-      g.add(b);
+      const lobeRng = mulberry32((spec.seed ^ 0x5bd1e995) >>> 0);
+      const lobeCount = 3 + Math.floor(lobeRng() * 4); // 3..6
+      for (let i = 0; i < lobeCount; i++) {
+        const fr = 0.45 + lobeRng() * 0.4; // lobe radius fraction of parent
+        const phi = lobeRng() * Math.PI * 2;
+        const dist = radius * (0.25 + lobeRng() * 0.55);
+        const lobeR = radius * fr;
+        const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(lobeR, detail), material);
+        mesh.position.set(
+          Math.cos(phi) * dist,
+          (lobeRng() - 0.5) * radius * 0.6,
+          Math.sin(phi) * dist,
+        );
+        // Per-lobe noise offsets so each rock displaces differently.
+        // v0.71.6 — each lobe also gets 2-3 boulders of its own so the
+        // pile reads as "loose rocks made of rocks" (Itokawa's lobes
+        // are themselves covered in boulders).
+        displaceGeometry(
+          mesh.geometry,
+          lobeR * 0.32,
+          2.2 / lobeR,
+          ox + i * 137,
+          oy + i * 173,
+          oz + i * 211,
+          'craggy',
+          1 + (i % 2),
+          2 + (i % 2),
+        );
+        tagForShadows(mesh);
+        g.add(mesh);
+      }
       return g;
     };
 
-    // v0.70.0 — LOD detail bumped 2/1/0 -> 4/3/2 for the contact binary
-    // peanut's two lobes (same rationale as the single-mesh path below).
+    // v0.70.0 — LOD detail 4/3/2 (same rationale as the single-mesh
+    // path below). The pile layout is deterministic (seeded), so all
+    // three levels show the same arrangement.
     lod.addLevel(buildLobes(4), LOD_CLOSE_DIST);
     lod.addLevel(buildLobes(3), LOD_MID_DIST);
     lod.addLevel(buildLobes(2), LOD_FAR_DIST);
@@ -461,14 +749,12 @@ function buildAsteroidMesh(spec) {
     lod = new THREE.LOD();
 
     const getGeom = (detail) => {
-      if (shapeType === 0) return buildCrystallineShardGeometry(radius, detail, ox, oy, oz);
+      if (shapeType === 0) return buildSpinningTopGeometry(radius, detail, ox, oy, oz);
       if (shapeType === 1) return buildCrateredPotatoGeometry(radius, detail, ox, oy, oz);
-      // v0.69.5 — shapeType=3 (was a TorusGeometry, the "donut")
-      // REMOVED per user feedback "ein donut als asteroid ist
-      // eigentlich auch idiotisch". Now falls through to the craggy
-      // rock builder. Net effect: the field's visual variety still
-      // has asymmetry (4 shape types instead of 5) but no donut-shaped
-      // asteroids.
+      if (shapeType === 3) return buildElongatedPotatoGeometry(radius, detail, ox, oy, oz);
+      // shapeType 4 (craggy_rock) + defensive fallback for unknown
+      // types (v0.69.5 removed the torus "donut"; v0.71.5 keeps the
+      // craggy builder as the safe default).
       return buildCraggyRockGeometry(radius, detail, ox, oy, oz);
     };
 
@@ -496,21 +782,14 @@ function buildAsteroidMesh(spec) {
     group.add(lod);
   }
 
-  // Debug ground footprint. Semi-transparent plane under the asteroid
-  // that catches the sun shadow (receiveShadow=true above).
-  const groundGeom = new THREE.PlaneGeometry(spec.radius * 2, spec.radius * 2);
-  const groundMat = new THREE.MeshBasicMaterial({
-    color: 0x2a1a3a,
-    transparent: true,
-    opacity: 0.55,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  });
-  const ground = new THREE.Mesh(groundGeom, groundMat);
-  ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -radius * 1.15;
-  tagForShadows(ground, { cast: false, receive: true });
-  group.add(ground);
+  // v0.71.6 — debug ground footprint REMOVED. The v0.5x-era debug
+  // plane (a semi-transparent dark square under every asteroid that
+  // caught a fake sun shadow) was the #1 photoreal killer: in space
+  // there is no ground, and the plane read as a floating dark halo
+  // around each rock. Real asteroid lighting = sun shadow falls on
+  // OTHER asteroids / nothing (deep space = pitch black). castShadow
+  // on the body meshes already produces asteroid-on-asteroid shadows;
+  // no ground plane needed.
 
   group.position.set(spec.position.x, spec.position.y, spec.position.z);
   group.userData.lod = lod;
@@ -627,4 +906,26 @@ export {
   EROSION_SCALE_RATIO,
   EROSION_AMOUNT_RATIO,
   EROSION_EXPONENT,
+};
+
+// v0.71.5 -- Worley-crater helpers + scale exposed for direct unit
+// testing (determinism, bowl/rim geometry, world-scale pin tests live
+// in tests/asteroid.test.js). SSOT for the crater layer: retune
+// visual impact via CRATER_SCALE + the depth/rim ranges in
+// placeCraterCenters.
+export {
+  placeCraterCenters,
+  craterContribution,
+  CRATER_SCALE,
+};
+
+// v0.71.6 -- Boulder-layer helpers + scale exposed for direct unit
+// testing (determinism, positive-only mounds, steep-edge falloff,
+// world-scale pin tests live in tests/asteroid.test.js). SSOT for
+// the boulder layer: retune visual impact via BOULDER_SCALE + the
+// height/radius ranges in placeBoulderCenters.
+export {
+  placeBoulderCenters,
+  boulderContribution,
+  BOULDER_SCALE,
 };

@@ -77,25 +77,28 @@ export const NEBULA_RENDER_THRESHOLD = 0.1;
  * v0.69.6 — Asteroid shape enumeration (single source of truth).
  *
  * Each named type is rendered by a distinct geometry builder in
- * `src/entities/asteroid.js` (crystalline_shard → cylindrical
- * CylinderGeometry+jitter, cratered_potato → Capsule+crater
- * displacement, contact_binary → dual-icosphere peanut, craggy_rock
- * → Icosphere+craggy displacement). The strings are the canonical
- * IDs persisted on `AsteroidSpec.shape`; the entity factory
+ * `src/entities/asteroid.js` (spinning_top → icosphere with latitudinal
+ * equatorial ridge like Bennu/Ryugu, cratered_potato → Capsule + real
+ * carved crater geometry, rubble_pile → N-lobe contact pile like
+ * Itokawa, elongated_potato → stretched icosphere like Eros,
+ * craggy_rock → Icosphere + ridged displacement). The strings are the
+ * canonical IDs persisted on `AsteroidSpec.shape`; the entity factory
  * translates them to integer shapeType values via `shapeToIndex`
  * in `src/world/chunks.js`.
  *
- * Why an enum and not just integers: the SSOT for the shape
- * taxonomy lives here so the data-model layer (chunk generation,
- * test fixtures) and the entity layer (geometry dispatch) agree.
- * v0.69.5 dropped the legacy shapeType=3 'torus' (the donut, which
- * the user reported as "idiotisch") — the v0.69.6 enum therefore
- * has 4 entries, not 5.
+ * History: v0.69.5 dropped the legacy shapeType=3 'torus' (donut).
+ * v0.71.5 (research-backed — Bennu/Ryugu/Itokawa/Eros spacecraft
+ * imagery) replaced 'crystalline_shard' (looked like a crystal, not
+ * an asteroid) with 'spinning_top', generalized 'contact_binary'
+ * (2 lobes) to 'rubble_pile' (3–6 lobes, Itokawa-style), and added
+ * 'elongated_potato' (Eros-style 1.6× stretch). The enum therefore
+ * has 5 entries.
  */
 export const SHAPE_TYPES = Object.freeze({
-  CRYSTALLINE_SHARD: 'crystalline_shard',
+  SPINNING_TOP: 'spinning_top',
   CRATERED_POTATO: 'cratered_potato',
-  CONTACT_BINARY: 'contact_binary',
+  RUBBLE_PILE: 'rubble_pile',
+  ELONGATED_POTATO: 'elongated_potato',
   CRAGGY_ROCK: 'craggy_rock',
 });
 
@@ -104,29 +107,20 @@ export const SHAPE_TYPES = Object.freeze({
  * must sum to 100). See `pickShapeType` in `src/world/chunks.js`
  * for the cumulative-distribution sampler.
  *
- * VISUAL GOAL — more variety in the asteroid field:
- *   - v0.69.5 removed the donut/torus shape, leaving craggy_rock in
- *     2 of the 5 shapeType slots → craggy combined = 40% of the
- *     field, which reads as monotonous when flying through.
- *   - crystalline_shard and cratered_potato have the most
- *     distinctive alien silhouettes (cylinder vs capsule, regular
- *     vs cratered); boosting them breaks the icosphere-monoculture.
- *   - contact_binary pulled back to 10% so it remains an
- *     occasional "wtf is that?" variety rather than recurring
- *     eye-candy.
- *
- * TARGET DISTRIBUTION (single-source-of-truth edit point — bumping
- * these numbers is the only knob to rebalance the field):
- *   - crystalline_shard: 30% (was ~20%)
- *   - cratered_potato:   30% (was ~20%)
- *   - contact_binary:    10% (was ~20%)
- *   - craggy_rock:       30% (was ~40%)
+ * v0.71.5 — Rebalanced for the 5-shape realistic pool:
+ *   - spinning_top: 20% — iconic Bennu/Ryugu silhouette
+ *   - cratered_potato: 25% — the "classic" asteroid, with real
+ *     carved crater bowls (v0.71.5 Worley craters)
+ *   - rubble_pile: 15% — Itokawa-style loose contact pile
+ *   - elongated_potato: 15% — Eros-style stretched rock
+ *   - craggy_rock: 25% — ridged irregular monolith
  */
 export const SHAPE_WEIGHTS = Object.freeze({
-  crystalline_shard: 30,
-  cratered_potato: 30,
-  contact_binary: 10,
-  craggy_rock: 30,
+  spinning_top: 20,
+  cratered_potato: 25,
+  rubble_pile: 15,
+  elongated_potato: 15,
+  craggy_rock: 25,
 });
 
 /**

@@ -43,33 +43,41 @@ if (!validateSizeWeights()) {
 }
 
 // v0.69.6 — inverse of SHAPE_TYPES. Maps a named shape to the
-// legacy integer shapeType used by `src/entities/asteroid.js`'s
-// `buildAsteroidMesh` switch (0 = crystalline, 1 = cratered,
-// 2 = binary, 3 = craggy). Lives in the data-model layer so the
-// entity factory stays decoupled from SHAPE_TYPES' string IDs —
-// only `pickShapeType` (which produces the string names) is
-// called by chunk generation; only `shapeToIndex` (which consumes
-// the strings) is called by the entity factory.
+// integer shapeType used by `src/entities/asteroid.js`'s
+// `buildAsteroidMesh` switch.
+//
+// v0.71.5 — 5-shape taxonomy (research-backed realistic pool):
+//   0 = spinning_top (Bennu/Ryugu equatorial-ridge top)
+//   1 = cratered_potato (Capsule + carved crater bowls)
+//   2 = rubble_pile (Itokawa-style 3–6 lobe contact pile)
+//   3 = elongated_potato (Eros-style 1.6× stretched rock)
+//   4 = craggy_rock (ridged irregular monolith)
+// Lives in the data-model layer so the entity factory stays
+// decoupled from SHAPE_TYPES' string IDs — only `pickShapeType`
+// (which produces the string names) is called by chunk generation;
+// only `shapeToIndex` (which consumes the strings) is called by
+// the entity factory.
 const SHAPE_TO_INDEX = Object.freeze({
-  crystalline_shard: 0,
+  spinning_top: 0,
   cratered_potato: 1,
-  contact_binary: 2,
-  craggy_rock: 3,
+  rubble_pile: 2,
+  elongated_potato: 3,
+  craggy_rock: 4,
 });
 
 /**
  * v0.69.6 — Inverse of SHAPE_TYPES. Returns the integer shapeType
  * that the entity factory uses to dispatch geometry builders.
- * Defensive: unknown shapes fall back to craggy_rock (3) so a
+ * Defensive: unknown shapes fall back to craggy_rock (4) so a
  * future SHAPE_TYPES addition without a matching SHAPE_TO_INDEX
  * entry never produces a non-asteroid entity.
  *
  * @param {string} shape  One of SHAPE_TYPES values.
- * @returns {0|1|2|3}
+ * @returns {0|1|2|3|4}
  */
 export function shapeToIndex(shape) {
   const idx = SHAPE_TO_INDEX[shape];
-  return typeof idx === 'number' ? idx : 3;
+  return typeof idx === 'number' ? idx : 4;
 }
 
 /**

@@ -540,22 +540,26 @@ test('updateStreamingBubble: chunksPerFrame cap does NOT count reactivations', (
 // shapeToIndex, generateChunk spec.shape field)
 // ---------------------------------------------------------------------------
 
-test('SHAPE_TYPES: enum has the 4 expected shapes with frozen string IDs', () => {
-  // The 4-shape enum is the v0.69.6 SSOT. shapeType=3 'torus' from
-  // v0.69.4 and earlier was removed in v0.69.5 (donut is dumb-looking);
-  // the v0.69.6 enum therefore has exactly 4 entries, not 5.
-  assert.equal(SHAPE_TYPES.CRYSTALLINE_SHARD, 'crystalline_shard');
+test('SHAPE_TYPES: enum has the 5 research-backed shapes with frozen string IDs', () => {
+  // v0.71.5 — 5-shape realistic pool (replaces the v0.69.6 4-shape
+  // enum). Research-backed from spacecraft imagery: spinning_top
+  // (Bennu/Ryugu equatorial ridge), cratered_potato (classic),
+  // rubble_pile (Itokawa contact pile), elongated_potato (Eros),
+  // craggy_rock (ridged monolith).
+  assert.equal(SHAPE_TYPES.SPINNING_TOP, 'spinning_top');
   assert.equal(SHAPE_TYPES.CRATERED_POTATO, 'cratered_potato');
-  assert.equal(SHAPE_TYPES.CONTACT_BINARY, 'contact_binary');
+  assert.equal(SHAPE_TYPES.RUBBLE_PILE, 'rubble_pile');
+  assert.equal(SHAPE_TYPES.ELONGATED_POTATO, 'elongated_potato');
   assert.equal(SHAPE_TYPES.CRAGGY_ROCK, 'craggy_rock');
-  assert.equal(Object.keys(SHAPE_TYPES).length, 4, 'enum has exactly 4 shapes');
+  assert.equal(Object.keys(SHAPE_TYPES).length, 5, 'enum has exactly 5 shapes');
 });
 
-test('SHAPE_WEIGHTS: target distribution (30/30/10/30) sums to 100', () => {
-  assert.equal(SHAPE_WEIGHTS.crystalline_shard, 30, 'crystalline: 30%');
-  assert.equal(SHAPE_WEIGHTS.cratered_potato, 30, 'cratered: 30%');
-  assert.equal(SHAPE_WEIGHTS.contact_binary, 10, 'binary: 10%');
-  assert.equal(SHAPE_WEIGHTS.craggy_rock, 30, 'craggy: 30%');
+test('SHAPE_WEIGHTS: target distribution (20/25/15/15/25) sums to 100', () => {
+  assert.equal(SHAPE_WEIGHTS.spinning_top, 20, 'spinning_top: 20%');
+  assert.equal(SHAPE_WEIGHTS.cratered_potato, 25, 'cratered: 25%');
+  assert.equal(SHAPE_WEIGHTS.rubble_pile, 15, 'rubble_pile: 15%');
+  assert.equal(SHAPE_WEIGHTS.elongated_potato, 15, 'elongated: 15%');
+  assert.equal(SHAPE_WEIGHTS.craggy_rock, 25, 'craggy: 25%');
   // validateShapeWeights is a guard helper; default arg = SHAPE_WEIGHTS.
   assert.equal(validateShapeWeights(), true, 'SHAPE_WEIGHTS sums to 100');
   // Custom-argument test: a malformed table is rejected.
@@ -564,27 +568,32 @@ test('SHAPE_WEIGHTS: target distribution (30/30/10/30) sums to 100', () => {
   assert.equal(validateShapeWeights({ a: 0, b: 0 }), false, 'sum 0 fails');
 });
 
-test('pickShapeType: zero-rng returns the first bucket (crystalline_shard)', () => {
-  // rng=()=>0 → r = 0*100 = 0; cumulative after first bucket (30) ⇒ 0 < 30 → returns 'crystalline_shard'.
-  assert.equal(pickShapeType(() => 0), 'crystalline_shard', 'r=0 picks first bucket');
+test('pickShapeType: zero-rng returns the first bucket (spinning_top)', () => {
+  // rng=()=>0 → r = 0*100 = 0; cumulative after first bucket (20) ⇒ 0 < 20 → returns 'spinning_top'.
+  assert.equal(pickShapeType(() => 0), 'spinning_top', 'r=0 picks first bucket');
 });
 
 test('pickShapeType: boundary r-values pick the expected bucket', () => {
-  // Buckets in declaration order: [crystalline: 30, cratered: 30, binary: 10, craggy: 30].
-  // r=29.99/100 ≈ 0.2999 → still in crystalline (cum 30).
-  // r=30/100 = 0.30 → at boundary; 0.30*100=30, cum=30, 30<30 is false → next bucket (cratered).
-  // r=60/100 = 0.60 → cum after [crystalline, cratered] = 60, 60<60 false → next bucket (binary).
-  // r=69.99/100 ≈ 0.6999 → binary cumulative = 70, 69.99<70 → binary.
-  // r=70/100 = 0.70 → cum after [crystalline, cratered, binary] = 70, 70<70 false → craggy.
+  // Buckets in declaration order: [spinning: 20, cratered: 25, rubble: 15, elongated: 15, craggy: 25].
+  // r=19.99/100 ≈ 0.1999 → still in spinning_top (cum 20).
+  // r=20/100 = 0.20 → at boundary; 0.20*100=20, cum=20, 20<20 false → cratered_potato.
+  // r=44.99/100 ≈ 0.4499 → cratered cumulative = 45, 44.99<45 → cratered.
+  // r=45/100 = 0.45 → cum after [spinning, cratered] = 45, 45<45 false → rubble_pile.
+  // r=59.99/100 ≈ 0.5999 → rubble cumulative = 60, 59.99<60 → rubble.
+  // r=60/100 = 0.60 → cum after [spinning, cratered, rubble] = 60, 60<60 false → elongated_potato.
+  // r=74.99/100 ≈ 0.7499 → elongated cumulative = 75, 74.99<75 → elongated.
+  // r=75/100 = 0.75 → cum after [spinning, cratered, rubble, elongated] = 75, 75<75 false → craggy.
   // r=99.99/100 ≈ 0.9999 → craggy cumulative = 100, 99.99<100 → craggy.
   const cases = [
-    { r: 0.0, expected: 'crystalline_shard' },
-    { r: 0.2999, expected: 'crystalline_shard' },
-    { r: 0.30, expected: 'cratered_potato' },
-    { r: 0.59, expected: 'cratered_potato' },
-    { r: 0.60, expected: 'contact_binary' },
-    { r: 0.6999, expected: 'contact_binary' },
-    { r: 0.70, expected: 'craggy_rock' },
+    { r: 0.0, expected: 'spinning_top' },
+    { r: 0.1999, expected: 'spinning_top' },
+    { r: 0.20, expected: 'cratered_potato' },
+    { r: 0.4499, expected: 'cratered_potato' },
+    { r: 0.45, expected: 'rubble_pile' },
+    { r: 0.5999, expected: 'rubble_pile' },
+    { r: 0.60, expected: 'elongated_potato' },
+    { r: 0.7499, expected: 'elongated_potato' },
+    { r: 0.75, expected: 'craggy_rock' },
     { r: 0.999, expected: 'craggy_rock' },
   ];
   for (const { r, expected } of cases) {
@@ -604,7 +613,7 @@ test('pickShapeType: 10000 samples yield statistical distribution within ±3% of
   // gives generous slack for rng correlations and finite-sample noise
   // but still fails fast if the sampler is mis-biased.
   const N = 10000;
-  const counts = { crystalline_shard: 0, cratered_potato: 0, contact_binary: 0, craggy_rock: 0 };
+  const counts = { spinning_top: 0, cratered_potato: 0, rubble_pile: 0, elongated_potato: 0, craggy_rock: 0 };
   let seq = 0;
   const rng = () => {
     // Linear-congruential helper so we exercise an independent stream
@@ -625,12 +634,14 @@ test('pickShapeType: 10000 samples yield statistical distribution within ±3% of
   }
 });
 
-test('shapeToIndex: maps SHAPE_TYPES values to legacy integer shapeType', () => {
-  // Legacy entity-layer dispatch: 0=crystalline, 1=cratered, 2=binary, 3=craggy.
-  assert.equal(shapeToIndex('crystalline_shard'), 0);
+test('shapeToIndex: maps SHAPE_TYPES values to integer shapeType (v0.71.5 5-shape dispatch)', () => {
+  // Entity-layer dispatch: 0=spinning_top, 1=cratered, 2=rubble_pile,
+  // 3=elongated, 4=craggy.
+  assert.equal(shapeToIndex('spinning_top'), 0);
   assert.equal(shapeToIndex('cratered_potato'), 1);
-  assert.equal(shapeToIndex('contact_binary'), 2);
-  assert.equal(shapeToIndex('craggy_rock'), 3);
+  assert.equal(shapeToIndex('rubble_pile'), 2);
+  assert.equal(shapeToIndex('elongated_potato'), 3);
+  assert.equal(shapeToIndex('craggy_rock'), 4);
 });
 
 test('shapeToIndex: unknown shape string falls back to craggy (defensive)', () => {
@@ -638,9 +649,9 @@ test('shapeToIndex: unknown shape string falls back to craggy (defensive)', () =
   // entry would crash the entity factory (no builder for shapeType=
   // undefined). Defensive fallback to craggy keeps the streaming
   // field rendering even after a partial migration.
-  assert.equal(shapeToIndex('unknown_shape'), 3, 'unknown → craggy');
-  assert.equal(shapeToIndex(''), 3, 'empty string → craggy');
-  assert.equal(shapeToIndex(undefined), 3, 'undefined → craggy');
+  assert.equal(shapeToIndex('unknown_shape'), 4, 'unknown → craggy');
+  assert.equal(shapeToIndex(''), 4, 'empty string → craggy');
+  assert.equal(shapeToIndex(undefined), 4, 'undefined → craggy');
 });
 
 test('generateChunk: every asteroid now carries spec.shape ∈ SHAPE_TYPES', () => {

@@ -111,8 +111,16 @@ export const POINT_INTENSITY = 0.90;
  * "harsh sun on airless rock" (Star Wars belt aesthetic). Was clamping
  * lit surfaces to albedo saturation while keeping shaded side too
  * washed-out for vacuum realism.
+ *
+ * v0.71.5: 0.20 -> 0.06 (research-backed). Real asteroids have NO
+ * atmospheric fill — the shadow side of a boulder is effectively
+ * pitch-black next to sunlit rock (Bennu/Ryugu photos). 0.06 keeps
+ * shadowed undersides just barely readable for gameplay while the
+ * lit/shaded contrast reads as "vacuum", not "diffuse studio light".
+ * Combined with ACESFilmicToneMapping (v0.71.5) the lit side keeps
+ * albedo detail instead of saturating.
  */
-export const HEMISPHERE_INTENSITY = 0.20;
+export const HEMISPHERE_INTENSITY = 0.06;
 
 /**
  * Intensity of the pure ambient floor. Small enough that shadows are
@@ -123,8 +131,14 @@ export const HEMISPHERE_INTENSITY = 0.20;
  * im weltraum". Lower ambient = harder shadow contrast at the cost of
  * slightly darker crevices. The dust/regolith textures still have
  * enough albedo detail that crevices remain readable.
+ *
+ * v0.71.5: 0.04 -> 0.01 (research-backed). Bare floor so no absolute
+ * zero-black pixels appear in the deepest crevices, but the shadow
+ * sides of asteroids now fall to near-black — the real "airless
+ * rock" look (albedo of carbonaceous asteroids is 0.03-0.10, and
+ * with ambient 0.01 the unlit side reads as that dark).
  */
-export const AMBIENT_INTENSITY = 0.04;
+export const AMBIENT_INTENSITY = 0.01;
 
 /**
  * Sun color — slightly warm white (yellow tint, like real sunlight).
