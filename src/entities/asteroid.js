@@ -650,6 +650,12 @@ function createAsteroidMaterial(idx) {
     // so the surface reads as smooth plastic. Boosting the normal scale
     // makes the regolith grain + crater rim relief visible under the
     // directional sun without re-rolling the textures.
+    // v0.72.2 — A/B probe (2.0 vs 1.5) measured on the showcase showed
+    // NO meaningful micro-contrast gain (mean 16.5 vs 17.3, within
+    // turntable-frame noise) — the geometry layers (boulders/craters/
+    // micro-noise) dominate the surface read, so the weak normal maps
+    // have nothing left to amplify. 1.5 stays; a real relief win needs
+    // re-rolled normal maps, not more scale.
     normalScale: new THREE.Vector2(1.5, 1.5),
     roughnessMap: getRealisticRoughness(idx),
   });

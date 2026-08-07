@@ -1,3 +1,73 @@
+## v0.72.2 -- NormalMap A/B probe (2.0 vs 1.5): no measurable gain, 1.5 stays
+
+**User request (implicit):** continue the realism iteration loop until the asteroids look right; keep improving geometry/lighting/engine.
+
+### Decision taken
+
+- **A/B measured on the showcase** (identical object, same camera, only `normalScale` changed): micro-contrast (RMS of adjacent-pixel luminance deltas in the object region) at 1.5 was mean 17.32 / RMS 31.35 vs 2.0 mean 16.52 / RMS 30.77 — **within turntable-frame noise, no gain.** The geometry layers (boulders, craters, micro-noise from v0.71.6) dominate the surface read; the weak Antigravity normal maps (meanB=167) have nothing left to amplify.
+- **Conclusion:** `normalScale` stays 1.5. A real relief win requires re-rolled normal maps (next Antigravity pass), not more scale. Decision recorded as a comment in `createAsteroidMaterial`.
+
+### Validation
+
+678/678 tests, vite build clean.
+
+## v0.72.1 -- showcaseKeep tags on real backdrop objects (starfield/nebula/sun)
+
+**User request:** the showcase must use "exakt das selbe rendering setup" as the game — the deep-space backdrop has to survive the isolation pass.
+
+### What shipped
+
+- `hideGameObjects()` hides every non-tagged mesh/points/line while the showcase is active — but NO production object carried the `showcaseKeep` tag, so starfield (Points), nebula sphere and sun disc were silently hidden, breaking the "same rendering setup" contract.
+- Tags added at creation sites: `src/systems/starfield.js` (group + all 3 Points layers), `src/systems/nebula-background.js` (mesh), `src/systems/space-lighting.js` (sunMesh + coronaMesh).
+- 3 regression tests pin the REAL objects (not harness fakes) to the contract in `tests/showcase.test.js`.
+- Browser-verified: showcase now shows 7.5k star px + 65 sun px + 183k nebula px; game DEMO state unaffected.
+
+### Validation
+
+678/678 tests (was 675), build clean. Committed `e504bd8`, merged into main, main pushed.
+
+## v0.72.0 -- Object-viewer showcase mode + NASA-conform albedo/lighting iteration
+
+**User request:** "baue einen zweiten demo modus der exakt das selbe rendering setup benutzt nur kein game. hier soll lediglich jedes 3d objekt dargestellt werden. also wie eine character auswahl bei einem game. mit den pfeiltasten kann man alle objekte durchscrollen. sobald dieses setup fertig ist starte einen loop: mach dir screenshots, vergleiche diese mit aaa games asteroiden im web oder nasa aufnahmen und verfeinere unsere asteroiden im game. arbeite auch an der beleuchtung bzw 3d engine. iteriere so lange bis du der meinung bist dass realismusqualität erreicht ist."
+
+### What shipped (showcase)
+
+- **`src/systems/showcase.js`** — object-viewer mode reusing the game's EXACT scene/camera/lights/nebula/starfield/shadow-map/ACES. No game logic (no streaming, collisions, AI, score). 13 entries: 5 asteroid shapes × 5 texture sets (cycled with ↑/↓), player ship, pirate ship, 6 power-ups. →/← navigate, F1/Esc exit. `?showcase` URL boots straight into it; `window.__showcase` automation handle for the screenshot loop. Turntable rotation, per-entry camera framing.
+- **`src/main.js`** — early `showcase.update()` short-circuit in tick(); F1 toggle; `?showcase` boot.
+- **`scripts/showcase-capture.mjs`** — Playwright capture of every object for the iteration loop.
+- **7 unit tests** in `tests/showcase.test.js` (catalogue order, texture wrap, isolation round-trip, no-throw, scene cleanup).
+
+### What shipped (iteration 1: lighting + albedo, measured against NASA albedo tables)
+
+- **Hemisphere sky de-blued** (`HEMISPHERE_SKY_COLOR` 0x4a6a9e → warm dark grey): the blue fill on shadow sides contradicted Bennu/Ryugu photos (shadow side is pitch-black, no blue aura).
+- **Per-set albedo tint** (`ALBEDO_TINT_BY_SET` in asteroid.js): Antigravity texture sets were too bright vs NASA albedo (C-type 0.03–0.10, S-type 0.10–0.25). Tints bring the lit surface into the physical range.
+- **Measured result** (center-crop object pixels, showcase): all 5 sets now warm-dark (avgRGB ≈ (47,44,39)–(57,54,48), no blue dominance) vs (48,87,95) blue-bright before. Game field avgRGB (131,128,128) warm-neutral.
+- `normalScale` 1.5x (relief amplification for weak normal maps).
+
+### Validation
+
+675/675 tests, build clean. Committed `4ac9842` on `asteroid-showcase`, then merged into main.
+
+## v0.71.6 -- Photoreal asteroid geometry pass (boulders, deeper craters, hard light, NaN fix)
+
+**User request:** "manche asteroiden sehen nun besser aus aber noch immer nicht fotorealistisch. auch die geometrie passt noch gar nicht."
+
+### The real bug: NaN asteroids
+
+The browser console showed `computed radius is NaN` on `_IcosahedronGeometry` at every reload — previously dismissed as an HMR artifact. Fuzzing with split children (AI fires → asteroid splits) found 64/430 broken children: `buildSpinningTopGeometry`'s `Math.pow(1 - Math.abs(lat), 1.5)` — IcosahedronGeometry detail 3 has 12 vertices with |y|/radius = 1.00000004 (float overshoot at the poles), so `Math.pow(negative, 1.5)` = NaN. Every spin-top split (seed%5=0) became a corrupt, sometimes invisible geometry. **Fix: `Math.max(0, …)` clamp.** Console clean over ~30s live DEMO with AI fire; 649 fuzz cases NaN-free. This was the largest contributor to the "geometry looks wrong" perception.
+
+### What shipped
+
+1. **Boulder layer** (`placeBoulderCenters`/`boulderContribution`) — Bennu has >200 boulders >10m on a 500m body; positive mounds with steep edges `(1−t²)^sharpness`, deterministic per (ox,oy,oz), identical across LOD levels. All 5 shapes + rubble-pile lobes.
+2. **Deeper craters** — CRATER_SCALE 0.28→0.36, bowls to ~0.58× radius (real Bennu bowls, not flat spots), stronger rims.
+3. **Stronger silhouettes** — spinning-top 0.24→0.30, elongated 0.30→0.38, potato 0.22→0.28, craggy 0.50→0.55.
+4. **Debug ground footprint plane removed** — the semi-transparent dark plane + fake shadow under every asteroid was a v0.5x debug artifact, totally wrong in space.
+5. **Review fixes** — caps against pathological stacking of overlapping craters/boulders (±0.5×/0.45× radius), per-loop `dir` allocation.
+
+### Tests (+11)
+
+Boulder determinism/range/profile, ground-plane tripwire, NaN regression (known bad seed incl. split children), integration tests (boulders push out, craters pull in). 668/668 tests green.
+
 ## v0.70.0 -- Dense meshes + multi-layer displacement (modern game technique for realistic asteroids)
 
 **User request:** "can we have more dense meshes to really do a geometry displacement mapping? all looks so flat on the asteroids. think abut what is modern game techniques to make such things look realistic and implement the solution"
