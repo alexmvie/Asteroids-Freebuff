@@ -188,6 +188,9 @@ const ssao = createSsaoPostprocess({ renderer, scene, camera });
 const showcase = createShowcase({ scene, camera, nebula, updateLighting, canvas: renderer.domElement });
 if (typeof window !== 'undefined') {
   window.__showcase = showcase;
+  // v0.73.3 — expose the live scene for the automation/quality loop
+  // (light + material introspection from headless scripts).
+  window.__app = { scene, camera, renderer };
   // URL boot: `?showcase` starts the page directly in the object viewer
   // (no game). Used by the visual iteration loop to screenshot objects.
   try {

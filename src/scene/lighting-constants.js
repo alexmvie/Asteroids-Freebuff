@@ -119,8 +119,14 @@ export const POINT_INTENSITY = 0.90;
  * lit/shaded contrast reads as "vacuum", not "diffuse studio light".
  * Combined with ACESFilmicToneMapping (v0.71.5) the lit side keeps
  * albedo detail instead of saturating.
+ *
+ * v0.73.3: 0.06 -> 0.22 per user "wir brauchen ein bisschen ambient
+ * light weil alles nicht beleuchtete im schwarz absäuft. ich weiss es
+ * ist realistisch aber fürs game nicht so gut." Gameplay readability
+ * beats strict vacuum realism: shadow sides stay clearly visible while
+ * the directional sun still provides the dominant lit/shaded contrast.
  */
-export const HEMISPHERE_INTENSITY = 0.06;
+export const HEMISPHERE_INTENSITY = 0.22;
 
 /**
  * Intensity of the pure ambient floor. Small enough that shadows are
@@ -137,8 +143,14 @@ export const HEMISPHERE_INTENSITY = 0.06;
  * sides of asteroids now fall to near-black — the real "airless
  * rock" look (albedo of carbonaceous asteroids is 0.03-0.10, and
  * with ambient 0.01 the unlit side reads as that dark).
+ *
+ * v0.73.3: 0.01 -> 0.08 per the same user request as HEMISPHERE_INTENSITY
+ * ("alles nicht beleuchtete säuft im schwarz ab"). Pairs with the
+ * raised hemisphere so deep crevices and unlit sides never read as
+ * pure black in gameplay — the cost is a softer (still visible)
+ * shadow edge.
  */
-export const AMBIENT_INTENSITY = 0.01;
+export const AMBIENT_INTENSITY = 0.08;
 
 /**
  * Sun color — slightly warm white (yellow tint, like real sunlight).
