@@ -12,9 +12,9 @@ import { SHAPE_TYPES } from '../world/chunk-constants.js';
 // shadow map + ACES tone mapping from createScene) but runs none of the
 // game logic: no streaming, no collisions, no AI, no score. It presents
 // every 3D object the game can produce — all 5 asteroid shapes × 5
-// texture sets, the player ship, a pirate ship, and all 6 power-up
-// types — one at a time on a rotating turntable, like a character-
-// select screen.
+// texture sets, the Blender-baked asteroid (v0.73.2), the player ship,
+// a pirate ship, and all 6 power-up types — one at a time on a
+// rotating turntable, like a character-select screen.
 //
 // Controls (while active):
 //   → / ←      next / previous object
@@ -52,6 +52,73 @@ const ASTEROID_SHAPE_ORDER = [
 ];
 
 const POWERUP_TYPE_ORDER = ['shield', 'speed', 'energy', 'credits', 'hull', 'weapon'];
+
+// ---------------------------------------------------------------------------
+// v0.73.2 — Blender-baked asteroid GLB (branch `blender-asteroid-pipeline`).
+//
+// Loaded lazily with GLTFLoader (same pattern as powerup.js's per-type GLB
+// cache). Node/test environments get null (no browser fetch), so the entry
+// builds an empty wrapper that stays invisible; the browser path swaps in
+// the baked Cycles mesh + PBR maps once the GLB resolves.
+// ---------------------------------------------------------------------------
+const BLENDER_ASTEROID_GLB_URL = '/models/asteroid-42.glb';
+const _blenderGlbCache = new Map(); // url -> THREE.Group | null
+const _blenderGlbLoading = new Map(); // url -> in-flight Promise
+
+/**
+ * Lazily load + normalize the Blender-baked asteroid GLB. Centers the
+ * mesh on the origin (turntable axis) but keeps NATIVE scale (radius-8
+ * bake → same camera framing as the procedural radius-8 showcase
+ * asteroids). Tags every mesh castShadow + receiveShadow so the sun
+ * shadow pass includes it (tagForShadows contract). Returns null on any
+ * failure (entry stays on the empty placeholder).
+ *
+ * @returns {Promise<import('three').Group | null>}
+ */
+function loadBlenderAsteroidGlb() {
+  if (_blenderGlbCache.has(BLENDER_ASTEROID_GLB_URL)) {
+    return Promise.resolve(_blenderGlbCache.get(BLENDER_ASTEROID_GLB_URL));
+  }
+  if (_blenderGlbLoading.has(BLENDER_ASTEROID_GLB_URL)) {
+    return _blenderGlbLoading.get(BLENDER_ASTEROID_GLB_URL);
+  }
+  const loading = (async () => {
+    let GLTFLoader;
+    try {
+      ({ GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js'));
+    } catch {
+      _blenderGlbCache.set(BLENDER_ASTEROID_GLB_URL, null);
+      return null;
+    }
+    try {
+      const gltf = await new GLTFLoader().loadAsync(BLENDER_ASTEROID_GLB_URL);
+      const root = gltf.scene;
+      if (!root) throw new Error('GLB has no scene');
+      // Center on origin (turntable axis) — keep native scale.
+      const bbox = new THREE.Box3().setFromObject(root);
+      const center = new THREE.Vector3();
+      bbox.getCenter(center);
+      root.position.sub(center);
+      // Sun shadow pass: baked mesh casts + receives like the
+      // procedural asteroids.
+      root.traverse((o) => {
+        if (o.isMesh) {
+          o.castShadow = true;
+          o.receiveShadow = true;
+        }
+      });
+      _blenderGlbCache.set(BLENDER_ASTEROID_GLB_URL, root);
+      return root;
+    } catch {
+      _blenderGlbCache.set(BLENDER_ASTEROID_GLB_URL, null);
+      return null;
+    } finally {
+      _blenderGlbLoading.delete(BLENDER_ASTEROID_GLB_URL);
+    }
+  })();
+  _blenderGlbLoading.set(BLENDER_ASTEROID_GLB_URL, loading);
+  return loading;
+}
 
 // ---------------------------------------------------------------------------
 // v0.72.3 — Orbit camera. The object sits at the origin on the turntable;
@@ -321,10 +388,51 @@ export function createShowcase({ scene, camera, nebula, updateLighting, canvasRo
     };
   };
 
-  // Catalogue order: 5 asteroid shapes (× current texture), player ship,
-  // pirate ship, 6 power-ups.
+  // v0.73.2 — Blender-baked asteroid (Cycles). Loads the committed GLB
+  // lazily; until it resolves the wrapper stays an empty (invisible)
+  // group. The GLB keeps native scale (radius-8 bake → same camera
+  // framing as the procedural asteroids) and its cached resources are
+  // shared across selections, so dispose only detaches it from the
+  // scene (no geometry/material disposal of the shared cache).
+  const buildBlenderAsteroidEntry = () => ({
+    kind: 'blender',
+    label: () => 'Asteroid · Blender Baked (Cycles)',
+    build: () => {
+      const wrapper = new THREE.Group();
+      wrapper.userData.showcaseEntry = true;
+      scene.add(wrapper);
+      // Race guard (review fix): if the user navigates away before the
+      // GLB resolves, dispose() runs first — the resolved root must not
+      // land on a dead wrapper. Benign either way (three re-parents on
+      // next selection; GC collects the orphan), but the flag makes the
+      // ordering explicit.
+      let disposed = false;
+      loadBlenderAsteroidGlb().then((root) => {
+        if (!root || disposed) return; // load failed / non-browser / gone
+        // Tag the subtree so the isolation pass never hides the GLB
+        // meshes on a later activate round-trip.
+        root.traverse((o) => { o.userData.showcaseEntry = true; });
+        wrapper.add(root);
+      });
+      return {
+        root: wrapper,
+        dist: 24,
+        height: 5,
+        update: (dt) => { wrapper.rotation.y += dt * 0.35; }, // turntable
+        dispose: () => {
+          disposed = true;
+          scene.remove(wrapper);
+          wrapper.clear(); // detach children; shared GLB resources stay cached
+        },
+      };
+    },
+  });
+
+  // Catalogue order: 5 asteroid shapes (× current texture), the
+  // Blender-baked asteroid, player ship, pirate ship, 6 power-ups.
   const catalogue = [
     ...ASTEROID_SHAPE_ORDER.map((_, i) => buildAsteroidEntry(i)),
+    buildBlenderAsteroidEntry(),
     buildShipEntry('player'),
     buildShipEntry('pirate'),
     ...POWERUP_TYPE_ORDER.map((t) => buildPowerupEntry(t)),

@@ -11,7 +11,7 @@ procedural `src/entities/asteroid.js` path.
 |---|---|
 | Blender 5.2.0 LTS install (Homebrew cask) | ✅ `brew install --cask blender` (headless verified: `blender --background --python-expr "import bpy"`) |
 | POC: model → displace → UV → bake → GLB | ✅ `generate_asteroid.py` (run it, see below) |
-| Game wiring (GLB as showcase entry / field variant) | ⏳ next |
+| Game wiring (GLB as showcase entry / field variant) | ✅ v0.73.2: `public/models/asteroid-42.glb` committed; showcase entry index 5 ("Asteroid · Blender Baked (Cycles)"), lazy GLTFLoader + shadow tags + turntable. Browser-verified. |
 | Quality loop (render → compare vs NASA/AAA → refine) | ⏳ next (reuse `scripts/showcase-capture.mjs` + the A/B measurement pattern from SSAO) |
 
 ## Blender-MCP — honest feasibility assessment (2026-08-08)
@@ -65,10 +65,10 @@ ls artifacts/blender
 
 ## Next steps
 
-1. **Wire into the game** — load `asteroid-<seed>.glb` in a showcase entry
-   (and optionally as a `spec.glb` field on `AsteroidSpec` so the streaming
-   field mixes procedural + baked asteroids). Swap material onto the existing
-   shadow-tagged pattern (`tagForShadows`).
+1. **Done (v0.73.2)** — `asteroid-42.glb` is wired into the showcase (lazy
+   GLTFLoader in `src/systems/showcase.js`, shadow-tagged, turntable, index 5).
+   To swap in a re-bake: overwrite `public/models/asteroid-42.glb` (keep the
+   name — the regression test checks the magic bytes) and reload.
 2. **Quality loop** — bake a batch (all 5 shape archetypes × several seeds),
    capture via `showcase-capture.mjs`, compare against NASA imagery + the
    current procedural field (use `measure-ssao-ab.py` style pixel metrics),

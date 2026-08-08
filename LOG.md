@@ -1,3 +1,13 @@
+## v0.73.2 -- Blender-baked asteroid wired into the game showcase
+
+**User request:** "Binde das gebackene Blender-GLB (artifacts/blender/asteroid-42.glb) als Showcase-Entry in das Spiel ein: Lade es mit GLTFLoader, tagge Shadow-Flags, füge es der Showcase-Katalog-Sequenz hinzu und verifiziere es im Browser."
+
+- **Asset committed:** `artifacts/blender/asteroid-42.glb` → `public/models/asteroid-42.glb` (131 KB, valid binary glTF 2.0, textures embedded as PNG — verified via `file` + magic-byte regression test).
+- **`src/systems/showcase.js`:** new module-scope lazy loader `loadBlenderAsteroidGlb()` (same pattern as powerup.js's per-type GLB cache: lazy GLTFLoader import, in-flight promise dedupe, Node-safe null on failure). Centers the baked mesh on the origin (turntable axis), keeps NATIVE scale (radius-8 bake → same dist-24 framing as the procedural radius-8 asteroids), tags every mesh `castShadow` + `receiveShadow` (the `tagForShadows` sun-pass contract). New `buildBlenderAsteroidEntry()` (kind `'blender'`, label `Asteroid · Blender Baked (Cycles)`) inserted at catalogue index 5 (after the 5 procedural shapes, before the ships): builds an empty `showcaseEntry`-tagged wrapper immediately and swaps the GLB in when the promise resolves; turntable `update`; `dispose` detaches without disposing the shared cached GLB resources. Catalogue 13 → **14 entries**.
+- **Tests (`tests/showcase.test.js`):** 13→14 catalogue-order test with the shifted labels/indices (texture-cycling no-op check moved to index 6); new Node-safe build test (entry builds cleanly, correct label, no throw); new GLB regression guard (file exists + `glTF` magic + version 2 — same convention as the texture tests). **706/706 green, build clean.**
+- **Browser-verified:** `/models/asteroid-42.glb` HTTP 200; showcase entry renders the baked faceted asteroid under the game's sun (screenshot); GLB + its 4 embedded PNG maps fetched (4 blob decodes); zero console errors; `?showcase` → setIndex(5) label `Asteroid · Blender Baked (Cycles) (6/14)`.
+- **Next (quality loop):** bake a batch (5 shape archetypes × seeds), compare vs NASA/AAA via `showcase-capture.mjs`, tune displacement/crater scale + bake samples; optionally expose as a streaming-field variant.
+
 ## v0.73.1 -- Blender headless asteroid pipeline (branch `blender-asteroid-pipeline`)
 
 **User request:** "nah lod kann nochmal mindestens doppelt so detailliert sein. was meinst du, kannst du blender downloaden, den blender mcp und dort asteroiden modellieren, maps generieren und baken und das resultat dann hier verwenden? als eigenen branch von hier weg? push vorher alles"

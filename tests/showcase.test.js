@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
 import * as THREE from 'three';
 import { createShowcase, orbitCameraPosition } from '../src/systems/showcase.js';
 import { createStarfield } from '../src/systems/starfield.js';
@@ -42,9 +43,9 @@ function makeHarness() {
   return { scene, camera, showcase, gameMesh, keepMesh };
 }
 
-test('Showcase: catalogue has all 13 game objects in stable order', () => {
+test('Showcase: catalogue has all 14 game objects in stable order', () => {
   const { showcase } = makeHarness();
-  assert.equal(showcase.getCount(), 13);
+  assert.equal(showcase.getCount(), 14);
 
   const labels = [];
   showcase.activate();
@@ -54,20 +55,48 @@ test('Showcase: catalogue has all 13 game objects in stable order', () => {
   }
   showcase.deactivate();
 
-  // 5 asteroid shapes (texture 1) + player ship + pirate + 6 power-ups.
+  // 5 asteroid shapes (texture 1) + Blender-baked asteroid (v0.73.2)
+  // + player ship + pirate + 6 power-ups.
   assert.equal(labels[0], 'Asteroid · Spinning Top (Bennu/Ryugu) · Texture 1/5');
   assert.equal(labels[1], 'Asteroid · Cratered Potato · Texture 1/5');
   assert.equal(labels[2], 'Asteroid · Rubble Pile (Itokawa) · Texture 1/5');
   assert.equal(labels[3], 'Asteroid · Elongated Potato (Eros) · Texture 1/5');
   assert.equal(labels[4], 'Asteroid · Craggy Rock · Texture 1/5');
-  assert.equal(labels[5], 'Player Ship · Skyfighter');
-  assert.equal(labels[6], 'Pirate Ship · Hazard');
-  assert.equal(labels[7], 'Power-up · SHIELD');
-  assert.equal(labels[8], 'Power-up · SPEED');
-  assert.equal(labels[9], 'Power-up · ENERGY');
-  assert.equal(labels[10], 'Power-up · CREDITS');
-  assert.equal(labels[11], 'Power-up · HULL');
-  assert.equal(labels[12], 'Power-up · WEAPON');
+  assert.equal(labels[5], 'Asteroid · Blender Baked (Cycles)');
+  assert.equal(labels[6], 'Player Ship · Skyfighter');
+  assert.equal(labels[7], 'Pirate Ship · Hazard');
+  assert.equal(labels[8], 'Power-up · SHIELD');
+  assert.equal(labels[9], 'Power-up · SPEED');
+  assert.equal(labels[10], 'Power-up · ENERGY');
+  assert.equal(labels[11], 'Power-up · CREDITS');
+  assert.equal(labels[12], 'Power-up · HULL');
+  assert.equal(labels[13], 'Power-up · WEAPON');
+});
+
+test('Showcase: Blender-baked entry builds a showcaseEntry-tagged wrapper without throwing (v0.73.2)', () => {
+  // Node env: the GLB loader resolves null (no browser fetch), so the
+  // wrapper stays an empty group — but the entry must build cleanly,
+  // frame at the same distance as the procedural asteroids, and expose
+  // the expected label. The browser path (swap-in of the GLB) is
+  // verified separately in the dev server.
+  const { showcase } = makeHarness();
+  assert.doesNotThrow(() => showcase.activate());
+  showcase.setIndex(5);
+  assert.equal(showcase.getLabel(), 'Asteroid · Blender Baked (Cycles)');
+  assert.doesNotThrow(() => showcase.update(0.016));
+  showcase.deactivate();
+});
+
+test('Showcase: Blender-baked GLB exists in public/models with a valid glTF magic (v0.73.2)', () => {
+  // Regression guard (same convention as the texture tests): the
+  // committed Blender bake must stay a valid binary glTF 2.0 — a
+  // re-bake that fails to export (or a rename) trips this immediately.
+  const path = 'public/models/asteroid-42.glb';
+  assert.ok(existsSync(path), `expected Blender bake at ${path}`);
+  const head = readFileSync(path).subarray(0, 4);
+  assert.deepEqual([...head], [0x67, 0x6c, 0x54, 0x46], 'GLB magic must be "glTF"');
+  const version = readFileSync(path).subarray(4, 8);
+  assert.deepEqual([...version], [2, 0, 0, 0], 'GLB must be version 2');
 });
 
 test('Showcase: asteroid texture navigation cycles 1..5', () => {
@@ -88,7 +117,7 @@ test('Showcase: asteroid texture navigation cycles 1..5', () => {
   assert.ok(showcase.getLabel().includes('Texture 5/5'), 'texPrev wraps 1->5');
 
   // Texture navigation is a no-op for non-asteroid entries.
-  showcase.setIndex(5); // player ship
+  showcase.setIndex(6); // player ship (v0.73.2: index 5 is the Blender bake)
   showcase.texNext();
   assert.equal(showcase.getLabel(), 'Player Ship · Skyfighter');
   showcase.deactivate();
