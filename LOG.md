@@ -1,3 +1,13 @@
+## v0.73.1 -- Blender headless asteroid pipeline (branch `blender-asteroid-pipeline`)
+
+**User request:** "nah lod kann nochmal mindestens doppelt so detailliert sein. was meinst du, kannst du blender downloaden, den blender mcp und dort asteroiden modellieren, maps generieren und baken und das resultat dann hier verwenden? als eigenen branch von hier weg? push vorher alles"
+
+- **Pushed first** (per request): v0.73.0 (SSAO) + v0.72.4/v0.72.5 (lazy-LOD, near LOD 2× → close detail 12 = 3380 tris) to `photoreal-iteration-3`. New branch `blender-asteroid-pipeline` created from it.
+- **Blender 5.2.0 LTS installed** via `brew install --cask blender` (brew update fixed a broken cask definition; headless verified: `blender --background --python-expr "import bpy"`).
+- **Honest MCP assessment:** blender-mcp needs a GUI Blender + addon socket + an MCP client (Claude Desktop/Cursor/...) — this environment has no MCP client tool, so the interactive path isn't available here. The available + more robust path is headless `blender --background --python` (deterministic, CI-style, reproducible). `bpy` pip is officially Windows/Linux-only on macOS — install must be the app.
+- **POC shipped + verified end-to-end:** `scripts/blender/generate_asteroid.py` — model (icosphere + deterministic fbm displacement + craters + boulders mirroring asteroid.js math) → smart UV → Cycles bake (albedo/normal/roughness/AO @1024²) → GLB with embedded textures. Output: `artifacts/blender/asteroid-42.glb` + 4 PNGs (artifacts/ gitignored). API-compat shims for Blender 5.2 (bake_type as operator arg only, render.bake.margin, sRGB enum, export_image_format AUTO, brew-wrapper sys.argv slicing).
+- **Next:** wire the GLB into the game (GLTFLoader already used by ship.js/powerup.js) as a showcase entry + optional field variant, then run the quality loop (render → compare vs NASA/AAA → iterate) reusing showcase-capture + the SSAO A/B measurement pattern.
+
 ## v0.72.4/v0.72.5 -- Lazy-LOD density bump: close detail 4->12 / mid 3->8 / far 2->5
 
 **User request:** "in der nähe fehlt uns in der lod stufe zu viel geometrie. muss viel detaillierter sein" (the near LOD stage lacks geometry; must be much more detailed) + "nah lod ist schon besser aber kann nochmal mindestens doppelt so detailliert sein" (v0.72.5: at least 2× again).
