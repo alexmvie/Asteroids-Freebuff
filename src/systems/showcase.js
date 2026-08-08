@@ -134,6 +134,12 @@ export function createShowcase({ scene, camera, nebula, updateLighting, canvasRo
   let current = null; // { dispose, update(dt), root, label }
   const visibilityBackup = new Map(); // Object3D -> original visible
 
+  // v0.73.0 — freeze the turntable. When paused, `update(dt)` skips the
+  // object's own per-frame rotation (the asteroids' `spec.spin` spin)
+  // so the A/B screenshot loop can capture the SAME object frame with
+  // SSAO off vs on — pixel-identical except the AO term. The nebula +
+  // lighting keep updating (static backdrop, no camera motion).
+
   // v0.72.3 — orbit state (camera around the origin turntable).
   const orbit = { theta: 0, phi: 0.21, dist: 24 };
   let orbitDragging = false;
@@ -224,6 +230,12 @@ export function createShowcase({ scene, camera, nebula, updateLighting, canvasRo
       };
       const entity = createAsteroidFromSpec({ spec, scene });
       entity.mesh.userData.showcaseEntry = true;
+      // v0.72.4 — LOD tiers are lazy in the game (only far builds at
+      // spawn, close/mid on proximity). The showcase frames objects at
+      // ~24u — always in the close tier — so build every tier now for
+      // frame-1 full detail (no one-frame pop while the close mesh
+      // streams in).
+      entity.ensureAllLodLevels();
       return {
         root: entity.mesh,
         dist: 24,
@@ -471,9 +483,11 @@ export function createShowcase({ scene, camera, nebula, updateLighting, canvasRo
    * on the object. No game code runs.
    * @param {number} dt
    */
+  let paused = false;
+
   function update(dt) {
     if (!active) return;
-    if (current && current.update) current.update(dt);
+    if (!paused && current && current.update) current.update(dt);
     if (nebula && typeof nebula.update === 'function') nebula.update(camera, dt);
     if (updateLighting) updateLighting(dt, { x: 0, y: 0, z: 0 });
   }
@@ -496,6 +510,10 @@ export function createShowcase({ scene, camera, nebula, updateLighting, canvasRo
     // can verify the camera moved) + the drag/zoom dev loop.
     getCameraPosition: () => ({ x: camera.position.x, y: camera.position.y, z: camera.position.z }),
     getOrbit: () => ({ ...orbit }),
+    // v0.73.0 — freeze/unfreeze the object turntable for identical-frame
+    // A/B captures (SSAO off vs on on the same asteroid orientation).
+    setPaused: (v) => { paused = !!v; },
+    isPaused: () => paused,
   };
 
   // Global keyboard: F1 toggles even when the game is running (but never

@@ -54,6 +54,8 @@ import { createParticleSystem } from './systems/particles.js';
 import { createCaptureMarkers } from './systems/capture-markers.js';
 import { createAiFlightDebug } from './systems/ai-flight-debug.js';
 import { createShowcase } from './systems/showcase.js';
+import { createSsaoPostprocess } from './systems/ssao.js';
+import { SSAO_ENABLED_DEFAULT } from './scene/ssao-constants.js';
 
 // ---- Radar radius (v0.59.0 + v0.62.0) -----------------------------------
 // Multiplier on the streaming bubble radius (= CHUNK_SIZE ×
@@ -172,6 +174,17 @@ const clock = new Clock();
 // runtime, or `?showcase` in the URL for the screenshot/iteration
 // loop. `window.__showcase` exposes the automation API. See
 // src/systems/showcase.js.
+// ---- v0.73.0 — SSAO postprocessing (GTAO) -------------------------------
+// Screen-space ambient occlusion: darkens contact shadows where asteroid
+// boulders / crater rims touch, removing the "flat matte" tell. Chain:
+// RenderPass → GTAOPass (half-res) → OutputPass (re-applies ACES, which
+// r152+ skips when rendering into a composer buffer). Toggle: the
+// `#debug-toggle-ssao` HUD button, `window.SSAO` in devtools, or the
+// SSAO_ENABLED_DEFAULT constant. When disabled, `render()` falls back
+// to the plain renderer.render fast path — pixel-identical to
+// pre-v0.73.0. See src/systems/ssao.js.
+const ssao = createSsaoPostprocess({ renderer, scene, camera });
+
 const showcase = createShowcase({ scene, camera, nebula, updateLighting, canvas: renderer.domElement });
 if (typeof window !== 'undefined') {
   window.__showcase = showcase;
@@ -201,6 +214,23 @@ if (typeof window !== 'undefined') {
     window.addEventListener('showcase:inactive', () => setViewToggle(false));
     setViewToggle(showcase.isActive());
   }
+}
+
+// ---- SSAO runtime toggle (v0.73.0) --------------------------------------
+// `window.SSAO = true/false` flips the postprocessing pass live (same
+// devtools pattern as NEBULA_DEBUG / AI_FLIGHT_DEBUG). The
+// `#debug-toggle-ssao` HUD button drives the same setter and stays in
+// sync via `updateSsaoBtn` (declared above the setter so the closure is
+// TDZ-safe — the setter may fire during boot, before the button wiring
+// block below runs; `?.()` no-ops while it's still null).
+let updateSsaoBtn = null;
+if (typeof window !== 'undefined') {
+  Object.defineProperty(window, 'SSAO', {
+    configurable: true,
+    enumerable: true,
+    get() { return ssao.isEnabled(); },
+    set(v) { ssao.setEnabled(!!v); updateSsaoBtn?.(); },
+  });
 }
 
 // ---- NEBULA_DEBUG runtime toggle ---------------------------------------
@@ -295,6 +325,24 @@ if (typeof window !== 'undefined') {
     get() { return aiFlightDebug.isEnabled(); },
     set(v) { aiFlightDebug.setEnabled(!!v); },
   });
+}
+
+// ---- Debug HUD: SSAO toggle button (v0.73.0) ----------------------------
+// Same pattern as the CAPTURE / AI FLIGHT toggle buttons in the left
+// debug column: click toggles the pass, label + --on class reflect the
+// live state (also updated when `window.SSAO` is set in devtools).
+const ssaoBtn = document.getElementById('debug-toggle-ssao');
+if (ssaoBtn) {
+  updateSsaoBtn = () => {
+    const on = ssao.isEnabled();
+    ssaoBtn.textContent = `SSAO: ${on ? 'ON' : 'OFF'}`;
+    ssaoBtn.classList.toggle('debug-hud__toggle--on', on);
+  };
+  ssaoBtn.addEventListener('click', () => {
+    ssao.setEnabled(!ssao.isEnabled());
+    updateSsaoBtn();
+  });
+  updateSsaoBtn();
 }
 
 // ---- Debug HUD: Capture markers toggle button -------------------------
@@ -1220,7 +1268,7 @@ function tick(dt) {
   // the showcase's own turntable/nebula/lighting update + render.
   if (showcase.isActive()) {
     showcase.update(dt);
-    renderer.render(scene, camera);
+    ssao.render();
     return;
   }
 
@@ -1315,7 +1363,7 @@ function tick(dt) {
     nebulaDebug.update(ship.position, (cx, cz) => densityAt(cx, cz, INITIAL_SYSTEM_SEED));
   }
 
-  renderer.render(scene, camera);
+  ssao.render();
 
   // Compute scene rasterization cost once per frame (cheap).
   const sceneGeom = countSceneGeometry(scene);

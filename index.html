@@ -118,6 +118,10 @@
       <div class="debug-hud__divider"></div>
       <button class="debug-hud__toggle" id="debug-toggle-capture" type="button" data-debug="captureToggle">CAPTURE: OFF</button>
       <button class="debug-hud__toggle" id="debug-toggle-ai-flight" type="button" data-debug="aiFlightToggle">AI FLIGHT: ON</button>
+      <!-- v0.73.0 — SSAO (screen-space ambient occlusion) toggle.
+           Flips the GTAO postprocessing pass live; `window.SSAO`
+           mirrors the same setter for the capture scripts. -->
+      <button class="debug-hud__toggle" id="debug-toggle-ssao" type="button" data-debug="ssaoToggle">SSAO: OFF</button>
     </div>
       </div><!-- /.debug-column__body -->
     </div><!-- /#debug-column -->
