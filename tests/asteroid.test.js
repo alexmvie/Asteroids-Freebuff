@@ -125,6 +125,82 @@ test('Asteroid: no NaN vertices in any geometry — including split children (v0
   asteroid.dispose();
 });
 
+// ---------------------------------------------------------------------------
+// v0.72.4 — Lazy LOD build contract. The density ladder was raised
+// (v0.72.5: close detail 12 / mid 8 / far 5) and the close/mid tiers
+// are now built ON FIRST PROXIMITY instead of eagerly at spawn —
+// otherwise the 300-asteroid streaming bubble would pay ~15ms×3
+// levels per asteroid at spawn (a first-frame explosion). Only the
+// FAR tier is built eagerly; the others appear as the camera
+// approaches.
+// ---------------------------------------------------------------------------
+
+test('Asteroid: lazy LOD — far tier built at spawn, mid/close built on proximity (v0.72.4)', () => {
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera();
+  camera.position.set(0, 0, 0);
+  camera.updateMatrixWorld();
+
+  const mk = (x) => createAsteroidFromSpec({ spec: {
+    id: `lazy-${x}`,
+    position: { x, y: 0, z: 0 },
+    radius: 8, size: 0,
+    axis: { x: 0, y: 1, z: 0 }, spin: 0.5, velocity: { x: 0, y: 0, z: 0 },
+    seed: 42, shape: 'craggy_rock',
+  }, scene });
+  const lvls = (e) => e.mesh.userData.lod.levels.map((l) => l.distance).join(',');
+  const verts = (e) => {
+    let n = 0;
+    e.mesh.traverse((o) => { if (o.isMesh) n += o.geometry.attributes.position.count; });
+    return n;
+  };
+
+  // Spawn: ONLY the far tier exists (no mid/close geometry paid for).
+  const near = mk(10);
+  const far = mk(200);
+  assert.equal(lvls(near), '100', 'spawn: far tier only');
+  assert.equal(verts(near), 2160, 'spawn: far tier is 720 tris (detail 5)');
+  assert.equal(lvls(far), '100');
+
+  // First proximity update builds close+mid for the near asteroid...
+  near.update(0.016, camera);
+  assert.equal(lvls(near), '0,30,100', 'near: all 3 tiers after update');
+  // detail 12 close = 20×13²×3 = 10140 verts; mid 8 = 4860; far 5 = 2160.
+  assert.equal(verts(near), 10140 + 4860 + 2160, 'near: close tier is 3380 tris (detail 12)');
+
+  // ...but the far asteroid stays far-only (no wasted build).
+  far.update(0.016, camera);
+  assert.equal(lvls(far), '100', 'far: still far tier only');
+  assert.equal(verts(far), 2160);
+
+  // Mid distance (60u): mid tier builds, close tier does NOT.
+  const mid = mk(60);
+  mid.update(0.016, camera);
+  assert.equal(lvls(mid), '30,100', 'mid: far+mid, no close');
+  assert.equal(verts(mid), 4860 + 2160);
+
+  // Idempotent: further updates don't rebuild.
+  const before = verts(near);
+  near.update(0.016, camera);
+  assert.equal(verts(near), before, 'lazy build is idempotent');
+
+  near.dispose(); far.dispose(); mid.dispose();
+});
+
+test('Asteroid: ensureAllLodLevels() builds every tier immediately (v0.72.4)', () => {
+  const scene = new THREE.Scene();
+  const entity = createAsteroidFromSpec({ spec: {
+    id: 'eall', position: { x: 0, y: 0, z: 0 }, radius: 8, size: 0,
+    axis: { x: 0, y: 1, z: 0 }, spin: 0.5, velocity: { x: 0, y: 0, z: 0 },
+    seed: 7, shape: 'rubble_pile',
+  }, scene });
+  assert.equal(entity.mesh.userData.lod.levels.length, 1, 'lazy: 1 tier before ensureAll');
+  entity.ensureAllLodLevels();
+  assert.equal(entity.mesh.userData.lod.levels.length, 3, 'ensureAll: all 3 tiers');
+  entity.ensureAllLodLevels(); // idempotent, no throw
+  entity.dispose();
+});
+
 test('Asteroid: supports LOD and builds all 5 shape types', () => {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera();
@@ -136,6 +212,10 @@ test('Asteroid: supports LOD and builds all 5 shape types', () => {
 
     const mesh = asteroid.mesh;
     assert.ok(mesh instanceof THREE.Group);
+
+    // v0.72.4 — LOD tiers are lazy (only far exists at spawn). Build
+    // them all so the 3-level contract below is really exercised.
+    asteroid.ensureAllLodLevels();
 
     // Check LOD is attached
     const lod = mesh.userData.lod;
@@ -157,6 +237,9 @@ test('Asteroid: Rubble Pile (shapeType=2) LOD levels contain sub-groups with 3-6
   const asteroid = createAsteroidFromSpec({ spec, scene });
 
   const lod = asteroid.mesh.userData.lod;
+  // v0.72.4 — lazy LOD: build all tiers so the lobe-count comparison
+  // across levels is meaningful (otherwise only the far level exists).
+  asteroid.ensureAllLodLevels();
   const lobeCounts = [];
   for (let levelIdx = 0; levelIdx < 3; levelIdx++) {
     const levelObj = lod.levels[levelIdx].object;
@@ -290,6 +373,9 @@ test('Asteroid: body meshes have castShadow + receiveShadow enabled (sun lightin
   const asteroid = createAsteroidFromSpec({ spec, scene });
 
   // Walk the LOD levels, every Mesh should cast+receive shadows.
+  // v0.72.4 — lazy LOD: build all tiers first so the shadow flags are
+  // verified on close + mid + far, not just the eager far mesh.
+  asteroid.ensureAllLodLevels();
   const lod = asteroid.mesh.userData.lod;
   for (const level of lod.levels) {
     const obj = level.object;
@@ -387,6 +473,9 @@ test('Asteroid: boulder layer actually displaces geometry outward (v0.71.6 integ
   const scene = new THREE.Scene();
   const spec = { ...createMockSpec(4), shape: 'craggy_rock', radius: 8 };
   const asteroid = createAsteroidFromSpec({ spec, scene });
+  // v0.72.4 — lazy LOD: build all tiers; levels[0] is then the CLOSE
+  // tier (detail 12, the densest boulder sampling).
+  asteroid.ensureAllLodLevels();
   const high = asteroid.mesh.userData.lod.levels[0].object;
 
   let maxR = 0;
@@ -408,14 +497,18 @@ test('Asteroid: boulder layer actually displaces geometry outward (v0.71.6 integ
 test('Asteroid: craters pull the surface below the base radius (v0.71.6 integration)', () => {
   // Companion check: the cratered potato (shapeType 1, 'crater' noise)
   // must have vertices BELOW the base radius — real impact bowls are
-  // depressions, not just flat stains. The capsule body has only 461
-  // vertices at detail 4, so randomly-placed craters don't guarantee a
-  // vertex at the deepest bowl point; minR ≈ 0.77× radius in practice.
-  // Threshold 0.85× is robust against that sampling while still
-  // proving the carve pulls the surface in.
+  // depressions, not just flat stains. The close-tier capsule (v0.72.5
+  // segments 16/32/24 ≈ 1058 unique verts) samples the crater field
+  // densely, so the deepest bowl point is almost always captured;
+  // minR ≈ 0.77× radius in practice. Threshold 0.85× is robust
+  // against that sampling while still proving the carve pulls the
+  // surface in.
   const scene = new THREE.Scene();
   const spec = { ...createMockSpec(1), shape: 'cratered_potato', radius: 8 };
   const asteroid = createAsteroidFromSpec({ spec, scene });
+  // v0.72.4 — lazy LOD: build all tiers; levels[0] is then the CLOSE
+  // tier (the densest capsule sampling of the crater field).
+  asteroid.ensureAllLodLevels();
   const high = asteroid.mesh.userData.lod.levels[0].object;
 
   let minR = Infinity;

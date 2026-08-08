@@ -160,6 +160,10 @@ test('Watertight: every asteroid shape × LOD level is watertight (the v0.72.3 f
       shape,
     };
     const entity = createAsteroidFromSpec({ spec, scene });
+    // v0.72.4 — LOD levels are now built LAZILY (only the far tier
+    // exists at spawn). Build every tier so this test really checks
+    // close + mid + far, not just the cheap far mesh.
+    entity.ensureAllLodLevels();
     entity.mesh.traverse((o) => {
       if (o.isMesh && o.geometry) {
         assertWatertight(o.geometry, `${shape} LOD`);
@@ -185,6 +189,8 @@ test('Watertight: rubble pile lobes (per-lobe icospheres) are watertight', () =>
     shape: 'rubble_pile',
   };
   const entity = createAsteroidFromSpec({ spec, scene });
+  // v0.72.4 — lazy LOD: build all tiers so the lobe check covers every level.
+  entity.ensureAllLodLevels();
   assertAllWatertight(entity.mesh, 'rubble pile');
   entity.dispose();
 });

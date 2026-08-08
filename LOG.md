@@ -1,3 +1,45 @@
+## v0.72.4/v0.72.5 -- Lazy-LOD density bump: close detail 4->12 / mid 3->8 / far 2->5
+
+**User request:** "in der nähe fehlt uns in der lod stufe zu viel geometrie. muss viel detaillierter sein" (the near LOD stage lacks geometry; must be much more detailed) + "nah lod ist schon besser aber kann nochmal mindestens doppelt so detailliert sein" (v0.72.5: at least 2× again).
+
+### What shipped
+
+- **`src/entities/asteroid.js` — LOD density ladder raised (twice).** Old: close detail 4 / mid 3 / far 2 (500/320/180 tris on the IcosahedronGeometry shapes) — read as smooth blobs up close. v0.72.4: **close detail 8 (1620 tris), mid detail 6 (980), far detail 4 (500)**. v0.72.5 ("mindestens doppelt"): **close detail 12 (3380 tris = 2.1× the v0.72.4 close, 6.8× the v0.72.3 close), mid detail 8 (1620), far detail 5 (720)**. Capsule segments lifted to match via `CAPSULE_SEGMENTS_BY_DETAIL` (v0.72.5 close profile 16/32/24 ≈ 2.2× the v0.72.4 close).
+- **`createLazyLod` — lazy tier build (the enabler).** Building all three tiers eagerly at the new densities would have exploded the streaming bubble's first-frame cost (~15ms/asteroid → multi-second spike). Now only the FAR tier is built at spawn; the MID tier builds on first proximity (≤100u) and CLOSE on ≤30u, from `update(dt, camera)` via `ensureLodForDistance` on `group.userData` (runs BEFORE `lod.update` so the level is present when LOD picks it). Idempotent per tier; deterministic per (seed, ox, oy, oz) since each tier re-derives its geometry from the same inputs. `ensureAllLodLevels()` exposed on the entity for the showcase + watertight tests.
+- **Measured:** 300-asteroid spawn build **1.83s → 0.92s** (3.07ms/asteroid; sceneVerts at spawn 1.35M → 665K — only far tiers; v0.72.5 far detail 5 ≈ 637K eager verts, on par). Near-approach upgrade: close tier detail 12 = **10140 verts / 3380 tris** (was 1500 at v0.72.3, 4860 at v0.72.4). The close tier is nearly free at these densities because it only builds for asteroids within 30u. Verified in browser: 295 asteroids, zero console errors, no NaN. Showcase asteroids call `ensureAllLodLevels()` for frame-1 full detail.
+- **Tests:** 2 new lazy-LOD contract tests (far-only at spawn → close+mid on proximity; idempotent; `ensureAllLodLevels` builds all 3) + updated watertight/asteroid/shadow tests to build all tiers before inspecting `lod.levels` (v0.72.5: pinned vert counts moved to detail 12/8/5 = 10140/4860/2160). **704/704 green, build clean.**
+
+## v0.73.0 -- Screen-Space Ambient Occlusion (GTAO postprocessing) + A/B measurement pipeline
+
+**User request:** implement SSAO as the next engine-level realism lever: three/examples postprocessing (EffectComposer + SSAOPass) gated behind a toggle, wired into the showcase + game render paths, A/B the crater/rock contrast against the no-SSAO baseline with the pixel-contrast measurement script.
+
+### What shipped
+
+- **`src/systems/ssao.js`** (NEW) — `createSsaoPostprocess({ renderer, scene, camera, buildComposer, enabled })` → `{ render, setEnabled, isEnabled, setSize, dispose }`. Chain: **RenderPass → GTAOPass (half-res) → OutputPass**. OutputPass is REQUIRED because three r152+ skips tone mapping when rendering into a composer render target — without it the whole frame would wash out. Disabled → `render()` falls back to plain `renderer.render(scene, camera)` (pixel-identical to pre-SSAO; the renderer applies ACES when the target is null). `buildComposer` is injectable (DI, same pattern as `shipFactory` in ai.js) so the wrapper is testable in Node without WebGL.
+- **`GameGTAOPass` subclass** fixes two stock-pass issues: (1) **FX exclusion** — the stock GBuffer visibility walk only drops Points/Lines, so transparent FX (laser beam, engine glow, powerup ring/beam, particle sprites) would render into the depth+normal buffer with the MeshNormalMaterial override and stamp fake AO halos onto the scene. `shouldExcludeFromAoGBuffer(obj)` (pure, unit-tested) drops sprites, transparent materials, and the existing `ssaoExclude`/`decorativeFx`/`isEngineGlow` tags. (2) **Shadow-pass skip** — the GBuffer re-render would re-render the whole shadow map; `render()` toggles `renderer.shadowMap.enabled` off for the pass duration (the main RenderPass still renders shadows).
+- **`src/scene/ssao-constants.js`** (NEW) — SSOT tunables: `SSAO_ENABLED_DEFAULT` (false — see perf below), `SSAO_RADIUS` 3.5, `SSAO_THICKNESS` 3.5, `SSAO_DISTANCE_EXPONENT` 1.5, `SSAO_DISTANCE_FALL_OFF` 1.0, `SSAO_SCALE` 1.3, `SSAO_SAMPLES` 16, `SSAO_RESOLUTION_DIVIDER` 2 (half-res AO — standard perf tradeoff, denoise hides undersampling), `SSAO_BLEND_INTENSITY` 1.0, `SSAO_DENOISE` (Poisson: lumaPhi 10 / depthPhi 2 / normalPhi 3 / radius 8 / rings 2 / samples 16). Barrel-exported via `src/scene/index.js`.
+- **Wiring** (`src/main.js`): both render sites (showcase short-circuit + game) now call `ssao.render()`; `window.SSAO` getter/setter (live toggle, same devtools pattern as NEBULA_DEBUG/AI_FLIGHT_DEBUG); `#debug-toggle-ssao` HUD button in the left debug column (index.html) with the same label/`--on` class pattern as CAPTURE/AI FLIGHT.
+- **Showcase pause hook** (`src/systems/showcase.js`): `setPaused(true)` freezes the turntable spin so the A/B loop can capture the SAME object frame with SSAO off vs on — pixel-identical except the AO term.
+- **A/B pipeline**: `scripts/ssao-ab.mjs` (Playwright: `?showcase` → setIndex → pause → SSAO off/on screenshots) + `scripts/measure-ssao-ab.py` (PIL micro-contrast: RMS of neighbor luminance diffs + mean luminance + AO coverage on the central object crop).
+
+### A/B measured result (cratered potato, texture set 1)
+
+| metric | OFF | ON | Δ |
+|---|---|---|---|
+| micro-contrast | 10.12 | 10.60 | **+4.7%** (contact shadows raise local luminance variation) |
+| mean luminance | 6.35 | 6.35 | −0.1% (occluded crevices darken) |
+| AO coverage | — | 0.1–0.3% | the pass is biting, not a no-op |
+
+Verified AO is only on lit geometry: 2434 strong-darkened pixels on the asteroid mask, **0** on the pure-black background; mean on-asteroid delta −0.09 (net darkening). The ~19 scattered "bright-flipped" pixels are all STARFIELD points — the composer OutputPass re-applies ACES to `toneMapped:false` materials (known, documented tradeoff of any composer chain; the stars shift slightly, the asteroid itself behaves correctly).
+
+### Perf + default decision
+
+GTAO's GBuffer pass re-renders the whole scene once with a normal-material override — a second full scene draw per frame. Measured headless (software rasterizer, 300-asteroid demo): **20.3 FPS → 4.7 FPS** with SSAO on (real GPUs are far faster, but the doubling of rasterization work is real). **`SSAO_ENABLED_DEFAULT = false`**: SSAO ships as the A/B toggle (HUD button / `window.SSAO = true`), the game boots on the fast path. Flip the constant to ship it on by default once target hardware is known.
+
+### Validation
+
+702/702 tests (+14: 13 ssao + 1 showcase pause), vite build clean, game mode with SSAO on: 295 asteroids rendered, zero console errors.
+
 ## v0.72.3 -- View toggle button + orbit camera + overlay order + watertight geometry
 
 **User request:** (1) a visible button to toggle demo/game ↔ object view, (2) the object view needs camera rotation, (3) the overlays overlap — bring order, (4) some asteroids have totally open triangles — every object must be watertight.

@@ -520,11 +520,25 @@ function buildElongatedPotatoGeometry(radius, detail, ox, oy, oz) {
   return geom;
 }
 
+// v0.72.5 — Capsule segment ladder, indexed by the LOD detail level
+// (mirrors the LOD_DETAIL ladder above). The capsule's "segments"
+// count is not a single integer like IcosahedronGeometry's `detail`,
+// so each tier maps to its own (cap, radial, height) profile. The
+// close profile (16/32/24) gives the cratered potato ~2.2× the
+// capsule triangles of the previous close profile (12/24/16) — real
+// bowl depth + rim relief up close, matching the icosphere shapes'
+// detail-12 close tier.
+const CAPSULE_SEGMENTS_BY_DETAIL = Object.freeze({
+  12: { cap: 16, radial: 32, height: 24 },
+  8: { cap: 12, radial: 24, height: 16 },
+  5: { cap: 6, radial: 12, height: 8 },
+});
+
 function buildCrateredPotatoGeometry(radius, detail, ox, oy, oz) {
-  // v0.70.0 — denser segments to match the new detail=4 close-up level.
-  const capSegments = detail === 4 ? 8 : (detail === 3 ? 6 : (detail === 2 ? 4 : 2));
-  const radialSegments = detail === 4 ? 16 : (detail === 3 ? 12 : (detail === 2 ? 8 : 4));
-  const heightSegments = detail === 4 ? 12 : (detail === 3 ? 8 : (detail === 2 ? 4 : 2));
+  const seg = CAPSULE_SEGMENTS_BY_DETAIL[detail] || CAPSULE_SEGMENTS_BY_DETAIL[5];
+  const capSegments = seg.cap;
+  const radialSegments = seg.radial;
+  const heightSegments = seg.height;
   const length = radius * 1.5;
   const geom = new Capsule(radius, length, capSegments, radialSegments, heightSegments);
   // v0.71.6 — stronger displacement (0.22 → 0.28) + 5 craters + 7
@@ -695,6 +709,54 @@ const PLAY_PLANE_Y = 0;
 const LOD_CLOSE_DIST = 0;
 const LOD_MID_DIST = 30;
 const LOD_FAR_DIST = 100;
+
+// v0.72.4 — LOD density ladder. The user reported "in der nähe fehlt
+// uns in der lod stufe zu viel geometrie. muss viel detaillierter
+// sein" (the near LOD stage lacks geometry; must be much more
+// detailed). The old ladder (close detail 4 / mid 3 / far 2 =
+// 500/320/180 tris on the IcosahedronGeometry shapes) read as smooth
+// blobs up close — the crater/boulder/micro-noise layers had too few
+// vertices to express themselves. New ladder:
+//
+//   close  detail 8   = 20×9²  = 1620 tris (3.2× the old close level)
+//   mid    detail 6   = 20×7²  =  980 tris (3.1×)
+//   far    detail 4   = 20×5²  =  500 tris (2.8×)
+//
+// v0.72.5 — second near-LOD doubling pass ("nah lod ... nochmal
+// mindestens doppelt so detailliert"). The lazy build strategy made
+// the close tier nearly free (only asteroids within 30u pay for it),
+// so the ceiling moved up aggressively:
+//
+//   close  detail 12  = 20×13² = 3380 tris (2.1× the v0.72.4 close,
+//                                             6.8× the v0.72.3 close)
+//   mid    detail 8   = 20×9²  = 1620 tris (1.7×)
+//   far    detail 5   = 20×6²  =  720 tris (1.4×)
+//
+// Cost check: the FAR tier is still the only eager build at spawn
+// (720 tris × ~295 asteroids ≈ 637K verts, on par with v0.72.4's
+// 645K). MID (1620 tris) builds on first approach within 100u;
+// CLOSE (3380 tris) within 30u. The detail-12 close tier carries
+// the crater/boulder/micro-noise relief with 2× the surface
+// resolution — the crater bowls and rock profiles finally read as
+// real geometry instead of faceted approximations.
+//
+// BUILD STRATEGY (critical for the streaming bubble): the close/mid
+// levels are built LAZILY, on first proximity, not eagerly at spawn.
+// Building all three levels at spawn cost 6.1ms/asteroid (1.83s for
+// the 300-asteroid bubble); at the new densities that would be ~15ms
+// per asteroid and the first-frame spike would explode. Instead only
+// the FAR level is built eagerly (it is the cheapest and the one most
+// asteroids show at spawn distance), and the MID/CLOSE levels are
+// constructed the first time the camera comes within range — by then
+// the asteroid is on screen, so the cost is spread over the approach
+// and only paid for asteroids the player actually gets near.
+//
+// The LOD object is always present with ONE eager tier (far) + two
+// lazy tiers (mid/close); tests that need every tier present call
+// `ensureAllLodLevels()` before inspecting `lod.levels`.
+const LOD_CLOSE_DETAIL = 12;
+const LOD_MID_DETAIL = 8;
+const LOD_FAR_DETAIL = 5;
 const _scratchAxis = new THREE.Vector3();
 
 // Tag every body mesh so the scene renderer can cast shadows. v0.68.0
@@ -741,6 +803,39 @@ function buildAsteroidMesh(spec) {
 
   let lod = null;
 
+  // v0.72.4 — LAZY LOD builder. `buildLevel(detail)` returns the object
+  // for one LOD tier; only the FAR tier is built eagerly at spawn (its
+  // geometry is the cheapest AND the most asteroids show it at spawn
+  // distance, so the 300-asteroid streaming bubble keeps its ~1.8s
+  // build instead of exploding to ~4-5s at the new densities). The
+  // MID and CLOSE tiers are built on first proximity via
+  // `ensureForDistance` — called from the entity's `update()` before
+  // LOD picks a level — so a freshly-streamed asteroid that is far
+  // away never pays for geometry it cannot show. `ensureAll` exists
+  // for the showcase (full detail on frame 1) + the watertight tests
+  // (which want every LOD level present).
+  //
+  // three.js LOD sorts levels by distance internally (`addLevel`),
+  // so adding tiers out of order is safe.
+  const createLazyLod = (buildLevel) => {
+    const lod = new THREE.LOD();
+    let midObj = null;
+    let closeObj = null;
+    lod.addLevel(buildLevel(LOD_FAR_DETAIL), LOD_FAR_DIST);
+    const ensureForDistance = (dist) => {
+      if (dist <= LOD_FAR_DIST && !midObj) {
+        midObj = buildLevel(LOD_MID_DETAIL);
+        lod.addLevel(midObj, LOD_MID_DIST);
+      }
+      if (dist <= LOD_MID_DIST && !closeObj) {
+        closeObj = buildLevel(LOD_CLOSE_DETAIL);
+        lod.addLevel(closeObj, LOD_CLOSE_DIST);
+      }
+    };
+    const ensureAll = () => ensureForDistance(0);
+    return { lod, ensureForDistance, ensureAll };
+  };
+
   if (shapeType === 2) {
     // v0.71.5 — Rubble Pile (Itokawa-style): 3–6 displaced lobes in a
     // loose contact pile. Hayabusa photographed Itokawa as two big
@@ -750,7 +845,6 @@ function buildAsteroidMesh(spec) {
     // layout is deterministic from a seeded rng (spec.seed), so every
     // LOD level rebuilds the SAME pile — only the mesh density
     // changes.
-    lod = new THREE.LOD();
 
     const buildLobes = (detail) => {
       const g = new THREE.Group();
@@ -788,19 +882,19 @@ function buildAsteroidMesh(spec) {
       return g;
     };
 
-    // v0.70.0 — LOD detail 4/3/2 (same rationale as the single-mesh
-    // path below). The pile layout is deterministic (seeded), so all
-    // three levels show the same arrangement.
-    lod.addLevel(buildLobes(4), LOD_CLOSE_DIST);
-    lod.addLevel(buildLobes(3), LOD_MID_DIST);
-    lod.addLevel(buildLobes(2), LOD_FAR_DIST);
-
+    // v0.72.4 — lazy LOD: lobes built via createLazyLod, so only the
+    // far tier (detail 5) is built at spawn. The pile layout stays
+    // deterministic across tiers (seeded), so all three levels show
+    // the same arrangement regardless of when they are built.
+    const lazy = createLazyLod((detail) => buildLobes(detail));
+    lod = lazy.lod;
     group.add(lod);
+    group.userData.ensureLodForDistance = lazy.ensureForDistance;
+    group.userData.ensureAllLodLevels = lazy.ensureAll;
   } else {
     // Single-mesh LOD shapes: crystalline, cratered potato, torus, or
     // craggy rock. The geometry builder is selected once per detail
     // level so each LOD level reads its own vertex count.
-    lod = new THREE.LOD();
 
     const getGeom = (detail) => {
       if (shapeType === 0) return buildSpinningTopGeometry(radius, detail, ox, oy, oz);
@@ -812,28 +906,20 @@ function buildAsteroidMesh(spec) {
       return buildCraggyRockGeometry(radius, detail, ox, oy, oz);
     };
 
-    // v0.70.0 — LOD detail 0..2 -> 2..4 (modern-game dense meshes to do
-    // real geometry displacement mapping). detail=4 gives IcosahedronGeometry
-    // 2562 vertices (was 162 at detail=2) — 16× more vertices for the
-    // close-up level, making the silhouette + the new high-frequency
-    // micro-displacement layer visible. Performance budget: at ~150
-    // asteroids in the streaming bubble, only those within LOD_MID_DIST
-    // (30u) of the camera render detail=4 — typically 30-50 — so total
-    // vertex count stays well under WebGL2 limits. Shadow-map pass
-    // doubles the cost but is still negligible on modern GPUs.
-    const meshHigh = new THREE.Mesh(getGeom(4), material);
-    tagForShadows(meshHigh);
-    lod.addLevel(meshHigh, LOD_CLOSE_DIST);
-
-    const meshMid = new THREE.Mesh(getGeom(3), material);
-    tagForShadows(meshMid);
-    lod.addLevel(meshMid, LOD_MID_DIST);
-
-    const meshLow = new THREE.Mesh(getGeom(2), material);
-    tagForShadows(meshLow);
-    lod.addLevel(meshLow, LOD_FAR_DIST);
-
+    // v0.72.4 — lazy LOD: only the far tier (detail 5) is built at
+    // spawn; mid (detail 8) + close (detail 12) are constructed on
+    // first proximity. The close tier's 3380-tris mesh carries the
+    // crater / boulder / micro-noise relief the user asked for up
+    // close (v0.72.5: doubled to detail 12).
+    const lazy = createLazyLod((detail) => {
+      const meshLevel = new THREE.Mesh(getGeom(detail), material);
+      tagForShadows(meshLevel);
+      return meshLevel;
+    });
+    lod = lazy.lod;
     group.add(lod);
+    group.userData.ensureLodForDistance = lazy.ensureForDistance;
+    group.userData.ensureAllLodLevels = lazy.ensureAll;
   }
 
   // v0.71.6 — debug ground footprint REMOVED. The v0.5x-era debug
@@ -884,7 +970,16 @@ export function createAsteroidFromSpec({ spec, scene } = {}) {
     // crossfade value — both levels render during the transition
     // window so the change is invisible.
     const lod = mesh.userData.lod;
-    if (lod && camera) lod.update(camera, 0.5);
+    if (lod && camera) {
+      // v0.72.4 — lazy LOD: build the closer tiers as the camera
+      // approaches (the far tier was built at spawn). Must run BEFORE
+      // lod.update so the level is present when LOD picks it.
+      const dist = camera.position.distanceTo(mesh.position);
+      if (typeof mesh.userData.ensureLodForDistance === 'function') {
+        mesh.userData.ensureLodForDistance(dist);
+      }
+      lod.update(camera, 0.5);
+    }
   }
 
   function split() {
@@ -940,6 +1035,13 @@ export function createAsteroidFromSpec({ spec, scene } = {}) {
     update,
     split,
     dispose,
+    // v0.72.4 — build every LOD tier now (showcase frame-1 full
+    // detail + watertight tests). No-op once all tiers exist.
+    ensureAllLodLevels: () => {
+      if (typeof mesh.userData.ensureAllLodLevels === 'function') {
+        mesh.userData.ensureAllLodLevels();
+      }
+    },
     getRadius() { return spec.radius; },
     getSize() { return spec.size; },
     getPosition() { return mesh.position; },
